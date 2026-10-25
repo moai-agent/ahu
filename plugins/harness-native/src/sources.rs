@@ -9,6 +9,15 @@ struct Params {
     project: PathBuf,
     home: PathBuf,
     import: Option<Import>,
+    #[serde(default)]
+    settings: Settings,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Settings {
+    #[serde(default)]
+    environment_names: Vec<String>,
+    view: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +29,69 @@ pub(crate) fn call(harness: &str, params: &Value) -> Result<Value> {
     let p: Params = crate::decode(params)?;
     crate::directory(&p.project)?;
     crate::directory(&p.home)?;
+    if !crate::valid_environment_names(&p.settings.environment_names) {
+        return Err(Error::invalid());
+    }
+    let overrides = p
+        .settings
+        .environment_names
+        .iter()
+        .any(|name| crate::ambient::auth_override(harness, name));
+    match p.settings.view.as_deref() {
+        Some("hooks") => {
+            let locations = crate::hook_inventory::Locations {
+                home: Some(p.home.clone()),
+                managed: Some(PathBuf::from(if cfg!(target_os = "macos") {
+                    "/Library/Application Support/ClaudeCode/managed-settings.json"
+                } else {
+                    "/etc/claude-code/managed-settings.json"
+                })),
+            };
+            let mut inventory =
+                crate::hook_inventory::collect_for(&p.project, harness, &locations)?;
+            if overrides {
+                inventory.unscanned_harness = Some(harness.into());
+                inventory.unreadable.push("native environment changes configuration scope; default-scope inventory is incomplete".into());
+            }
+            for facts in &mut inventory.settings {
+                facts.approvals_widened = Some(facts.widens_approvals());
+            }
+            for server in &mut inventory.mcp_servers {
+                server.command = format!(
+                    "<native command sha256:{}>",
+                    crate::util::digest_bytes(server.command.as_bytes())
+                );
+            }
+            return Ok(serde_json::to_value(inventory)?);
+        }
+        Some("private_fingerprints") => {
+            if overrides {
+                return Err(Error::invalid());
+            }
+            let paths: &[&str] = match harness {
+                "antigravity" => &[".gemini/config/mcp_config.json"],
+                "codex" => &[".codex/config.toml"],
+                "claude-code" => &[".claude/settings.json"],
+                "kiro" => &[".kiro/settings/mcp.json"],
+                "opencode" => &[".config/opencode/opencode.json"],
+                _ => return Err(Error::invalid()),
+            };
+            let mut fingerprints = serde_json::Map::new();
+            for (index, relative) in paths.iter().enumerate() {
+                let path = p.home.join(relative);
+                if let Some(bytes) = crate::files::read(&path)? {
+                    fingerprints.insert(
+                        format!("native:{harness}:{index}"),
+                        json!(crate::util::digest_bytes(&bytes)),
+                    );
+                }
+            }
+            return Ok(json!({"fingerprints":fingerprints}));
+        }
+        None | Some("inventory") => (),
+        _ => return Err(Error::invalid()),
+    }
+
     let (context, agents, skills, configs): (&[&str], &[&str], &[&str], &[&str]) = match harness {
         "claude-code" => (
             &["CLAUDE.md", ".claude/CLAUDE.md"],

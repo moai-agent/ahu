@@ -116,3 +116,27 @@ fn push_escape(out: &mut String, ch: char) {
         out.push_str(&format!("\\u{{{code:04x}}}"));
     }
 }
+
+pub(crate) fn resolve_existing_within(
+    root: &std::path::Path,
+    relative: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    let path = std::path::Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(Error::invalid());
+    }
+    let candidate = root
+        .canonicalize()
+        .map_err(|_| Error::invalid())?
+        .join(path);
+    crate::files::check_components(&candidate)?;
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(_) => Ok(Some(root.join(path))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Error::invalid()),
+    }
+}

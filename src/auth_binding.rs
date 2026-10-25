@@ -4,7 +4,6 @@
 //! stores credentials. A provider without a verifiable principal is refused.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -52,255 +51,196 @@ struct StoredBinding {
     profile: Option<String>,
 }
 
+/// Provider identity observation. Raw principals remain inside the plugin.
 #[derive(Debug, Clone)]
 pub struct Identity {
     pub harness: String,
     pub identity_kind: String,
-    pub principal: String,
-    pub organization: Option<String>,
-    pub workspace: Option<String>,
+    fingerprint: String,
 }
-
 impl Identity {
     fn fingerprint(&self) -> Result<String> {
-        let bytes = serde_json::to_vec(&json!({
-            "harness": self.harness,
-            "identity_kind": self.identity_kind,
-            "principal": self.principal,
-            "organization": self.organization,
-            "workspace": self.workspace,
-        }))?;
-        Ok(digest_bytes(&bytes))
+        if !valid_fingerprint(&self.fingerprint) {
+            return Err(invalid_observation());
+        }
+        Ok(self.fingerprint.clone())
     }
-
     pub fn display(&self) -> String {
-        let mut parts = vec![format!("{} ({})", self.harness, self.identity_kind)];
-        if self.harness == "ollama" {
-            parts.push(format!("account {}", self.principal));
-            return parts.join("; ");
-        }
-        if let Some(org) = &self.organization {
-            parts.push(format!("organization {org}"));
-        }
-        if let Some(workspace) = &self.workspace {
-            parts.push(format!("workspace {workspace}"));
-        }
-        parts.push(format!("account {}", self.principal));
-        parts.join("; ")
+        format!(
+            "{} ({}; account fingerprint verified)",
+            crate::util::display_safe(&self.harness),
+            crate::util::display_safe(&self.identity_kind)
+        )
     }
 }
+fn valid_fingerprint(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+fn invalid_observation() -> Error {
+    Error::new("native identity or capacity observation is unavailable or invalid")
+}
 
-/// Return a privacy-safe view of current provider capacity signals for the
-/// active project auth profile. Signal types vary by provider: Codex exposes
-/// rate-limit windows (time-scoped percentages); subscription-based providers
-/// with no per-call metering stay unknown. Identity-bound signals only; never
-/// estimated from usage history or untrusted sources.
 pub fn budget(repo: &Repo) -> Result<Value> {
-    budget_with_probe(repo, |cwd| {
-        let executable = crate::selection::resolve_executable("codex")
-            .ok_or_else(|| Error::new("Codex is not available on PATH"))?;
-        let (account, limits) =
-            crate::harness::codex_metadata::read_budget(&PathBuf::from(executable), cwd)?;
-        Ok((codex_identity(&account)?, limits))
+    let descriptors = crate::harness_runtime::discover(repo)?;
+    let harnesses = descriptors.into_iter().map(|d| d.id).collect::<Vec<_>>();
+    budget_with_probe(repo, &harnesses, |harness| {
+        let runtime = crate::harness_runtime::load(repo, harness)?;
+        let mut params = crate::harness_runtime::native_params(repo, runtime.descriptor())?;
+        params["environment_names"] = json!(
+            std::env::vars_os()
+                .filter_map(|(name, _)| name.into_string().ok())
+                .collect::<Vec<_>>()
+        );
+        params["requested_identity"] = json!(harness);
+        runtime.call("budget", params)
     })
 }
-
 fn budget_with_probe(
     repo: &Repo,
-    mut probe_codex: impl FnMut(&Path) -> Result<(Identity, Value)>,
+    harnesses: &[String],
+    mut probe_capacity: impl FnMut(&str) -> Result<Value>,
 ) -> Result<Value> {
     let path = binding_path_without_creation(repo)?;
     crate::state::confine_file(&path)?;
     let bindings = match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BindingFile::default(),
-        Err(error) => {
-            return Err(Error::new(format!(
-                "cannot inspect local auth profile: {error}"
-            )));
-        }
-        // Capacity inspection must not persist even a legacy migration.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BindingFile::default(),
+        Err(_) => return Err(invalid_observation()),
         Ok(_) => load_with_migration(repo, &path, false)?,
     };
-    let active = bindings.active_profile.clone();
-    let profile = bindings.profiles.get(&active);
-    let observed_at = std::time::SystemTime::now()
+    let profile = bindings.profiles.get(&bindings.active_profile);
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|_| invalid_observation())?
         .as_secs();
-    let project_identity = repo.identity();
     let mut providers = Vec::new();
-    for harness in ["codex", "claude-code", "antigravity", "kiro", "ollama"] {
-        let Some(binding) = profile.and_then(|items| items.get(harness)) else {
-            providers.push(provider_signal(
-                harness,
-                if profile.is_some() {
-                    "not_bound"
-                } else {
-                    "not_configured"
-                },
-                ProviderCapacity::Unknown,
-                None,
-                &project_identity,
-                observed_at,
-            ));
-            continue;
-        };
-        if harness != "codex" {
-            providers.push(provider_signal(
-                harness,
-                "unsupported",
-                ProviderCapacity::Unknown,
-                None,
-                &project_identity,
-                observed_at,
-            ));
-            continue;
-        }
-        let (identity, response) = probe_codex(&repo.root)?;
-        if identity.fingerprint()? != binding.fingerprint {
-            return Err(Error::new(
-                "current Codex account does not match the active project auth profile; signal omitted",
-            ));
-        }
-        // Check reset freshness after the potentially slow provider probe.
-        let observed_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let rate_limits = response.get("rateLimits").unwrap_or(&response);
-        let mut windows = Vec::new();
-        let mut incomplete = false;
-        for (name, key) in [("primary", "primary"), ("secondary", "secondary")] {
-            if let Some(raw) = rate_limits.get(key).filter(|v| !v.is_null()) {
-                let Some(values) = normalize_rate_window(raw) else {
-                    incomplete = true;
-                    continue;
-                };
-                let window = normalize_window(name, values);
-                if window["resets_at_unix"]
-                    .as_u64()
-                    .is_some_and(|reset| reset <= observed_at)
-                {
-                    incomplete = true;
-                    continue;
+    let mut selected = harnesses
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(profile) = profile {
+        selected.extend(profile.keys().cloned());
+    }
+    for harness in &selected {
+        let binding = profile.and_then(|p| p.get(harness));
+        let mut signal = json!({"harness":harness,"status":if profile.is_none(){"not_configured"}else{"not_bound"},"signal_type":"unknown","source":"none","scope":"shared_account","project_identity":repo.identity(),"observed_at_unix":now,"freshness":"unavailable","data":null,"windows":[]});
+        if let Some(binding) = binding {
+            let value = probe_capacity(harness)?;
+            let observed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| invalid_observation())?
+                .as_secs();
+            let observation = validate_capacity(value, observed)?;
+            signal["observed_at_unix"] = json!(observed);
+            if observation
+                .binding_harness
+                .as_ref()
+                .is_some_and(|key| key != harness)
+            {
+                return Err(invalid_observation());
+            }
+            if observation.status == "available" || observation.status == "unknown" {
+                if observation.fingerprint.as_deref() != Some(&binding.fingerprint) {
+                    return Err(Error::new(
+                        "current native account does not match the active auth profile; signal omitted",
+                    ));
                 }
-                windows.push(window);
+            }
+            signal["status"] = json!(observation.status);
+            signal["source"] = json!(observation.source.unwrap_or_else(|| "none".into()));
+            if observation.status == "available" {
+                signal["signal_type"] = json!("rate_windows");
+                signal["freshness"] = json!("queried_now; do_not_reuse_for_admission");
+                signal["windows"] = json!(observation.windows);
+                signal["data"] =
+                    json!({"windows":signal["windows"],"semantics":"time_scoped_percentage"});
             }
         }
-        // A valid high-capacity window cannot hide an unknown other window.
-        let capacity = if incomplete || windows.is_empty() {
-            ProviderCapacity::Unknown
-        } else {
-            ProviderCapacity::RateWindows(windows)
-        };
-        let status = if matches!(capacity, ProviderCapacity::Unknown) {
-            "unknown"
-        } else {
-            "available"
-        };
-        let source = Some("codex_app_server");
-        providers.push(provider_signal(
-            harness,
-            status,
-            capacity,
-            source,
-            &project_identity,
-            observed_at,
-        ));
+        providers.push(signal);
     }
-
-    // Signal metadata is additive to the existing version-1 contract.
-    Ok(json!({
-        "schema_version": 1,
-        "capacity_schema_version": 1,
-        "signal": "provider_rate_limit_windows",
-        "token_counts": "not_provided",
-        "shared_account_capacity": true,
-        "profile": if profile.is_some() {Some(active)} else {None::<String>},
-        "project": project_identity,
-        "observed_at_unix": observed_at,
-        "providers": providers
-    }))
+    Ok(
+        json!({"schema_version":1,"capacity_schema_version":1,"signal":"provider_rate_limit_windows","token_counts":"not_provided","shared_account_capacity":true,"profile":profile.map(|_|bindings.active_profile.clone()),"project":repo.identity(),"observed_at_unix":now,"providers":providers}),
+    )
 }
-
-#[derive(Debug)]
-enum ProviderCapacity {
-    Unknown,
-    RateWindows(Vec<Value>),
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Capacity {
+    status: String,
+    signal_type: String,
+    windows: Vec<Value>,
+    fingerprint: Option<String>,
+    binding_harness: Option<String>,
+    source: Option<String>,
+    scope: Option<String>,
+    observed_at_unix: Option<u64>,
 }
-
-/// Build a provider capacity signal with source label based on actual observation.
-/// Unknown/unbound/unsupported providers do not claim identity-bound sources.
-fn provider_signal(
-    harness: &str,
-    status: &str,
-    capacity: ProviderCapacity,
-    source: Option<&str>,
-    project_identity: &str,
-    observed_at: u64,
-) -> Value {
-    let signal_type = match capacity {
-        ProviderCapacity::Unknown => "unknown",
-        ProviderCapacity::RateWindows(_) => "rate_windows",
-    };
-    let actual_source = source.unwrap_or(match status {
-        "not_configured" | "not_bound" | "unsupported" => "none",
-        _ => "unknown",
-    });
-
-    let mut signal = json!({
-        "harness": harness,
-        "status": status,
-        "signal_type": signal_type,
-        "source": actual_source,
-        "scope": "shared_account",
-        "project_identity": project_identity,
-        "observed_at_unix": observed_at,
-        "freshness": if signal_type == "rate_windows" { "queried_now; do_not_reuse_for_admission" } else { "unavailable" },
-    });
-
-    match capacity {
-        ProviderCapacity::Unknown => {
-            signal["data"] = Value::Null;
-            // V1 compatibility: empty windows array
-            signal["windows"] = json!([]);
+fn validate_capacity(value: Value, now: u64) -> Result<Capacity> {
+    if serde_json::to_vec(&value)?.len() > 65536 {
+        return Err(invalid_observation());
+    }
+    let capacity: Capacity = serde_json::from_value(value).map_err(|_| invalid_observation())?;
+    if !["available", "unknown", "unsupported"].contains(&capacity.status.as_str())
+        || capacity.windows.len() > 64
+        || capacity
+            .fingerprint
+            .as_ref()
+            .is_some_and(|s| !valid_fingerprint(s))
+        || capacity
+            .binding_harness
+            .as_ref()
+            .is_some_and(|s| !crate::util::is_safe_name(s))
+        || capacity
+            .source
+            .as_ref()
+            .is_some_and(|s| s.len() > 128 || s.chars().any(char::is_control))
+        || capacity
+            .scope
+            .as_ref()
+            .is_some_and(|s| s != "shared_account")
+        || capacity
+            .observed_at_unix
+            .is_some_and(|t| t > now.saturating_add(60))
+    {
+        return Err(invalid_observation());
+    }
+    if capacity.status != "available" {
+        if !capacity.windows.is_empty() || capacity.signal_type != "unknown" {
+            return Err(invalid_observation());
         }
-        ProviderCapacity::RateWindows(windows) => {
-            signal["data"] = json!({
-                "windows": windows.clone(),
-                "semantics": "time_scoped_percentage",
-            });
-            // V1 compatibility: top-level windows alias
-            signal["windows"] = json!(windows);
+        return Ok(capacity);
+    }
+    if capacity.signal_type != "rate_windows"
+        || capacity.windows.is_empty()
+        || capacity.fingerprint.is_none()
+    {
+        return Err(invalid_observation());
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for window in &capacity.windows {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Window {
+            name: String,
+            used_percent: f64,
+            remaining_percent: f64,
+            window_duration_minutes: u64,
+            resets_at_unix: Option<u64>,
+        }
+        let w: Window =
+            serde_json::from_value(window.clone()).map_err(|_| invalid_observation())?;
+        if !crate::util::is_safe_name(&w.name)
+            || !names.insert(w.name)
+            || !w.used_percent.is_finite()
+            || !w.remaining_percent.is_finite()
+            || !(0.0..=100.0).contains(&w.used_percent)
+            || !(0.0..=100.0).contains(&w.remaining_percent)
+            || (w.used_percent + w.remaining_percent - 100.0).abs() > 0.000001
+            || !(1..=525600).contains(&w.window_duration_minutes)
+            || w.resets_at_unix.is_some_and(|t| t <= now)
+        {
+            return Err(invalid_observation());
         }
     }
-    signal
-}
-
-fn normalize_rate_window(value: &Value) -> Option<(f64, u64, Option<u64>)> {
-    let used = value.get("usedPercent")?.as_f64()?;
-    if !used.is_finite() || !(0.0..=100.0).contains(&used) {
-        return None;
-    }
-    let duration = value.get("windowDurationMins")?.as_u64()?;
-    if duration == 0 || duration > 525_600 {
-        return None;
-    }
-    let reset = match value.get("resetsAt") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_u64()?),
-    };
-    Some((used, duration, reset))
-}
-
-fn normalize_window(name: &str, (used, duration, reset): (f64, u64, Option<u64>)) -> Value {
-    json!({
-        "name": name,
-        "used_percent": used,
-        "remaining_percent": 100.0 - used,
-        "window_duration_minutes": duration,
-        "resets_at_unix": reset
-    })
+    Ok(capacity)
 }
 
 fn binding_path(repo: &Repo) -> Result<PathBuf> {
@@ -406,7 +346,7 @@ pub fn bind_profile(repo: &Repo, harness: &str, profile: &str, replace: bool) ->
     let mut bindings = load(repo, &path)?;
     let fingerprint = identity.fingerprint()?;
     let profile_bindings = bindings.profiles.entry(profile.to_owned()).or_default();
-    if let Some(existing) = profile_bindings.get(harness) {
+    if let Some(existing) = profile_bindings.get(&identity.harness) {
         if existing.fingerprint == fingerprint {
             return Ok(format!(
                 "{} is already bound to profile {profile:?}.",
@@ -420,7 +360,7 @@ pub fn bind_profile(repo: &Repo, harness: &str, profile: &str, replace: bool) ->
         }
     }
     profile_bindings.insert(
-        harness.to_owned(),
+        identity.harness.clone(),
         StoredBinding {
             fingerprint,
             identity_kind: identity.identity_kind.clone(),
@@ -445,7 +385,7 @@ pub fn status(repo: &Repo, harness: &str) -> Result<String> {
 /// reports whether identity can be checked and whether the active project
 /// binding matches, not the account details themselves.
 pub fn readiness(repo: &Repo, harness: &str, model: Option<&str>) -> Value {
-    readiness_with_probe(repo, harness, model, probe)
+    readiness_with_probe(repo, harness, model, |h, cwd| probe_model(h, cwd, model))
 }
 
 fn readiness_with_probe(
@@ -454,25 +394,6 @@ fn readiness_with_probe(
     model: Option<&str>,
     probe_identity: impl FnOnce(&str, &Path) -> Result<Identity>,
 ) -> Value {
-    // Ollama is an auth provider, not a launchable harness. Keep the direct
-    // readiness alias separate from task admission's harness/model mapping.
-    let binding_harness = if harness == "ollama" {
-        Some("ollama")
-    } else if harness == "opencode" {
-        model.and_then(|model| task_binding_harness(harness, model))
-    } else {
-        task_binding_harness(harness, "")
-    };
-    let Some(binding_harness) = binding_harness else {
-        return json!({
-            "schema_version": 1,
-            "harness": harness,
-            "model": model,
-            "identity": "unsupported",
-            "binding": "unsupported",
-            "ready": false,
-        });
-    };
     let path = match binding_path_without_creation(repo) {
         Ok(path) => path,
         Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
@@ -488,10 +409,11 @@ fn readiness_with_probe(
     } else {
         None
     };
-    let identity = match probe_identity(binding_harness, &repo.root) {
+    let identity = match probe_identity(harness, &repo.root) {
         Ok(identity) => identity,
         Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
     };
+    let binding_harness = identity.harness.as_str();
     let Some(bindings) = bindings.filter(|bindings| !bindings.profiles.is_empty()) else {
         return json!({
             "schema_version": 1,
@@ -552,7 +474,7 @@ fn check_identity(
     match bindings
         .profiles
         .get(profile)
-        .and_then(|items| items.get(harness))
+        .and_then(|items| items.get(&identity.harness))
     {
         Some(binding) if binding.fingerprint == current => Ok(format!(
             "{}; matches local profile {profile:?}.",
@@ -634,21 +556,25 @@ pub fn verify_launch(repo: &Repo, harness: &str, model: &str) -> Result<()> {
     if bindings.profiles.is_empty() {
         return Ok(());
     }
-    let binding_harness = task_binding_harness(harness, model).ok_or_else(|| {
-        Error::new(format!(
-            "ahu cannot verify the account used by {harness} model {model}; launch refused"
-        ))
-    })?;
-    check_identity(repo, binding_harness, &bindings.active_profile, &bindings).map(|_| ())
+    let identity = probe_model(harness, &repo.root, Some(model))?;
+    let expected = bindings
+        .profiles
+        .get(&bindings.active_profile)
+        .and_then(|p| p.get(&identity.harness))
+        .ok_or_else(invalid_observation)?;
+    if expected.fingerprint != identity.fingerprint()? {
+        return Err(Error::new(
+            "current native account does not match the active profile",
+        ));
+    }
+    Ok(())
 }
 
 /// Freeze the verified account used by the first attempt. This is called after
 /// ahu has validated its task record and immediately before it starts the
 /// harness, before any project prompt is sent to the provider.
 pub fn capture_task(repo: &Repo, harness: &str, task_dir: &Path) -> Result<()> {
-    let binding_harness =
-        task_binding_harness(harness, "").or_else(|| (harness == "opencode").then_some("opencode"));
-    capture_task_for(repo, binding_harness, task_dir)
+    capture_task_for_model(repo, harness, "", task_dir)
 }
 
 pub fn capture_task_for_model(
@@ -666,8 +592,8 @@ pub fn capture_task_for_model(
     if bindings.profiles.is_empty() {
         return Ok(());
     }
-    let binding_harness = task_binding_harness(harness, model);
-    capture_task_for(repo, binding_harness, task_dir)
+    let identity = probe_model(harness, &repo.root, Some(model))?;
+    capture_task_for(repo, &identity, task_dir)
 }
 
 /// Work mode deliberately leaves account selection to the native harness.
@@ -702,27 +628,8 @@ pub fn capture_interactive_task_for_model(
     capture_task_for_model(repo, harness, model, task_dir)
 }
 
-fn capture_task_for(repo: &Repo, binding_harness: Option<&str>, task_dir: &Path) -> Result<()> {
-    let Some(binding_harness) = binding_harness else {
-        // These CLIs do not expose an identity signal that ahu can verify. Keep
-        // allowing fresh attempts, but persist an explicit unknown marker so a
-        // later resume fails closed rather than assuming the account stayed put.
-        let pin_path = task_dir.join("auth-identity.json");
-        crate::state::confine_file(&pin_path)?;
-        let pin = StoredBinding {
-            fingerprint: "unverified".into(),
-            identity_kind: "unverified-provider-identity".into(),
-            profile: None,
-        };
-        let bytes = serde_json::to_vec(&pin)?;
-        let _ = crate::private_io::atomic_create(
-            &pin_path,
-            &bytes,
-            crate::private_io::Durability::Durable,
-        )?;
-        return Ok(());
-    };
-    let identity = probe(binding_harness, &repo.root)?;
+fn capture_task_for(repo: &Repo, identity: &Identity, task_dir: &Path) -> Result<()> {
+    let binding_harness = identity.harness.as_str();
     let path = binding_path(repo)?;
     let bindings = load(repo, &path)?;
     let fingerprint = identity.fingerprint()?;
@@ -745,7 +652,7 @@ fn capture_task_for(repo: &Repo, binding_harness: Option<&str>, task_dir: &Path)
     crate::state::confine_file(&pin_path)?;
     let pin = StoredBinding {
         fingerprint,
-        identity_kind: identity.identity_kind,
+        identity_kind: identity.identity_kind.clone(),
         profile: Some(bindings.active_profile.clone()),
     };
     let bytes = serde_json::to_vec(&pin)?;
@@ -782,13 +689,8 @@ pub fn verify_task_resume_for_model(
     if bindings.profiles.is_empty() {
         return Ok(());
     }
-    let Some(binding_harness) = task_binding_harness(harness, model) else {
-        return Err(Error::new(format!(
-            "ahu cannot verify the signed-in principal for {harness}; task resume refused before starting the harness"
-        )));
-    };
-    let identity = probe(binding_harness, &repo.root)?;
-    verify_task_resume_identity(harness, binding_harness, task_dir, &bindings, &identity)
+    let identity = probe_model(harness, &repo.root, Some(model))?;
+    verify_task_resume_identity(harness, &identity.harness, task_dir, &bindings, &identity)
 }
 
 fn verify_task_resume_identity(
@@ -831,523 +733,93 @@ fn verify_task_resume_identity(
     Ok(())
 }
 
-/// Ollama's `:cloud` and `-cloud` tags execute remotely and use the account
-/// managed by the Ollama daemon. Other OpenCode providers remain unverified.
-fn task_binding_harness(harness: &str, model: &str) -> Option<&'static str> {
-    if harness != "opencode" {
-        return Some(match harness {
-            "codex" => "codex",
-            "claude-code" => "claude-code",
-            "antigravity" => "antigravity",
-            "kiro" => "kiro",
-            _ => return None,
-        });
-    }
-    let model = model.to_ascii_lowercase();
-    let (provider, name) = model.split_once('/')?;
-    (provider == "ollama" && (name.contains(":cloud") || name.ends_with("-cloud")))
-        .then_some("ollama")
-}
-
 pub fn probe(harness: &str, cwd: &Path) -> Result<Identity> {
-    match harness {
-        "codex" => probe_codex(cwd),
-        "claude-code" => probe_claude(cwd),
-        "antigravity" => probe_antigravity(cwd),
-        "kiro" => probe_kiro(cwd),
-        "ollama" => probe_ollama(),
-        "opencode" => Err(Error::new(format!(
-            "ahu cannot verify the signed-in principal for {harness}; resume is unsafe until that harness exposes a reliable read-only identity check"
-        ))),
-        _ => Err(Error::new(format!(
-            "unsupported auth binding harness {harness:?}"
-        ))),
-    }
+    probe_model(harness, cwd, None)
 }
-
-fn probe_ollama() -> Result<Identity> {
-    let configured = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "127.0.0.1:11434".into());
-    let endpoint = if configured.contains("://") {
-        configured
-    } else {
-        format!("http://{configured}")
-    };
-    let mut base = reqwest::Url::parse(&endpoint)
-        .map_err(|_| Error::new("OLLAMA_HOST is not a valid local server address"))?;
-    let local = base
-        .host_str()
-        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-        .is_some_and(|address| address.is_loopback())
-        || matches!(base.host_str(), Some("localhost"));
-    if !local || !matches!(base.scheme(), "http" | "https") {
-        return Err(Error::new(
-            "Ollama account binding only supports a loopback Ollama server",
-        ));
+fn probe_model(harness: &str, cwd: &Path, model: Option<&str>) -> Result<Identity> {
+    let repo = crate::git::discover(cwd)?;
+    let runtime = crate::harness_runtime::load(&repo, harness)?;
+    let mut params = crate::harness_runtime::native_params(&repo, runtime.descriptor())?;
+    params["environment_names"] = json!(
+        std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .collect::<Vec<_>>()
+    );
+    params["requested_identity"] = json!(harness);
+    if let Some(model) = model {
+        params["model"] = json!(model);
     }
-    base.set_path("/api/me");
-    base.set_query(None);
-    base.set_fragment(None);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(4))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .map_err(|_| Error::new("cannot initialize the Ollama identity check"))?;
-    let response = client
-        .post(base)
-        .json(&json!({}))
-        .send()
-        .map_err(|_| Error::new("cannot reach the local Ollama account identity endpoint"))?;
-    if !response.status().is_success() {
-        return Err(Error::new(
-            "local Ollama did not provide a signed-in account identity",
-        ));
+    validate_identity(runtime.call("auth", params)?)
+}
+fn validate_identity(value: Value) -> Result<Identity> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Observation {
+        status: String,
+        binding_harness: Option<String>,
+        fingerprint: Option<String>,
+        identity_kind: Option<String>,
+        effective_provider_address_verified: Option<bool>,
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > 64 * 1024)
+    if serde_json::to_vec(&value)?.len() > 4096 {
+        return Err(invalid_observation());
+    }
+    let observation: Observation =
+        serde_json::from_value(value).map_err(|_| invalid_observation())?;
+    if observation.status != "available" {
+        return Err(invalid_observation());
+    }
+    let harness = observation
+        .binding_harness
+        .ok_or_else(invalid_observation)?;
+    let fingerprint = observation.fingerprint.ok_or_else(invalid_observation)?;
+    let identity_kind = observation
+        .identity_kind
+        .unwrap_or_else(|| "native-account".into());
+    if !crate::util::is_safe_name(&harness)
+        || !valid_fingerprint(&fingerprint)
+        || identity_kind.is_empty()
+        || identity_kind.len() > 128
+        || identity_kind.chars().any(char::is_control)
     {
-        return Err(Error::new("Ollama account identity response is too large"));
+        return Err(invalid_observation());
     }
-    let mut bytes = Vec::new();
-    response
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error::new("cannot read the Ollama account identity response"))?;
-    if bytes.len() > 64 * 1024 {
-        return Err(Error::new("Ollama account identity response is too large"));
-    }
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Error::new("Ollama account identity response is invalid"))?;
-    let principal = value
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|email| email.contains('@') && !email.chars().any(char::is_control))
-        .ok_or_else(|| Error::new("Ollama is not signed in or returned no account email"))?;
-    let account_id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| Error::new("Ollama returned no stable account identifier"))?;
+    // A provider can disclose that address routing remains unverified; this is
+    // not a claim that identity probing locks or reserves the native account.
+    let _routing_evidence = observation.effective_provider_address_verified;
     Ok(Identity {
-        harness: "ollama".into(),
-        identity_kind: "ollama-account".into(),
-        principal: principal.into(),
-        organization: None,
-        workspace: Some(account_id.into()),
+        harness,
+        identity_kind,
+        fingerprint,
     })
-}
-
-fn probe_kiro(cwd: &Path) -> Result<Identity> {
-    // whoami's verified social-login shape does not establish the principal
-    // used by an environment API key. Never bind that key to a cached login.
-    if std::env::var_os("KIRO_API_KEY").is_some() {
-        return Err(Error::new(
-            "Kiro API-key account binding is not validated; native social login is required for ahu account checks",
-        ));
-    }
-    let executable = crate::selection::resolve_executable("kiro-cli")
-        .ok_or_else(|| Error::new("Kiro CLI is not available on PATH"))?;
-    let output = bounded_command(&executable, &["whoami", "--format", "json"], cwd)?;
-    kiro_identity(&output)
-}
-
-fn kiro_identity(output: &[u8]) -> Result<Identity> {
-    let value: Value = serde_json::from_slice(output)
-        .map_err(|_| Error::new("Kiro whoami returned invalid JSON; details omitted"))?;
-    let account_type = value
-        .get("accountType")
-        .and_then(Value::as_str)
-        .filter(|s| *s == "SocialGitHub")
-        .ok_or_else(|| {
-            Error::new("Kiro account binding currently supports verified GitHub social login only")
-        })?;
-    let principal = value
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| Error::new("Kiro whoami did not expose a verifiable account identity"))?;
-    Ok(Identity {
-        harness: "kiro".into(),
-        identity_kind: account_type.into(),
-        principal: principal.into(),
-        organization: None,
-        workspace: None,
-    })
-}
-
-fn probe_claude(cwd: &Path) -> Result<Identity> {
-    let executable = crate::selection::resolve_executable("claude")
-        .ok_or_else(|| Error::new("Claude Code is not available on PATH"))?;
-    let output = bounded_command(&executable, &["auth", "status", "--json"], cwd)?;
-    let value: Value = serde_json::from_slice(&output)
-        .map_err(|_| Error::new("Claude auth status returned invalid JSON"))?;
-    if value.get("loggedIn").and_then(Value::as_bool) != Some(true) {
-        return Err(Error::new("Claude Code is not logged in"));
-    }
-    let principal = value
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            Error::new("Claude auth status does not expose a verifiable account identity")
-        })?;
-    let org = value
-        .get("orgId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let auth_method = value
-        .get("authMethod")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    Ok(Identity {
-        harness: "claude-code".into(),
-        identity_kind: format!(
-            "{auth_method}/{}",
-            value
-                .get("apiProvider")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        ),
-        principal: principal.into(),
-        organization: org.map(str::to_owned),
-        workspace: None,
-    })
-}
-
-fn probe_codex(cwd: &Path) -> Result<Identity> {
-    let executable = crate::selection::resolve_executable("codex")
-        .ok_or_else(|| Error::new("Codex is not available on PATH"))?;
-    let account = crate::harness::codex_metadata::read_account(&PathBuf::from(executable), cwd)?;
-    codex_identity(&account)
-}
-
-fn codex_identity(account: &Value) -> Result<Identity> {
-    // account/read returns an envelope with `account` and routing metadata;
-    // tolerate a flattened shape as well for compatible app-server versions.
-    let account_details = account
-        .get("account")
-        .filter(|value| value.is_object())
-        .unwrap_or(account);
-    if account_details.get("type").and_then(Value::as_str) != Some("chatgpt") {
-        return Err(Error::new(
-            "Codex API-key authentication does not expose a verifiable user principal; account binding is unavailable",
-        ));
-    }
-    let routing = account
-        .get("workspaceRouting")
-        .or_else(|| account_details.get("workspaceRouting"))
-        .unwrap_or(&Value::Null);
-    let principal = account_details
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .or_else(|| routing.get("chatgptAccountId").and_then(Value::as_str))
-        .ok_or_else(|| Error::new("Codex account metadata has no verifiable account identifier"))?;
-    Ok(Identity {
-        harness: "codex".into(),
-        identity_kind: account_details
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .into(),
-        principal: principal.into(),
-        organization: None,
-        workspace: match (
-            routing.get("chatgptAccountId").and_then(Value::as_str),
-            routing.get("backendOrigin").and_then(Value::as_str),
-        ) {
-            (Some(id), Some(origin)) => Some(format!("{id}@{origin}")),
-            (Some(id), None) => Some(id.to_owned()),
-            (None, Some(origin)) => Some(origin.to_owned()),
-            (None, None) => None,
-        },
-    })
-}
-
-/// Antigravity has no standalone account-status command, but its startup TUI
-/// renders the signed-in account before a prompt can be entered. Run it in a
-/// bounded pseudo-terminal, capture only that startup text, and terminate it
-/// after an account email and a short quiet interval so fragmented identity
-/// fields can arrive. No prompt is sent and no model request is made. If the
-/// UI stops exposing a recognizable identity, fail closed.
-fn probe_antigravity(cwd: &Path) -> Result<Identity> {
-    let executable = crate::selection::resolve_executable("agy")
-        .ok_or_else(|| Error::new("Antigravity CLI is not available on PATH"))?;
-    let output = antigravity_startup(&executable, cwd)?;
-    parse_antigravity_identity(&output)
-}
-
-fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
-    if antigravity_needs_folder_trust(output) {
-        return Err(antigravity_folder_trust_error());
-    }
-    let principal = extract_email(output).ok_or_else(|| {
-        Error::new("Antigravity startup did not expose a signed-in account email")
-    })?;
-    let visible = String::from_utf8_lossy(output);
-    let identity_kind = if visible.contains("Agent Platform") {
-        "agent-platform"
-    } else if visible.contains("Gemini API key") {
-        return Err(Error::new(
-            "Antigravity is using API-key authentication and exposes no user principal",
-        ));
-    } else {
-        "antigravity-account"
-    };
-    Ok(Identity {
-        harness: "antigravity".into(),
-        identity_kind: identity_kind.into(),
-        principal,
-        organization: None,
-        workspace: extract_labeled_value(&visible, "GCP Project:"),
-    })
-}
-
-fn antigravity_needs_folder_trust(output: &[u8]) -> bool {
-    let visible = String::from_utf8_lossy(output);
-    visible.contains("Do you trust the contents of this project?")
-        || visible.contains("Do you trust this folder?")
-}
-
-fn antigravity_folder_trust_error() -> Error {
-    Error::new(
-        "Antigravity is waiting for native folder trust in this checkout; open agy there interactively and review that prompt before retrying. ahu does not approve native folder trust automatically",
-    )
-}
-
-fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    let mut master_fd = -1;
-    let mut slave_fd = -1;
-    let mut size = libc::winsize {
-        ws_row: 30,
-        ws_col: 120,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: openpty initializes two owned descriptors, which are wrapped
-    // immediately below. No name or termios override is requested.
-    if unsafe {
-        libc::openpty(
-            &mut master_fd,
-            &mut slave_fd,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            // libc exposes a mutable winsize pointer on macOS and a const
-            // pointer on Linux; a raw pointer coerces correctly on both.
-            &raw mut size,
-        )
-    } != 0
-    {
-        return Err(Error::new(
-            "cannot create bounded Antigravity status terminal",
-        ));
-    }
-    // SAFETY: each descriptor was freshly returned by openpty and has one owner.
-    let mut master = unsafe { std::fs::File::from_raw_fd(master_fd) };
-    // SAFETY: each descriptor was freshly returned by openpty and has one owner.
-    let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
-    let stdin = slave.try_clone()?;
-    let stdout = slave.try_clone()?;
-    let mut command = Command::new(executable);
-    command
-        .current_dir(cwd)
-        .stdin(Stdio::from(stdin))
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(slave));
-    command
-        .env("TERM", "xterm-256color")
-        .env("NO_COLOR", "1")
-        .process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|_| Error::new("cannot start Antigravity identity probe"))?;
-    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        crate::headless::signal_group(child.id(), libc::SIGKILL);
-        let _ = child.wait();
-        return Err(Error::new("cannot bound Antigravity startup reads"));
-    }
-    let deadline = Instant::now() + Duration::from_secs(12);
-    // The startup TUI can split the email, auth mode, and GCP project across
-    // PTY writes. A recognized mode does not mean the fingerprint is complete:
-    // wait for a bounded quiet window, including after "Agent Platform". The
-    // CLI exposes no explicit identity-complete event, so this reduces late
-    // field races without claiming that silence proves completeness. This does
-    // not extend the overall probe deadline.
-    let identity_settle = Duration::from_millis(2_500);
-    let mut output = Vec::new();
-    let mut last_output_at: Option<Instant> = None;
-    let mut buffer = [0u8; 4096];
-    let outcome = loop {
-        if antigravity_needs_folder_trust(&output) {
-            break Err(antigravity_folder_trust_error());
-        }
-        if extract_email(&output).is_some()
-            && last_output_at.is_some_and(|last| last.elapsed() >= identity_settle)
-        {
-            break Ok(output);
-        }
-        if output.len() >= 64 * 1024 {
-            break Err(Error::new(
-                "Antigravity startup exceeded the identity output limit",
-            ));
-        }
-        if Instant::now() >= deadline {
-            break Err(Error::new("Antigravity startup identity check timed out"));
-        }
-        let mut descriptor = libc::pollfd {
-            fd: master.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut descriptor, 1, 150) };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            break Err(Error::new("cannot wait for Antigravity startup identity"));
-        }
-        if ready > 0 {
-            match master.read(&mut buffer) {
-                Ok(0) => break Err(Error::new("Antigravity closed its startup terminal")),
-                Ok(count) => {
-                    output.extend_from_slice(&buffer[..count]);
-                    last_output_at = Some(Instant::now());
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => (),
-                Err(_) => break Err(Error::new("cannot read Antigravity startup identity")),
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) if !status.success() => {
-                break Err(Error::new(
-                    "Antigravity exited before exposing its account identity",
-                ));
-            }
-            Err(_) => break Err(Error::new("cannot inspect Antigravity probe process")),
-            _ => (),
-        }
-    };
-    crate::headless::signal_group(child.id(), libc::SIGKILL);
-    let _ = child.wait();
-    outcome
-}
-
-fn extract_email(bytes: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(bytes);
-    for token in
-        text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '"' | '\''))
-    {
-        let token = token.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | ']' | '['));
-        let Some((local, domain)) = token.split_once('@') else {
-            continue;
-        };
-        if local.is_empty()
-            || domain.is_empty()
-            || !domain.contains('.')
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-' | b'@'))
-        {
-            continue;
-        }
-        return Some(token.to_owned());
-    }
-    None
-}
-
-fn extract_labeled_value(text: &str, label: &str) -> Option<String> {
-    text.split_once(label)?
-        .1
-        .lines()
-        .next()?
-        .split_whitespace()
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn bounded_command(executable: &str, args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-    let mut command = Command::new(executable);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|_| Error::new("cannot start read-only harness auth status"))?;
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::new("harness auth status timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    if !status.success() {
-        return Err(Error::new("harness auth status failed; details omitted"));
-    }
-    let mut output = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::new("missing auth status output"))?
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut output)?;
-    if output.len() > 64 * 1024 {
-        return Err(Error::new("harness auth status exceeded the output limit"));
-    }
-    Ok(output)
 }
 
 #[cfg(test)]
-mod profile_tests {
+mod tests {
     use super::*;
-
-    #[test]
-    fn kiro_identity_requires_the_verified_provider_and_principal() {
-        let identity =
-            kiro_identity(br#"{"accountType":"SocialGitHub","email":"test@example.invalid"}"#)
-                .unwrap();
-        assert_eq!(identity.harness, "kiro");
-        assert_eq!(identity.principal, "test@example.invalid");
-        for value in [
-            r#"{"accountType":"SocialGitHub"}"#,
-            r#"{"accountType":"unknown","email":"private-marker"}"#,
-            "private-marker",
-        ] {
-            assert!(
-                !kiro_identity(value.as_bytes())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("private-marker")
-            );
-        }
-    }
-
     fn repo_fixture() -> (tempfile::TempDir, Repo) {
         let temp = tempfile::tempdir().unwrap();
         crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
         let repo = crate::git::discover(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    #[test]
+    fn plugin_observations_reject_raw_identity_fields_and_invalid_capacity() {
+        let valid = json!({"status":"available","binding_harness":"invented","fingerprint":"a".repeat(64),"identity_kind":"synthetic"});
+        assert!(validate_identity(valid.clone()).is_ok());
+        let mut raw = valid;
+        raw["principal"] = json!("never disclose");
+        assert!(validate_identity(raw).is_err());
+        assert!(validate_identity(json!({"status":"available","binding_harness":"invented","fingerprint":"not-a-hash"})).is_err());
+        let window = json!({"name":"primary","used_percent":20.0,"remaining_percent":80.0,"window_duration_minutes":60,"resets_at_unix":200});
+        let capacity = json!({"status":"available","signal_type":"rate_windows","fingerprint":"a".repeat(64),"windows":[window]});
+        assert!(validate_capacity(capacity.clone(), 100).is_ok());
+        assert!(validate_capacity(capacity.clone(), 200).is_err());
+        let mut duplicate = capacity;
+        let window = duplicate["windows"][0].clone();
+        duplicate["windows"].as_array_mut().unwrap().push(window);
+        assert!(validate_capacity(duplicate, 100).is_err());
     }
 
     #[test]
@@ -1358,7 +830,7 @@ mod profile_tests {
             "schema_version": 1,
             "repo_identity": repo.identity(),
             "bindings": {
-                "codex": {"fingerprint": "a".repeat(64), "identity_kind": "chatgpt"}
+                "invented": {"fingerprint": "a".repeat(64), "identity_kind": "chatgpt"}
             }
         });
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
@@ -1367,7 +839,7 @@ mod profile_tests {
         assert_eq!(migrated.schema_version, 2);
         assert_eq!(migrated.active_profile, "default");
         assert_eq!(
-            migrated.profiles["default"]["codex"].fingerprint,
+            migrated.profiles["default"]["invented"].fingerprint,
             "a".repeat(64)
         );
         let saved: Value = crate::state::read_json(&path).unwrap();
@@ -1402,7 +874,7 @@ mod profile_tests {
             profiles: BTreeMap::from([(
                 "personal".into(),
                 BTreeMap::from([(
-                    "codex".into(),
+                    "invented".into(),
                     StoredBinding {
                         fingerprint: "b".repeat(64),
                         identity_kind: "chatgpt".into(),
@@ -1430,9 +902,11 @@ mod profile_tests {
     #[test]
     fn readiness_does_not_disclose_principals_or_provider_diagnostics() {
         let (_temp, repo) = repo_fixture();
-        let status = readiness(&repo, "opencode", Some("openai/model"));
-        assert_eq!(status["identity"], "unsupported");
-        assert_eq!(status["binding"], "unsupported");
+        let status = readiness_with_probe(&repo, "invented", Some("exact-model"), |_, _| {
+            Err(Error::new("private-diagnostic"))
+        });
+        assert_eq!(status["identity"], "unavailable");
+        assert_eq!(status["binding"], "unavailable");
         assert_eq!(status["ready"], false);
         let serialized = serde_json::to_string(&status).unwrap();
         assert!(!serialized.contains("@"));
@@ -1441,575 +915,12 @@ mod profile_tests {
     }
 
     #[test]
-    fn ollama_readiness_checks_bindings_without_changing_launch_admission() {
-        let (_temp, repo) = repo_fixture();
-        let identity = Identity {
-            harness: "ollama".into(),
-            identity_kind: "ollama-account".into(),
-            principal: "fixture@example.invalid".into(),
-            organization: None,
-            workspace: Some("fixture-account".into()),
-        };
-        let check = |harness, model| {
-            readiness_with_probe(&repo, harness, model, |provider, _| {
-                assert_eq!(provider, "ollama");
-                Ok(identity.clone())
-            })
-        };
-        assert_eq!(check("ollama", None)["binding"], "not_configured");
-        assert!(!repo.root.join(".ahu").exists());
-        let path = binding_path(&repo).unwrap();
-        let mut bindings = BindingFile {
-            profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
-            ..BindingFile::default()
-        };
-        save(&path, &bindings).unwrap();
-        assert_eq!(check("ollama", None)["binding"], "not_bound");
-        bindings.profiles.get_mut("default").unwrap().insert(
-            "ollama".into(),
-            StoredBinding {
-                fingerprint: identity.fingerprint().unwrap(),
-                identity_kind: identity.identity_kind.clone(),
-                profile: None,
-            },
-        );
-        save(&path, &bindings).unwrap();
-        for (harness, model) in [("ollama", None), ("opencode", Some("ollama/fixture:cloud"))] {
-            let status = check(harness, model);
-            assert_eq!(status["identity"], "verified");
-            assert_eq!(status["binding"], "matched");
-            assert_eq!(status["ready"], true);
-            assert!(!status.to_string().contains("fixture@example.invalid"));
-        }
-        let mismatch = readiness_with_probe(&repo, "ollama", None, |_, _| {
-            Ok(Identity {
-                principal: "changed@example.invalid".into(),
-                ..identity.clone()
-            })
-        });
-        assert_eq!(mismatch["binding"], "mismatch");
-        assert_eq!(mismatch["ready"], false);
-        let unavailable = readiness_with_probe(&repo, "ollama", None, |_, _| {
-            Err(Error::new("private provider diagnostic"))
-        });
-        assert_eq!(unavailable["identity"], "unavailable");
-        assert_eq!(unavailable["ready"], false);
-        assert!(
-            !unavailable
-                .to_string()
-                .contains("private provider diagnostic")
-        );
-        assert_eq!(task_binding_harness("ollama", ""), None);
-        assert!(verify_launch(&repo, "ollama", "fixture:cloud").is_err());
-        assert!(verify_launch(&repo, "opencode", "openai/fixture").is_err());
-    }
-
-    #[test]
-    fn budget_is_active_profile_scoped_and_exposes_only_normalized_codex_windows() {
-        let (_temp, repo) = repo_fixture();
-        let identity = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "private@example.invalid".into(),
-            organization: None,
-            workspace: Some("private-workspace".into()),
-        };
-        let path = binding_path(&repo).unwrap();
-        let bindings = BindingFile {
-            repo_identity: repo.identity(),
-            profiles: BTreeMap::from([(
-                "personal".into(),
-                BTreeMap::from([
-                    (
-                        "codex".into(),
-                        StoredBinding {
-                            fingerprint: identity.fingerprint().unwrap(),
-                            identity_kind: "chatgpt".into(),
-                            profile: None,
-                        },
-                    ),
-                    (
-                        "claude-code".into(),
-                        StoredBinding {
-                            fingerprint: "a".repeat(64),
-                            identity_kind: "subscription".into(),
-                            profile: None,
-                        },
-                    ),
-                ]),
-            )]),
-            active_profile: "personal".into(),
-            ..BindingFile::default()
-        };
-        save(&path, &bindings).unwrap();
-
-        let budget = budget_with_probe(&repo, |cwd| {
-            assert_eq!(cwd, repo.root);
-            Ok((
-                identity.clone(),
-                json!({"rateLimits": {
-                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
-                    "secondary": {"usedPercent": 87.5, "windowDurationMins": 10_080, "resetsAt": 1_800_086_400}
-                }, "private":"must not escape"}),
-            ))
-        })
-        .unwrap();
-        assert_eq!(budget["schema_version"], 1);
-        assert_eq!(budget["profile"], "personal");
-        assert_eq!(budget["signal"], "provider_rate_limit_windows");
-        assert_eq!(budget["token_counts"], "not_provided");
-        assert_eq!(budget["shared_account_capacity"], true);
-        assert_eq!(budget["project"], repo.identity());
-        assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
-        assert_eq!(budget["providers"][0]["status"], "available");
-        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
-        assert_eq!(budget["providers"][0]["scope"], "shared_account");
-        assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
-        assert_eq!(
-            budget["providers"][0]["data"]["windows"][0]["remaining_percent"],
-            75.0
-        );
-        assert_eq!(
-            budget["providers"][0]["data"]["semantics"],
-            "time_scoped_percentage"
-        );
-        // V1 compatibility: windows alias
-        assert_eq!(
-            budget["providers"][0]["windows"][0]["remaining_percent"],
-            75.0
-        );
-        assert_eq!(
-            budget["providers"][0]["data"]["windows"][1]["window_duration_minutes"],
-            10_080
-        );
-        assert_eq!(budget["providers"][1]["status"], "unsupported");
-        assert_eq!(budget["providers"][1]["signal_type"], "unknown");
-        assert_eq!(budget["providers"][1]["source"], "none");
-        let serialized = budget.to_string();
-        for secret in [
-            "private@example.invalid",
-            "private-workspace",
-            "must not escape",
-        ] {
-            assert!(!serialized.contains(secret));
-        }
-    }
-
-    #[test]
-    fn budget_refuses_a_different_codex_account_and_omits_malformed_windows() {
-        let (_temp, repo) = repo_fixture();
-        let bound = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "bound@example.invalid".into(),
-            organization: None,
-            workspace: None,
-        };
-        let path = binding_path(&repo).unwrap();
-        let bindings = BindingFile {
-            repo_identity: repo.identity(),
-            profiles: BTreeMap::from([(
-                "default".into(),
-                BTreeMap::from([(
-                    "codex".into(),
-                    StoredBinding {
-                        fingerprint: bound.fingerprint().unwrap(),
-                        identity_kind: "chatgpt".into(),
-                        profile: None,
-                    },
-                )]),
-            )]),
-            ..BindingFile::default()
-        };
-        save(&path, &bindings).unwrap();
-
-        let mismatch = budget_with_probe(&repo, |_| {
-            Ok((
-                Identity {
-                    principal: "other@example.invalid".into(),
-                    ..bound.clone()
-                },
-                json!({"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":5}}}),
-            ))
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(mismatch.contains("does not match"));
-        assert!(!mismatch.contains("other@example.invalid"));
-
-        let malformed = budget_with_probe(&repo, |_| {
-            Ok((
-                bound.clone(),
-                json!({"rateLimits": {
-                    "primary": {"usedPercent": 120.0, "windowDurationMins": 5},
-                    "secondary": {"usedPercent": 10.0, "windowDurationMins": 0}
-                }}),
-            ))
-        })
-        .unwrap();
-        assert_eq!(malformed["providers"][0]["status"], "unknown");
-        assert_eq!(malformed["providers"][0]["signal_type"], "unknown");
-        assert_eq!(malformed["providers"][0]["data"], Value::Null);
-        // V1 compatibility: empty windows
-        assert!(
-            malformed["providers"][0]["windows"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn budget_does_not_probe_when_profile_is_absent_or_codex_is_unbound() {
-        let (_temp, repo) = repo_fixture();
-        let absent =
-            budget_with_probe(&repo, |_| panic!("must not probe without a bound profile")).unwrap();
-        assert_eq!(absent["profile"], Value::Null);
-        assert_eq!(absent["providers"][0]["status"], "not_configured");
-        assert_eq!(absent["providers"][0]["signal_type"], "unknown");
-        assert!(!repo.root.join(".ahu").exists());
-
-        let path = binding_path(&repo).unwrap();
-        save(
-            &path,
-            &BindingFile {
-                profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
-                ..BindingFile::default()
-            },
-        )
-        .unwrap();
-        let unbound =
-            budget_with_probe(&repo, |_| panic!("must not probe an unbound provider")).unwrap();
-        assert_eq!(unbound["profile"], "default");
-        assert_eq!(unbound["providers"][0]["status"], "not_bound");
-        assert_eq!(unbound["providers"][0]["signal_type"], "unknown");
-    }
-
-    #[test]
-    fn budget_signal_binds_project_identity_and_observation_time() {
-        let (_temp, repo) = repo_fixture();
-        let identity = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "test@example.invalid".into(),
-            organization: None,
-            workspace: None,
-        };
-        let path = binding_path(&repo).unwrap();
-        save(
-            &path,
-            &BindingFile {
-                repo_identity: repo.identity(),
-                profiles: BTreeMap::from([(
-                    "default".into(),
-                    BTreeMap::from([(
-                        "codex".into(),
-                        StoredBinding {
-                            fingerprint: identity.fingerprint().unwrap(),
-                            identity_kind: "chatgpt".into(),
-                            profile: None,
-                        },
-                    )]),
-                )]),
-                ..BindingFile::default()
-            },
-        )
-        .unwrap();
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let budget = budget_with_probe(&repo, |_| {
-            Ok((
-                identity.clone(),
-                json!({"rateLimits":{"primary":{"usedPercent":50.0,"windowDurationMins":60,"resetsAt":before+3600}}}),
-            ))
-        })
-        .unwrap();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert_eq!(budget["schema_version"], 1);
-        assert_eq!(budget["project"], repo.identity());
-        let observed_at = budget["observed_at_unix"].as_u64().unwrap();
-        assert!(observed_at >= before && observed_at <= after);
-        assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
-        assert_eq!(budget["providers"][0]["observed_at_unix"], observed_at);
-        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
-        assert_eq!(budget["providers"][0]["scope"], "shared_account");
-    }
-
-    #[test]
-    fn budget_excludes_stale_reset_times_and_preserves_future_resets() {
-        let (_temp, repo) = repo_fixture();
-        let identity = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "test@example.invalid".into(),
-            organization: None,
-            workspace: None,
-        };
-        let path = binding_path(&repo).unwrap();
-        save(
-            &path,
-            &BindingFile {
-                repo_identity: repo.identity(),
-                profiles: BTreeMap::from([(
-                    "default".into(),
-                    BTreeMap::from([(
-                        "codex".into(),
-                        StoredBinding {
-                            fingerprint: identity.fingerprint().unwrap(),
-                            identity_kind: "chatgpt".into(),
-                            profile: None,
-                        },
-                    )]),
-                )]),
-                ..BindingFile::default()
-            },
-        )
-        .unwrap();
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Stale reset: past timestamp should be excluded
-        let stale = budget_with_probe(&repo, |_| {
-            Ok((
-                identity.clone(),
-                json!({"rateLimits": {
-                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 3600},
-                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now + 3600}
-                }}),
-            ))
-        })
-        .unwrap();
-
-        // A good window cannot make the other stale/unknown window eligible.
-        assert_eq!(stale["providers"][0]["status"], "unknown");
-        assert!(stale["providers"][0]["data"].is_null());
-        for malformed in [
-            json!({"usedPercent":101.0,"windowDurationMins":60}),
-            json!({"usedPercent":25.0,"windowDurationMins":60,"resetsAt":"invalid"}),
-        ] {
-            let mixed = budget_with_probe(&repo, |_| Ok((identity.clone(), json!({"rateLimits": {
-                "primary": malformed,
-                "secondary": {"usedPercent":10.0,"windowDurationMins":60,"resetsAt":now+3600}
-            }})))).unwrap();
-            assert_eq!(mixed["providers"][0]["status"], "unknown");
-            assert!(
-                mixed["providers"][0]["windows"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty()
-            );
-        }
-
-        // All stale: results in unknown signal
-        let all_stale = budget_with_probe(&repo, |_| {
-            Ok((
-                identity.clone(),
-                json!({"rateLimits": {
-                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 7200},
-                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now - 3600}
-                }}),
-            ))
-        })
-        .unwrap();
-        assert_eq!(all_stale["providers"][0]["status"], "unknown");
-        assert_eq!(all_stale["providers"][0]["signal_type"], "unknown");
-    }
-
-    #[test]
-    fn budget_rate_windows_semantics_are_explicit() {
-        let (_temp, repo) = repo_fixture();
-        let identity = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "test@example.invalid".into(),
-            organization: None,
-            workspace: None,
-        };
-        let path = binding_path(&repo).unwrap();
-        save(
-            &path,
-            &BindingFile {
-                repo_identity: repo.identity(),
-                profiles: BTreeMap::from([(
-                    "default".into(),
-                    BTreeMap::from([(
-                        "codex".into(),
-                        StoredBinding {
-                            fingerprint: identity.fingerprint().unwrap(),
-                            identity_kind: "chatgpt".into(),
-                            profile: None,
-                        },
-                    )]),
-                )]),
-                ..BindingFile::default()
-            },
-        )
-        .unwrap();
-        let future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600;
-        let budget = budget_with_probe(&repo, |_| {
-            Ok((
-                identity.clone(),
-                json!({"rateLimits":{"primary":{"usedPercent":25.0,"windowDurationMins":300,"resetsAt":future}}}),
-            ))
-        })
-        .unwrap();
-        assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
-        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
-        assert_eq!(
-            budget["providers"][0]["data"]["semantics"],
-            "time_scoped_percentage"
-        );
-        assert_eq!(
-            budget["providers"][0]["data"]["windows"][0]["used_percent"],
-            25.0
-        );
-        assert_eq!(
-            budget["providers"][0]["data"]["windows"][0]["remaining_percent"],
-            75.0
-        );
-        assert_eq!(
-            budget["providers"][0]["data"]["windows"][0]["window_duration_minutes"],
-            300
-        );
-    }
-
-    #[test]
-    fn unsupported_providers_explicitly_report_unknown_signals() {
-        let (_temp, repo) = repo_fixture();
-        let path = binding_path(&repo).unwrap();
-        let mut bindings = BindingFile {
-            profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
-            ..BindingFile::default()
-        };
-        for harness in ["claude-code", "antigravity", "kiro", "ollama"] {
-            bindings.profiles.get_mut("default").unwrap().insert(
-                harness.to_owned(),
-                StoredBinding {
-                    fingerprint: "synthetic".into(),
-                    identity_kind: "fixture".into(),
-                    profile: None,
-                },
-            );
-        }
-        save(&path, &bindings).unwrap();
-        let budget =
-            budget_with_probe(&repo, |_| panic!("must not probe unsupported providers")).unwrap();
-        for provider in budget["providers"].as_array().unwrap() {
-            let harness = provider["harness"].as_str().unwrap();
-            if harness != "codex" {
-                assert_eq!(provider["status"], "unsupported");
-                assert_eq!(provider["signal_type"], "unknown");
-                assert_eq!(provider["source"], "none");
-                assert_eq!(provider["data"], Value::Null);
-                // V1 compat: empty windows
-                assert!(provider["windows"].as_array().unwrap().is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn budget_preserves_binding_bytes_on_success_and_errors() {
-        let (_temp, repo) = repo_fixture();
-        let path = binding_path(&repo).unwrap();
-        let identity = Identity {
-            harness: "codex".into(),
-            identity_kind: "chatgpt".into(),
-            principal: "fixture@example.invalid".into(),
-            organization: None,
-            workspace: None,
-        };
-        let providers = BTreeMap::from([(
-            "codex".into(),
-            StoredBinding {
-                fingerprint: identity.fingerprint().unwrap(),
-                identity_kind: identity.identity_kind.clone(),
-                profile: None,
-            },
-        )]);
-        let mut current = BindingFile {
-            repo_identity: repo.identity(),
-            profiles: BTreeMap::from([("default".into(), providers.clone())]),
-            ..BindingFile::default()
-        };
-        current.content_digest = content_digest(&current).unwrap();
-        for bindings in [
-            json!({"schema_version": 1, "bindings": providers}),
-            serde_json::to_value(current).unwrap(),
-        ] {
-            // Noncanonical whitespace makes rewrites visible even when the
-            // decoded binding would be equivalent.
-            let original = format!(" \n{}\n\n", serde_json::to_string(&bindings).unwrap());
-            for outcome in ["success", "probe_error", "mismatch"] {
-                std::fs::write(&path, &original).unwrap();
-                let mut probed = false;
-                let result = budget_with_probe(&repo, |_| {
-                    probed = true;
-                    if outcome == "probe_error" {
-                        return Err(Error::new("synthetic provider failure"));
-                    }
-                    let mut observed = identity.clone();
-                    if outcome == "mismatch" {
-                        observed.principal = "different@example.invalid".into();
-                    }
-                    Ok((
-                        observed,
-                        json!({"primary": {
-                            "usedPercent": 25, "windowDurationMins": 300
-                        }}),
-                    ))
-                });
-                assert!(probed);
-                assert_eq!(
-                    std::fs::read(&path).unwrap(),
-                    original.as_bytes(),
-                    "{outcome}"
-                );
-                match outcome {
-                    "success" => {
-                        let budget = result.unwrap();
-                        assert_eq!(budget["profile"], "default");
-                        assert_eq!(budget["providers"][0]["status"], "available");
-                    }
-                    "probe_error" => assert_eq!(
-                        result.unwrap_err().to_string(),
-                        "synthetic provider failure"
-                    ),
-                    _ => assert!(result.unwrap_err().to_string().contains("does not match")),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn budget_preserves_empty_legacy_binding_bytes_without_probing() {
-        let (_temp, repo) = repo_fixture();
-        let path = binding_path(&repo).unwrap();
-        let original = b"{ \"schema_version\": 1, \"bindings\": {} }\n";
-        std::fs::write(&path, original).unwrap();
-        let budget = budget_with_probe(&repo, |_| panic!("unbound provider")).unwrap();
-        assert_eq!(budget["profile"], Value::Null);
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
     fn readiness_preserves_legacy_binding_bytes() {
         let (_temp, repo) = repo_fixture();
         let path = binding_path(&repo).unwrap();
         let legacy = br#"{"schema_version":1,"bindings":{}}"#;
         std::fs::write(&path, legacy).unwrap();
-        let status = readiness_with_probe(&repo, "codex", None, |_, _| {
+        let status = readiness_with_probe(&repo, "invented", None, |_, _| {
             Err(Error::new("synthetic unavailable identity"))
         });
         assert_eq!(status["ready"], false);
@@ -2018,12 +929,12 @@ mod profile_tests {
 
     #[test]
     fn readiness_error_projection_contains_only_status_fields() {
-        let status = readiness_error("codex", None, "unavailable", "unavailable");
+        let status = readiness_error("invented", None, "unavailable", "unavailable");
         assert_eq!(
             status,
             json!({
                 "schema_version": 1,
-                "harness": "codex",
+                "harness": "invented",
                 "model": null,
                 "identity": "unavailable",
                 "binding": "unavailable",
@@ -2037,15 +948,12 @@ mod profile_tests {
         let (_temp, repo) = repo_fixture();
         let task_dir = tempfile::tempdir().unwrap();
         let original = Identity {
-            harness: "claude-code".into(),
+            harness: "invented".into(),
             identity_kind: "oauth/first-party".into(),
-            principal: "personal@example.invalid".into(),
-            organization: Some("personal-org".into()),
-            workspace: None,
+            fingerprint: "a".repeat(64),
         };
         let changed = Identity {
-            principal: "work@example.invalid".into(),
-            organization: Some("work-org".into()),
+            fingerprint: "b".repeat(64),
             ..original.clone()
         };
         let bindings = BindingFile {
@@ -2053,7 +961,7 @@ mod profile_tests {
             profiles: BTreeMap::from([(
                 "default".into(),
                 BTreeMap::from([(
-                    "claude-code".into(),
+                    "invented".into(),
                     StoredBinding {
                         fingerprint: original.fingerprint().unwrap(),
                         identity_kind: original.identity_kind.clone(),
@@ -2075,8 +983,8 @@ mod profile_tests {
         .unwrap();
 
         let error = verify_task_resume_identity(
-            "claude-code",
-            "claude-code",
+            "invented",
+            "invented",
             task_dir.path(),
             &bindings,
             &changed,
@@ -2089,170 +997,13 @@ mod profile_tests {
     }
 
     #[test]
-    fn ollama_cloud_open_code_models_resolve_to_ollama_identity() {
-        assert_eq!(
-            task_binding_harness("opencode", "ollama/glm-5.3:cloud"),
-            Some("ollama")
-        );
-        assert_eq!(
-            task_binding_harness("opencode", "ollama/gpt-oss:120b-cloud"),
-            Some("ollama")
-        );
-        assert_eq!(
-            task_binding_harness("opencode", "ollama/qwen3.6:35b-mlx"),
-            None
-        );
-    }
-
-    #[test]
     fn interactive_startup_keeps_legacy_behavior_without_profiles() {
         let (_temp, repo) = repo_fixture();
         let task_dir = tempfile::tempdir().unwrap();
 
-        capture_task_for_model(&repo, "opencode", "ollama/glm-5.3:cloud", task_dir.path()).unwrap();
-        verify_task_resume_for_model(&repo, "opencode", "ollama/glm-5.3:cloud", task_dir.path())
-            .unwrap();
+        capture_task_for_model(&repo, "invented", "exact-model", task_dir.path()).unwrap();
+        verify_task_resume_for_model(&repo, "invented", "exact-model", task_dir.path()).unwrap();
 
         assert!(!task_dir.path().join("auth-identity.json").exists());
-    }
-
-    #[test]
-    fn extract_email_accepts_plain_identity_and_rejects_ansi_wrapped_token() {
-        assert_eq!(
-            extract_email(b"Signed in as personal@example.com").as_deref(),
-            Some("personal@example.com")
-        );
-        // The fallback extraction fails on raw ANSI since it breaks token boundaries,
-        // demonstrating why NO_COLOR=1 presentation override is used.
-        assert_eq!(extract_email(b"\x1b[32mpersonal@example.com\x1b[0m"), None);
-    }
-
-    #[test]
-    fn antigravity_folder_trust_is_not_account_identity_or_a_generic_timeout() {
-        for prompt in [
-            "Do you trust the contents of this project?",
-            "Do you trust this folder?",
-        ] {
-            let output = format!("contact: fixture@example.invalid\n{prompt}\n/private-marker");
-            let error = parse_antigravity_identity(output.as_bytes()).unwrap_err();
-            assert!(error.to_string().contains("native folder trust"));
-            assert!(!error.to_string().contains("private-marker"));
-            assert!(!error.to_string().contains("fixture@example.invalid"));
-        }
-        assert!(!antigravity_needs_folder_trust(b"Waiting for startup"));
-    }
-
-    #[test]
-    fn parse_antigravity_identity_rejects_api_key_and_extracts_workspace() {
-        let output = b"Welcome to Antigravity CLI\nSigned in as work@example.com\nGCP Project: my-gcp-project\n";
-        let identity = parse_antigravity_identity(output).unwrap();
-        assert_eq!(identity.harness, "antigravity");
-        assert_eq!(identity.identity_kind, "antigravity-account");
-        assert_eq!(identity.principal, "work@example.com");
-        assert_eq!(identity.workspace.as_deref(), Some("my-gcp-project"));
-
-        let api_key_output = b"Using Gemini API key\n";
-        assert!(parse_antigravity_identity(api_key_output).is_err());
-        let api_key_with_email = b"Using Gemini API key\ncontact: fixture@example.invalid\n";
-        assert!(
-            parse_antigravity_identity(api_key_with_email)
-                .unwrap_err()
-                .to_string()
-                .contains("API-key authentication")
-        );
-
-        let platform_output = b"Connected to Agent Platform\naccount: dev@example.com\n";
-        let platform_id = parse_antigravity_identity(platform_output).unwrap();
-        assert_eq!(platform_id.identity_kind, "agent-platform");
-        assert_eq!(platform_id.principal, "dev@example.com");
-    }
-
-    #[test]
-    fn antigravity_startup_fingerprint_is_stable_across_banner_fragments() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let banner = "Connected to Agent Platform\nSigned in as work@example.invalid\nGCP Project: fixture-project\n";
-        let expected = parse_antigravity_identity(banner.as_bytes())
-            .unwrap()
-            .fingerprint()
-            .unwrap();
-        // Each prefix already contains both the mode and something extract_email
-        // accepts. Neither establishes that all fingerprint fields have arrived.
-        for split in [
-            banner.find("GCP Project:").unwrap(),
-            banner.find(".invalid").unwrap() + 3,
-            banner.find("fixture-project").unwrap() + 7,
-        ] {
-            let (first, rest) = banner.split_at(split);
-            let executable = temp.path().join("agy-fixture");
-            std::fs::write(
-                &executable,
-                format!(
-                    "#!/bin/sh\nprintf '%s' '{first}'\n/bin/sleep 0.2\nprintf '%s' '{rest}'\n/bin/sleep 4\n"
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-            let output = antigravity_startup(executable.to_str().unwrap(), temp.path()).unwrap();
-            let identity = parse_antigravity_identity(&output).unwrap();
-            assert_eq!(identity.fingerprint().unwrap(), expected, "split {split}");
-        }
-    }
-
-    #[test]
-    fn antigravity_startup_collects_delayed_auth_mode_after_email() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let fixtures = [
-            (
-                "agy-platform",
-                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Connected to Agent Platform\\n'\n/bin/sleep 4\n",
-                Some("agent-platform"),
-            ),
-            (
-                "agy-api-key",
-                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Using Gemini API key\\n'\n/bin/sleep 4\n",
-                None,
-            ),
-        ];
-
-        for (name, body, expected_kind) in fixtures {
-            let executable = temp.path().join(name);
-            std::fs::write(&executable, format!("#!/bin/sh\n{body}")).unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-            let output = antigravity_startup(executable.to_str().unwrap(), temp.path()).unwrap();
-            match expected_kind {
-                Some(kind) => {
-                    let identity = parse_antigravity_identity(&output).unwrap();
-                    assert_eq!(identity.identity_kind, kind);
-                }
-                None => assert!(
-                    parse_antigravity_identity(&output)
-                        .unwrap_err()
-                        .to_string()
-                        .contains("API-key authentication")
-                ),
-            }
-        }
-
-        let account = temp.path().join("agy-account");
-        std::fs::write(
-            &account,
-            "#!/bin/sh\nprintf 'Signed in as work@example.invalid\\n'\n/bin/sleep 4\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let start = std::time::Instant::now();
-        let output = antigravity_startup(account.to_str().unwrap(), temp.path()).unwrap();
-        assert_eq!(
-            parse_antigravity_identity(&output).unwrap().identity_kind,
-            "antigravity-account"
-        );
-        assert!(start.elapsed() >= std::time::Duration::from_millis(2_500));
-        assert!(start.elapsed() < std::time::Duration::from_secs(4));
     }
 }

@@ -448,7 +448,13 @@ pub(crate) fn call(
     budget: bool,
     model: Option<&str>,
     ollama_host: Option<&str>,
+    requested_identity: Option<&str>,
 ) -> Result<Value> {
+    if requested_identity
+        .is_some_and(|id| id != harness && !(harness == "opencode" && id == "ollama"))
+    {
+        return Err(Error::invalid());
+    }
     if budget {
         if harness != "codex" {
             return Ok(json!({"status":"unsupported","windows":[],"signal_type":"unknown"}));
@@ -510,20 +516,24 @@ pub(crate) fn call(
             &p.environment,
         )?)?,
         "opencode" => {
-            let model = model.ok_or_else(Error::invalid)?.to_ascii_lowercase();
+            let model = model.unwrap_or("").to_ascii_lowercase();
             let cloud = model.split_once('/').is_some_and(|(provider, name)| {
                 provider == "ollama" && (name.contains(":cloud") || name.ends_with("-cloud"))
             });
-            if !cloud {
+            if !cloud && requested_identity != Some("ollama") {
                 return Ok(
                     json!({"status":"unsupported","binding_harness":null,"fingerprint":null}),
                 );
             }
-            probe_ollama(ollama_host.ok_or_else(Error::invalid)?)?
+            probe_ollama(
+                ollama_host
+                    .or_else(|| p.environment.get("OLLAMA_HOST").map(String::as_str))
+                    .unwrap_or("http://127.0.0.1:11434"),
+            )?
         }
         _ => return Err(Error::invalid()),
     };
     Ok(
-        json!({"status":"available","binding_harness":identity.harness,"fingerprint":identity.fingerprint()?,"effective_provider_address_verified":harness!="opencode"}),
+        json!({"status":"available","binding_harness":identity.harness,"fingerprint":identity.fingerprint()?,"effective_provider_address_verified":harness!="opencode","identity_kind":identity.identity_kind}),
     )
 }
