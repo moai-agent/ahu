@@ -7,18 +7,21 @@ use std::process::Output;
 fn record(repo: &TestRepo, dir: PathBuf, id: &str) -> PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let record_source = repo.path().to_path_buf();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: "secret prompt",
-            cwd: &record_source,
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
+    // Review consumes frozen launch metadata; it never plans or invokes a provider.
+    let command = ahu::harness::LaunchCommand {
+        program: "fixture-native".into(),
+        args: vec!["secret prompt".into()],
+        prompt_arg: Some(0),
+        native_eval_otlp: true,
+        planner_binding_digest: Some("synthetic-binding".into()),
+    };
+    let enforcement = ahu::harness::EnforcementReport {
+        harness: "claude-code".into(),
+        harness_version: Some("1.0.0".into()),
+        model_fixed_for_session: true,
+        gaps: Vec::new(),
+        applied_controls: Vec::new(),
+    };
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: id.to_string(),
@@ -45,7 +48,6 @@ fn record(repo: &TestRepo, dir: PathBuf, id: &str) -> PathBuf {
             selection_basis: Some("test".to_string()),
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),

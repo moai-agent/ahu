@@ -76,13 +76,12 @@ impl Projection {
         p.label("ahu.cost.basis", "harness_reported_not_provider_billing");
         p.flag("ahu.cost.tracking_limited", events.cost_tracking_limited);
         let source = match events.cost.source.as_deref() {
-            Some("claude_code_result_total") => {
-                Some(("claude_code_result_total", "maximum_reported_result_total"))
+            Some("native_cumulative_usd") => {
+                Some(("native_cumulative_usd", "maximum_reported_result_total"))
             }
-            Some("opencode_step_finish_sum") => Some((
-                "opencode_step_finish_sum",
-                "sum_first_valid_cost_per_part_id",
-            )),
+            Some("native_step_sum_usd") => {
+                Some(("native_step_sum_usd", "sum_first_valid_cost_per_part_id"))
+            }
             _ => None,
         };
         let cost_observed =

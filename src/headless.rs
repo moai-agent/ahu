@@ -183,19 +183,7 @@ pub fn batch_command(
         bail!("work mode requires frozen permissions=auto");
     }
     let repo = crate::git::discover(request.cwd)?;
-    let runtime = crate::harness_runtime::load(&repo, harness)?;
-    let plan = runtime.call("launch", json!({
-        "mode":"headless", "model":request.model, "permissions":request.permissions,
-        "work_mode":spec.options.work_mode, "session":spec.session, "native_version":spec.harness_version,
-        "timeout_seconds":spec.options.timeout_seconds, "cwd":request.cwd, "broker_dir":spec.broker_dir,
-        "native_profile":spec.native_profile, "native_controls":spec.native_controls,
-    }))?;
-    decoder::validate_launch_plan(
-        plan,
-        &runtime.descriptor().program,
-        request.prompt,
-        runtime.binding_digest(),
-    )
+    crate::harness::task_command(&repo, harness, request, Some(spec))
 }
 
 fn build_native_profile(
@@ -776,21 +764,8 @@ pub fn launch(
     // The committed agent manifest is the explicit, reviewable permission
     // choice for unattended worktree launches. Do not require an extra human
     // approval flag before the harness can start.
-    // The catalog is the one table of which harnesses have a validated batch
-    // profile and which executable to probe for them. A harness with an
-    // interactive adapter still needs its batch argument surface and event
-    // stream validated separately before it can run here, so the refusal below
-    // is named: the caller's next question is always "which one?", and the only
-    // correct answer to it is to report the refusal.
-    let entry = crate::catalog::harness(&pair.harness)
-        .filter(|h| h.supports(crate::catalog::Feature::HeadlessLaunch))
-        .ok_or_else(|| {
-            crate::util::Error::new(format!(
-                "unsupported headless harness {:?}; ahu has no validated batch profile for it and selected no fallback.",
-                pair.harness
-            ))
-        })?;
-    let program = entry.executable;
+    let runtime = crate::harness_runtime::load(repo, &pair.harness)?;
+    let program = &runtime.descriptor().program;
     let candidate = crate::selection::resolve_executable(program)
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
@@ -809,7 +784,6 @@ pub fn launch(
         .clone()
         .or_else(|| options.work_mode.then(|| "unknown".into()))
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let mut parent_release = None;
     let mut frozen_parent_spec = None;
@@ -918,16 +892,6 @@ pub fn launch(
         .as_ref()
         .map(crate::native::Profile::control_ids)
         .unwrap_or_default();
-    let trust_opencode_native_state = !spec.options.work_mode
-        && loaded.config.headless.trust_opencode_native_state
-        && plan.pair.harness == "opencode";
-    if trust_opencode_native_state {
-        spec.native_controls
-            .push("opencode.native-account-state=project-trusted".into());
-        spec.gaps.push(
-            "Project policy trusts OpenCode native account/authentication state for this headless task. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
-        );
-    }
     if let Some(profile) = &profile {
         spec.gaps.extend(profile.gaps.clone());
     }
@@ -948,16 +912,17 @@ pub fn launch(
         &plan.pair.harness,
         &spec.harness_version,
         &plan.harness_executable,
-        trust_opencode_native_state,
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility(
-            &plan.harness_executable,
+        crate::native_admission::validate_launch(
+            &repo.root,
             &plan.pair.harness,
             &plan.pair.model,
             permissions,
-            &repo.root,
+            "headless",
+            &spec.harness_version,
+            &plan.harness_executable,
         )?;
     }
     plan.native_admission = native_admission.clone();
@@ -1185,7 +1150,6 @@ fn validate_environment(
     harness: &str,
     version: &str,
     executable: &Path,
-    trust_opencode_native_state: bool,
     work_mode: bool,
 ) -> Result<crate::native_admission::Status> {
     for variable in [
@@ -1216,23 +1180,18 @@ fn validate_environment(
             }
         }
     }
-    crate::catalog::check_headless_version(harness, version)?;
     let loaded = crate::config::load(config_root)?
         .ok_or_else(|| Error::new("missing project configuration"))?;
-    let check_version = if work_mode {
-        work_mode::check_version
-    } else {
-        crate::catalog::check_harness_version
-    };
-    check_version(
-        harness,
-        version,
-        loaded
-            .config
-            .harness_version_pins
-            .get(harness)
-            .map(String::as_str),
-    )?;
+    if !work_mode {
+        crate::catalog::check_version(
+            version,
+            loaded
+                .config
+                .harness_version_pins
+                .get(harness)
+                .map(String::as_str),
+        )?;
+    }
     if work_mode {
         return Ok(work_mode::integration(
             harness,
@@ -1244,12 +1203,18 @@ fn validate_environment(
                 .map(String::as_str),
         ));
     }
-    crate::native_admission::enforce_headless_executable_with_opencode_state(
+    crate::native_admission::enforce_with_settings(
         config_root,
         harness,
         version,
         executable,
-        trust_opencode_native_state,
+        loaded
+            .config
+            .headless
+            .native_settings
+            .get(harness)
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     )
 }
 
@@ -1504,7 +1469,7 @@ pub struct Events {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    model_attributes: std::collections::BTreeMap<String, String>,
+    pub(crate) model_attributes: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
     #[serde(default)]
@@ -1900,7 +1865,6 @@ fn run_attempt(
     {
         bail!("harness executable changed since submission; refusing execution");
     }
-    crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record, spec.options.work_mode)?;
     validate_environment(
@@ -1909,18 +1873,17 @@ fn run_attempt(
         &record.identity.harness,
         &spec.harness_version,
         &real,
-        spec.native_controls
-            .iter()
-            .any(|control| control == "opencode.native-account-state=project-trusted"),
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility(
-            &real,
+        crate::native_admission::validate_launch(
+            &record.worktree,
             &record.identity.harness,
             &record.identity.model,
             record.identity.permissions,
-            &record.worktree,
+            "headless",
+            &spec.harness_version,
+            &real,
         )?;
     }
     if spec.options.work_mode {
@@ -1975,6 +1938,7 @@ fn run_attempt(
         Some(&record.task_id),
         Some(spec.attempt),
     );
+    crate::telemetry::configure_native_export(&mut command, rebuilt.native_eval_otlp);
     crate::telemetry::configure_task_identity(&mut command, &record, Some(spec));
     telemetry_span.configure_child_context(&mut command);
     command
@@ -2197,6 +2161,8 @@ fn run_attempt(
     if !matches!(decoded, Some(Ok(()))) {
         decoder.cancel();
     }
+    // Join the owned peer before taking its final cumulative observation.
+    drop(decoder);
     let mut events = std::mem::take(
         &mut *stdout_events
             .lock()
@@ -2259,11 +2225,15 @@ fn run_attempt(
             .contains(&crate::harness_runtime::Operation::Recover)
     {
         // Runtime owns native retrieval and format/version semantics. No builtin fallback.
-        let recovered = runtime.call("recover", json!({
-            "harness":record.identity.harness, "native_version":spec.harness_version,
-            "native_executable":real, "expected_executable_digest":spec.executable_digest,
-            "worktree":record.worktree, "session":session, "attempt_started_ms":attempt_started_ms,
-        }));
+        let recovered = (|| -> Result<Value> {
+            let native = crate::harness_runtime::native_params(&repo, runtime.descriptor())?;
+            runtime.call("recover", json!({
+                "harness":record.identity.harness, "native_version":spec.harness_version,
+                "native_executable":real, "expected_executable_digest":spec.executable_digest,
+                "worktree":record.worktree, "session":session, "attempt_started_ms":attempt_started_ms,
+                "home":native["home"], "environment":native["environment"],
+            }))
+        })();
         match recovered.and_then(decoder::validate_recovery) {
             Ok(true) => {
                 events.terminal = true;
@@ -2576,11 +2546,11 @@ pub(crate) fn private_attempt_metrics(
         {
             bail!("headless result identity unavailable or inconsistent");
         }
-        let source = match expected_harness {
-            "claude-code" if cost_usd.is_some() => Some("claude_code_result_total".to_owned()),
-            "opencode" if cost_usd.is_some() => Some("opencode_step_finish_sum".to_owned()),
-            _ => None,
-        };
+        let source = value
+            .pointer("/harness/cost/source")
+            .and_then(Value::as_str)
+            .filter(|source| matches!(*source, "native_cumulative_usd" | "native_step_sum_usd"))
+            .map(str::to_owned);
         if cost_usd.is_some() != source.is_some() {
             bail!("harness cost source does not match frozen identity");
         }
@@ -2962,13 +2932,8 @@ pub fn control(
                     "harness executable path changed; previous attempt preserved, resume refused"
                 );
             }
-            let version = crate::selection::probe_version(
-                real.to_str()
-                    .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
-            )
-            .ok_or_else(|| {
-                Error::new("cannot determine installed harness version before resume")
-            })?;
+            let runtime = crate::harness_runtime::load(repo, &record.identity.harness)?;
+            let version = crate::selection::probe_runtime(repo, &runtime)?;
             let loaded = crate::config::load(&record.worktree)?
                 .ok_or_else(|| Error::new("missing task configuration"))?;
             let pin = loaded
@@ -2979,7 +2944,7 @@ pub fn control(
             if spec.options.work_mode {
                 work_mode::check_version(&record.identity.harness, &version, pin)?;
             } else {
-                crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+                crate::catalog::check_version(&version, pin)?;
             }
             let current_digest = digest_bytes(&std::fs::read(&real)?);
             if pin.is_some() && current_digest != spec.executable_digest {
@@ -2993,9 +2958,6 @@ pub fn control(
                 &record.identity.harness,
                 &version,
                 &real,
-                spec.native_controls
-                    .iter()
-                    .any(|control| control == "opencode.native-account-state=project-trusted"),
                 spec.options.work_mode,
             )?;
             // Keep the finished attempt's provenance immutable. A floating
@@ -3157,7 +3119,6 @@ pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
 
 #[cfg(test)]
 mod telemetry_usage_tests {
-    use super::Events;
     use crate::state;
 
     #[test]
@@ -3202,7 +3163,7 @@ mod telemetry_usage_tests {
             "outcome":"succeeded",
             "identity":{"harness":"claude-code"},
             "process":{"exit_code":0},
-            "harness":{"terminal":true,"failed":false,"summary":"private-payload"},
+            "harness":{"terminal":true,"failed":false,"summary":"private-payload","cost":{"source":"native_cumulative_usd","usd":0.0125}},
             "metrics":{"schema_version":2,"elapsed_ms":{"kind":"observed","value":314},"values":{
                 "ahu.tokens.input":{"kind":"observed","value":0},
                 "ahu.tokens.output":{"kind":"unavailable"},
@@ -3266,7 +3227,7 @@ mod telemetry_usage_tests {
         assert_eq!(observations[0].cost.usd, Some(0.0125));
         assert_eq!(
             observations[0].cost.source.as_deref(),
-            Some("claude_code_result_total")
+            Some("native_cumulative_usd")
         );
         assert!(!format!("{:?}", observations[0].outcome).contains("private-payload"));
         assert!(observations[1].metrics_observed);
@@ -3947,11 +3908,11 @@ mod profile_and_metadata_tests {
             "repo_root": repo.root, "branch": "ahu/synthetic", "worktree": repo.root,
             "identity": {"mode": "automatic", "agent": "auto", "permissions": "prompt",
                 "harness": "codex", "model": "synthetic-model"},
-            "policy_digest": "synthetic", "catalog_version": crate::catalog::CATALOG_VERSION,
+            "policy_digest": "synthetic",
             "config_snapshot": {"entries": [], "skipped_directories": []},
             "config_snapshot_digest": "synthetic",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-            "launch_command": {"program": "synthetic-executable", "args": []},
+            "launch_command": {"native_eval_otlp":true,"program": "synthetic-executable", "args": []},
             "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
             "prompt_digest": digest_bytes(b"original prompt"),
             "enforcement": {"harness": "codex", "harness_version": null,

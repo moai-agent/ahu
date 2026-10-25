@@ -1648,7 +1648,8 @@ mod tests {
             return;
         }
         let mut events = crate::headless::Events::default();
-        events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
+        events.usage.input = Some(0);
+        events.usage.output = Some(7);
         let mut config = TelemetryConfig::default();
         assert!(super::local_metrics(&config, &events.usage, &events.cost, Some(12)).is_none());
         config.local_metrics = true;

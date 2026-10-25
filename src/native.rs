@@ -14,7 +14,7 @@ pub struct Request<'a> {
     pub session_model: &'a str,
     /// Exact helper model id. `None` pins helpers to `session_model`.
     pub helper_model: Option<&'a str>,
-    /// Declared helper role. Requested only: see the role gap in [`profile`].
+    /// Declared helper role. Requested only: see the role gap in [`profile_at`].
     pub helper_role: &'a str,
     pub max_concurrent: u32,
     /// Helper spawn depth. Only `1` is enforceable on any validated version.
@@ -65,6 +65,7 @@ pub struct Control {
 
 /// The native argument, environment, and disclosure surface for one attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub policy: String,
     pub harness: String,
@@ -107,13 +108,24 @@ pub fn profile_at(repo: &crate::git::Repo, request: &Request<'_>) -> Result<Prof
             "action":"native_profile", "project":repo.root, "request":request,
         }),
     )?;
+    validate_profile(result, request)
+}
+
+fn validate_profile(result: serde_json::Value, request: &Request<'_>) -> Result<Profile> {
     let profile: Profile =
         serde_json::from_value(result).map_err(|_| Error::new("invalid runtime native profile"))?;
-    if profile.harness != request.harness
+    if !matches!(request.policy, DISABLED | BOUNDED)
+        || profile.harness != request.harness
         || profile.policy != request.policy
         || profile.max_depth > request.max_depth
         || profile.max_concurrent > request.max_concurrent
-        || profile.helper_model != request.helper_model.unwrap_or(request.session_model)
+        || if request.policy == DISABLED {
+            !profile.helper_model.is_empty()
+                || profile.max_depth != 0
+                || profile.max_concurrent != 0
+        } else {
+            profile.helper_model != request.helper_model.unwrap_or(request.session_model)
+        }
         || profile
             .env
             .iter()
@@ -144,12 +156,6 @@ fn profile_env_key(key: &str) -> bool {
         && !matches!(key, "HOME" | "PATH" | "PWD")
 }
 
-/// No ambient repository lookup or built-in fallback is permitted.
-pub fn profile(_request: &Request<'_>) -> Result<Profile> {
-    Err(Error::new(
-        "native profile requires repository-scoped runtime profile_at",
-    ))
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum TaskKind {
     /// A native helper, so its lifecycle is the owner's to join.
@@ -454,5 +460,76 @@ impl Completeness {
             ));
         }
         blockers
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalized_profile_cannot_expand_policy_or_change_host_environment() {
+        let request = Request {
+            harness: "invented",
+            harness_version: "1.0.0",
+            policy: BOUNDED,
+            session_model: "exact",
+            helper_model: None,
+            helper_role: "reader",
+            max_concurrent: 1,
+            max_depth: 1,
+            budget_usd: Some(5.0),
+            assignment_writes: false,
+        };
+        let good = json!({"harness":"invented","policy":"bounded","args":[],"env":[],
+            "env_remove":[],"helper_tools":["Read"],"helper_model":"exact","max_concurrent":1,
+            "max_depth":1,"enforced":[],"gaps":[]});
+        assert!(validate_profile(good.clone(), &request).is_ok());
+        for (key, value) in [
+            ("harness", json!("other")),
+            ("policy", json!("disabled")),
+            ("helper_model", json!("other")),
+            ("max_depth", json!(2)),
+            ("max_concurrent", json!(2)),
+            ("unknown", json!(true)),
+        ] {
+            let mut invalid = good.clone();
+            invalid[key] = value;
+            assert!(validate_profile(invalid, &request).is_err(), "{key}");
+        }
+        for key in [
+            "AHU_TASK_ID",
+            "AHU_MCP_OTEL_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "HOME",
+            "PATH",
+            "PWD",
+        ] {
+            for remove in [false, true] {
+                let mut invalid = good.clone();
+                if remove {
+                    invalid["env_remove"] = json!([key]);
+                } else {
+                    invalid["env"] = json!([[key, "injected"]]);
+                }
+                assert!(validate_profile(invalid, &request).is_err(), "{key}");
+            }
+        }
+        let mut disabled = good.clone();
+        disabled["policy"] = json!("disabled");
+        disabled["helper_model"] = json!("");
+        disabled["max_depth"] = json!(0);
+        disabled["max_concurrent"] = json!(0);
+        let disabled_request = Request {
+            policy: DISABLED,
+            ..request
+        };
+        assert!(validate_profile(disabled.clone(), &disabled_request).is_ok());
+        disabled["max_concurrent"] = json!(1);
+        assert!(validate_profile(disabled, &disabled_request).is_err());
+        let mut allowed = good;
+        allowed["env"] = json!([["INVENTED_HELPER_MODEL", "exact"]]);
+        assert!(validate_profile(allowed, &request).is_ok());
     }
 }

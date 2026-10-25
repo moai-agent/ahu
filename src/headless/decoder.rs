@@ -126,6 +126,12 @@ impl Snapshot {
             || events.skills.len() > 128
             || !events.native.validate()
             || events.cost.usd.is_some_and(|n| !n.is_finite() || n < 0.0)
+            || match (events.cost.usd, events.cost.source.as_deref()) {
+                (None, None) | (Some(_), Some("native_cumulative_usd" | "native_step_sum_usd")) => {
+                    false
+                }
+                _ => true,
+            }
             || events
                 .trajectory
                 .observation
@@ -211,6 +217,9 @@ impl Snapshot {
             if prior.is_some_and(|p| current.is_none_or(|c| c < p)) {
                 return Err(invalid());
             }
+        }
+        if previous.cost.source.is_some() && previous.cost.source != next.cost.source {
+            return Err(invalid());
         }
         if previous
             .cost
@@ -422,50 +431,10 @@ pub(super) fn validate_recovery(value: Value) -> Result<bool> {
     Ok(recovery.recovered)
 }
 
-pub(super) fn validate_launch_plan(
-    value: Value,
-    program: &str,
-    prompt: &str,
-    binding_digest: String,
-) -> Result<crate::harness::LaunchCommand> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Plan {
-        program: String,
-        args: Vec<String>,
-        prompt_arg: usize,
-    }
-    let mut plan: Plan = serde_json::from_value(value).map_err(|_| invalid())?;
-    let marker = crate::harness::REDACTED_PROMPT;
-    if plan.program != program
-        || plan.args.len() > 256
-        || plan
-            .args
-            .iter()
-            .any(|s| s.contains('\0') || s.len() > 65536)
-        || plan.args.iter().map(String::len).sum::<usize>() > 262144
-        || plan.prompt_arg.checked_add(1) != Some(plan.args.len())
-        || plan.args.iter().filter(|s| s.as_str() == marker).count() != 1
-        || plan.args.get(plan.prompt_arg).map(String::as_str) != Some(marker)
-    {
-        return Err(invalid());
-    }
-    // Prompt bytes come only from core, after the plan was validated.
-    if let Some(slot) = plan.args.get_mut(plan.prompt_arg) {
-        *slot = prompt.into();
-    }
-    Ok(crate::harness::LaunchCommand {
-        program: plan.program,
-        args: plan.args,
-        prompt_arg: Some(plan.prompt_arg),
-        planner_binding_digest: Some(binding_digest),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> Value {
+    pub(super) fn fixture() -> Value {
         let mut value = serde_json::to_value(Events::default()).unwrap();
         value
             .as_object_mut()
@@ -557,30 +526,30 @@ mod tests {
         assert_eq!(events.session.as_deref(), Some("first"));
     }
     #[test]
-    fn generic_launch_requires_declared_program_and_exact_final_prompt_slot() {
-        let marker = crate::harness::REDACTED_PROMPT;
-        let good = json!({"program":"fixture","args":["run",marker],"prompt_arg":1});
-        let plan =
-            validate_launch_plan(good.clone(), "fixture", "literal $(never)", "frozen".into())
-                .unwrap();
-        assert_eq!(plan.args[1], "literal $(never)");
-        assert_eq!(plan.planner_binding_digest.as_deref(), Some("frozen"));
-        assert!(validate_launch_plan(good, "other", "prompt", "frozen".into()).is_err());
-        for args in [
-            json!([marker, "later"]),
-            json!([marker, marker]),
-            json!(["run", "no marker"]),
-        ] {
-            assert!(
-                validate_launch_plan(
-                    json!({"program":"fixture","args":args,"prompt_arg":1}),
-                    "fixture",
-                    "prompt",
-                    "frozen".into()
-                )
+    fn cost_sources_are_observed_neutral_and_cannot_change_midstream() {
+        let mut value = fixture();
+        value["cost"] = json!({"usd":0.0,"source":"native_cumulative_usd"});
+        let first = Snapshot::parse(value.clone(), "invented", false).unwrap();
+        let mut events = Events::default();
+        let dir = tempfile::tempdir().unwrap();
+        first.apply(&mut events, dir.path()).unwrap();
+        value["cost"]["source"] = json!("native_step_sum_usd");
+        assert!(
+            Snapshot::parse(value.clone(), "invented", false)
+                .unwrap()
+                .apply(&mut events, dir.path())
                 .is_err()
-            );
+        );
+        for source in [json!("unknown_provider_cost"), Value::Null] {
+            value["cost"]["source"] = source;
+            assert!(Snapshot::parse(value.clone(), "invented", false).is_err());
         }
+        value["cost"] = json!({});
+        assert!(Snapshot::parse(value, "invented", false).is_ok());
+    }
+
+    #[test]
+    fn recovery_response_requires_exact_schema() {
         assert!(validate_recovery(json!({"recovered":true,"raw":"PRIVATE"})).is_err());
         assert!(!validate_recovery(json!({"recovered":false})).unwrap());
     }
@@ -637,3 +606,7 @@ mod tests {
         assert!(stopped.load(Ordering::Acquire));
     }
 }
+
+#[cfg(test)]
+#[path = "decoder_tests.rs"]
+mod bridge_tests;

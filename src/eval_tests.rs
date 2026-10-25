@@ -587,7 +587,7 @@ fn unavailable_harness_cost_stays_distinct_from_an_observed_zero() {
 #[test]
 fn eval_cost_projection_reads_harness_result_even_without_local_metrics() {
     let envelope = serde_json::json!({
-        "harness": {"cost": {"usd": 0.004, "source": "opencode_step_finish_sum"}}
+        "harness": {"cost": {"usd": 0.004, "source": "native_step_sum_usd"}}
     });
     let projected = super::reported_tokens(Some(&envelope), None).unwrap();
     assert_eq!(
@@ -1525,11 +1525,23 @@ fn trajectory_projection_accepts_only_bounded_typed_evidence_and_scores_missing(
 #[test]
 fn native_trajectory_projection_preserves_reasoning_tokens_and_malformed_coverage() {
     let mut events = crate::headless::Events::default();
-    for line in [
-        br#"{"type":"thread.started","thread_id":"synthetic"}"#.as_slice(),
-        br#"{"type":"item.completed","item":{"id":"cmd","type":"command_execution","status":"completed","exit_code":7,"aggregated_output":"private synthetic result"}}"#,
-        br#"{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":9,"reasoning_output_tokens":3}}"#,
-    ] { events.observe("codex", line); }
+    events.terminal = true;
+    events.summary = "private synthetic result".into();
+    events.usage = crate::headless::TokenUsage {
+        input: Some(4),
+        output: Some(9),
+        reasoning: Some(3),
+        ..Default::default()
+    };
+    events.trajectory.observation = trajectory::Observation {
+        source: trajectory::Source::CodexTurns,
+        coverage: trajectory::Coverage::CompleteObservedStream,
+        steps: Some(1),
+        tool_calls: Some(1),
+        completed_tool_calls: Some(1),
+        tool_errors: Some(1),
+        ..Default::default()
+    };
     let metrics = crate::telemetry::local_metrics(
         &crate::config::TelemetryConfig {
             local_metrics: true,
@@ -1550,7 +1562,8 @@ fn native_trajectory_projection_preserves_reasoning_tokens_and_malformed_coverag
             .unwrap()
             .contains("private synthetic")
     );
-    events.observe("codex", b"{broken");
+    events.failed = true;
+    events.trajectory.malformed();
     assert!(events.failed);
     assert_eq!(
         events.trajectory.observation.coverage,
@@ -1646,20 +1659,21 @@ fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
 #[test]
 fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
     let mut observer = trajectory::Observer::default();
-    let events = [
-        serde_json::json!({"type":"runStarted", "data":{"engine":"v3","payloadSchema":"acp"}}),
-        serde_json::json!({"kind":"user_message_id_assigned","userMessageId":"synthetic-prompt"}),
-        serde_json::json!({"kind":"turn_start","messageId":"synthetic-turn"}),
-        serde_json::json!({"kind":"context_usage","usagePercentage":0}),
-        serde_json::json!({"kind":"turn_completion","status":"success","elapsedTime":0,
-            "promptTurnSummaries":[{"unit":"credit","usage":0}]}),
-    ];
-    observer.observe("kiro", &events[0]);
-    for meta in &events[1..] {
-        observer.observe("kiro", &serde_json::json!({"type":"sessionUpdate", "data":{
-            "sessionId":"sess_synthetic", "update":{"sessionUpdate":"session_info_update", "_meta":{"kiro":meta}}
-        }}));
-    }
+    observer.observation = trajectory::Observation {
+        source: trajectory::Source::KiroSessionUpdates,
+        coverage: trajectory::Coverage::Partial,
+        kiro_metering: Some(trajectory::KiroMetering {
+            context_usage_percent: Some(0.0),
+            peak_context_usage_percent: Some(0.0),
+            prompt_completions: Some(1),
+            observed_credits: Some(0.0),
+            credit_observations: 1,
+            observed_elapsed_ms: Some(0.0),
+            elapsed_observations: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let envelope = serde_json::json!({"harness":{"trajectory":observer}});
     let mut projected = serde_json::Map::new();
     insert_trajectory_fields(&mut projected, Some(&envelope), None, &Default::default()).unwrap();
