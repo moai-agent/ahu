@@ -135,3 +135,66 @@ fn invented_provider_setup_publishes_reviewed_proposal_and_cancels_without_write
     assert_eq!(agent.manifest.model, "sixth/exact");
     assert!(common::git(repo.path(), &["diff", "--cached", "--name-only"]).is_empty());
 }
+
+#[test]
+fn invented_provider_cli_preview_preserves_named_identity_and_prompt() {
+    let repo = configured();
+    repo.add_agent_on("reviewer", "1.0.0", "sixth", "sixth/exact");
+    repo.commit("registered sixth reviewer");
+    let fixtures = tempfile::tempdir().unwrap();
+    let record = fixtures.path().join("native-started");
+    let bin = common::fake_harnesses(fixtures.path(), &["sixth-native"], |_| record.clone());
+    let output = common::ahu()
+        .arg("--repo")
+        .arg(repo.path())
+        .args(["@reviewer", "--prompt", common::HOSTILE_PROMPT, "--dry-run"])
+        .env("HOME", fixtures.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("AHU_INTERACTIVE_PLUGIN", "terminal")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("reviewer") && text.contains("sixth/exact"),
+        "{text}"
+    );
+    assert!(
+        !record.exists(),
+        "preview must not start the native executable"
+    );
+    assert_eq!(
+        common::git(repo.path(), &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn synthetic_decoder_preserves_terminal_and_missing_result_evidence() {
+    let repo = configured();
+    let runtime =
+        ahu::harness_runtime::load(&ahu::git::discover(repo.path()).unwrap(), "sixth").unwrap();
+    for terminal in [false, true] {
+        let mut session = runtime.open_stream().unwrap();
+        let initial = session
+            .call("decode_start", serde_json::json!({"harness":"sixth"}))
+            .unwrap();
+        assert_eq!(initial["terminal"], false);
+        if terminal {
+            let event = session.call("decode_event", serde_json::json!({"stream":"stdout", "line": "{\"fixture_event\":\"result\",\"summary\":\"synthetic completion\"}"})).unwrap();
+            assert_eq!(event["terminal"], true);
+        }
+        let finished = session
+            .call("decode_finish", serde_json::json!({}))
+            .unwrap();
+        assert_eq!(finished["finished"], true);
+        assert_eq!(finished["terminal"], terminal);
+    }
+}

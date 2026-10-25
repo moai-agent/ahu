@@ -24,7 +24,49 @@ def admission(p):
                 'gaps':['Synthetic fixture only'],'conformance':'untested',
                 'headless':{'allowed':True,'reasons':[],'evidence_digest':'0'*64},'next_action':''}}
 
+# Authored normalized observations for invented fixture events. These are not
+# native-provider parsers. A missing result remains missing at finalization.
+SNAPSHOT = {
+    'schema_version':1, 'harness':D['id'], 'finished':False, 'session':None,
+    'terminal':False, 'terminal_evidence':None, 'failed':False, 'summary':'',
+    'blockers':[], 'unknown_events':0, 'stderr_diagnostics':[],
+    'stderr_unclassified_lines':0, 'stderr_informational_lines':0,
+    'usage':{}, 'cost':{}, 'cost_tracking_limited':True, 'model':None,
+    'model_attributes':{'ahu.harness.model.reported.coverage':'partial'},
+    'skills':[], 'skill_unknown_events':0, 'skill_observation':'unavailable',
+    'native':{'helpers':[], 'task_kinds':{}, 'shell_tasks':[],
+        'refusals':{'depth_limit':0,'concurrency_limit':0,'budget':0},
+        'reported_spawned':None, 'reported_completed':None, 'reported_max_depth':None,
+        'reported_by_type':{}, 'unknown_events':0, 'terminal_seen':False, 'stream_incomplete':False},
+    'native_completeness':{'complete':False,'terminated_cleanly':False,'evidence_complete':False,
+        'joined':[],'unjoined':[],'violations':[],'unobserved':[],'unknown':['synthetic'], 'unknown_events':0},
+    'native_blockers':[],
+    'trajectory':{'source':'unsupported','coverage':'none','steps':None,'tool_calls':None,
+        'completed_tool_calls':None,'tool_errors':None,'repeated_tool_calls':None,
+        'repeated_tool_errors':None,'tool_recoveries':None,'malformed_events':0,
+        'unclassified_events':0,'tracking_limited':True,'stream_incomplete':False},
+    'write_target_candidates':[]
+}
+
+def decode(op,p):
+    if op == 'decode_finish': SNAPSHOT['finished'] = True
+    if op == 'decode_event':
+        try: event=json.loads(p['line'])
+        except Exception: event={}
+        kind=event.get('fixture_event')
+        if kind in ['session','result','failure']:
+            if event.get('session'): SNAPSHOT['session']=event['session']
+            if kind in ['result','failure']:
+                SNAPSHOT['terminal']=True
+                SNAPSHOT['failed']=kind == 'failure'
+                SNAPSHOT['summary']=event.get('summary','')
+                SNAPSHOT['native']['terminal_seen']=True
+        elif kind == 'write': SNAPSHOT['write_target_candidates'].append(event['path'])
+        else: SNAPSHOT['unknown_events'] += 1
+    return SNAPSHOT
+
 def respond(op,p):
+    if op in ['decode_start','decode_event','decode_finish']: return decode(op,p)
     if op == 'probe':
         return {'version':'1.2.3','compatibility':None,'reviewed_version':False,'enforcement':{
             'harness':D['id'],'harness_version':'1.2.3','model_fixed_for_session':False,
@@ -42,6 +84,7 @@ def respond(op,p):
         return {'program':D['program'],'args':args,'prompt_arg':prompt_arg,'native_eval_otlp':True}
     if op == 'admission': return admission(p)
     if op == 'native_sources':
+        if p.get('settings',{}).get('view') == 'private_fingerprints': return {}
         if p.get('settings',{}).get('view') == 'hooks':
             return {'hooks':[],'settings':[],'mcp_servers':[],'declared_plugins':[],
                     'unreadable':[],'checked':[],'unscanned_harness':D['id']}
@@ -66,7 +109,6 @@ def respond(op,p):
             'path':str(path),'expected_before_sha256':before,'text':'{"configured":true}\n'}]}
     if op == 'auth':
         return {'status':'available','binding_harness':D['id'],'fingerprint':'1'*64,'identity_kind':'synthetic','effective_provider_address_verified':True}
-    if op == 'budget': return {'supported':False}
     raise ValueError('unsupported operation')
 
 sequence = 0
