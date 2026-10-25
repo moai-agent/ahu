@@ -15,6 +15,7 @@ fn settings_with_hooks(event: &str, matcher: Option<&str>, command: &str) -> Str
 #[test]
 fn hook_scripts_travel_into_the_worktree_with_their_executable_bit() {
     let repo = TestRepo::new();
+    repo.install_runtime("claude-code");
     let script = repo.write(".claude/hooks/guard.sh", "#!/bin/sh\nexit 2\n");
     make_executable(&script);
     repo.write(
@@ -58,6 +59,7 @@ fn hook_scripts_travel_into_the_worktree_with_their_executable_bit() {
 #[test]
 fn a_mode_only_change_is_drift_and_is_synced_into_the_worktree() {
     let repo = TestRepo::new();
+    repo.install_runtime("claude-code");
     let script = repo.write(".claude/hooks/guard.sh", "#!/bin/sh\nexit 0\n");
     make_executable(&script);
     repo.commit("hooks");

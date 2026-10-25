@@ -540,11 +540,16 @@ fn diff_is_not_a_command_and_task_offers_the_git_command_instead() {
     ] {
         let out = run(&repo, &args);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("unknown command"), "{args:?}: {stderr}");
+        let expected = if args.len() == 1 {
+            "no enabled installed harness runtime"
+        } else {
+            "unknown command"
+        };
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
         assert!(out.stdout.is_empty(), "{args:?}");
         assert_eq!(
             out.status.code(),
-            run(&repo, &["definitely-not-a-command"]).status.code(),
+            Some(if args.len() == 1 { 5 } else { 2 }),
             "{args:?}"
         );
     }

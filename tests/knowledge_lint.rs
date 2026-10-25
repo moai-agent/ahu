@@ -150,7 +150,9 @@ const CONCEPT: &str = "---\ntype: table\ntitle: Fixture\n---\n\nBody.\n";
 
 fn configure(repo: &TestRepo, bundles: &[&str], fail_on_warnings: bool) {
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
+    let mut config: toml::Value = toml::from_str(&repo.read(".agents/ahu/config.toml")).unwrap();
+    config.as_table_mut().unwrap().remove("knowledge");
+    let text = toml::to_string(&config).unwrap();
     repo.write(
         ".agents/ahu/config.toml",
         &format!(
@@ -217,7 +219,9 @@ fn an_omitted_knowledge_section_leaves_existing_configurations_valid() {
 fn knowledge_accepts_only_the_fields_it_defines() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
+    let mut config: toml::Value = toml::from_str(&repo.read(".agents/ahu/config.toml")).unwrap();
+    config.as_table_mut().unwrap().remove("knowledge");
+    let text = toml::to_string(&config).unwrap();
     repo.write(
         ".agents/ahu/config.toml",
         &format!("{text}\n[knowledge]\nbundles = [\"docs/knowledge\"]\nokf_path = \"/tmp/okf\"\n"),
@@ -245,7 +249,10 @@ fn a_bundle_path_must_be_a_plain_location_inside_the_checkout() {
     for (bundle, expected) in cases {
         let repo = TestRepo::new();
         repo.init_config();
-        let text = repo.read(".agents/ahu/config.toml");
+        let mut config: toml::Value =
+            toml::from_str(&repo.read(".agents/ahu/config.toml")).unwrap();
+        config.as_table_mut().unwrap().remove("knowledge");
+        let text = toml::to_string(&config).unwrap();
         repo.write(
             ".agents/ahu/config.toml",
             &format!("{text}\n[knowledge]\nbundles = [{}]\n", toml_string(bundle)),

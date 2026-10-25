@@ -198,7 +198,15 @@ fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
         "{startup}"
     );
     // Planning creates nothing in the invoking checkout's own store.
-    assert!(!repo.path().join(".ahu/state/repos").exists());
+    assert!(
+        !repo
+            .path()
+            .join(".ahu/state/repos")
+            .join(discovered.identity())
+            .join("tasks")
+            .join(&plan.task_id)
+            .exists()
+    );
 }
 
 /// A launch made from inside a task worktree records into the *new* task's

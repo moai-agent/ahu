@@ -204,23 +204,24 @@ fn running_and_interrupted_follow_owner_liveness_and_reconcile_stale_state() {
     let before = snapshot(&f.dir);
     let result = f.json("result");
     assert_eq!(result["task_id"], "abc1");
-    assert_eq!(result["outcome"], "running");
+    assert_eq!(result["outcome"], "starting");
     assert_eq!(result["review"]["liveness"], "live");
     assert_eq!(result["review"]["native_session"], Value::Null);
     let task = f.json("task");
     assert_eq!(task["execution_backend"], "headless");
     assert_eq!(task["attempt"], result["review"]);
+    // Persisted task state and current attempt observation are separate evidence.
     assert_eq!(task["session_state"], "running");
     for args in [&["task", "abc1"][..], &["result", "abc1"]] {
         let out = text(f.run(args));
         assert!(out.contains("headless"), "{out}");
-        assert!(out.contains("attempt   1 / running"), "{out}");
+        assert!(out.contains("attempt   1 / starting"), "{out}");
     }
     // The listing's `MODE` column is the first to leave a narrow terminal, but
     // the attempt line underneath the row is what actually identifies a
     // headless task, and it is not a column.
     let listed = text(f.run(&["tasks"]));
-    assert!(listed.contains("attempt   1 / running"), "{listed}");
+    assert!(listed.contains("attempt   1 / starting"), "{listed}");
     assert_eq!(snapshot(&f.dir), before);
     drop(lock);
     let result = f.json("result");

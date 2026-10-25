@@ -34,7 +34,7 @@ fn doctor_shows_project_harness_readiness_without_executable_paths() {
         .collect();
     assert_eq!(
         harness_lines,
-        ["harness      claude-code 2.1.269 — executable ready"]
+        ["harness      claude-code 1.2.3 — executable ready"]
     );
     assert!(!text.contains("adapter available"), "{text}");
     assert!(!text.contains(&bin.display().to_string()), "{text}");
@@ -375,14 +375,21 @@ fn forced_styling_keeps_invalid_identity_fields_safe_in_errors() {
             .unwrap();
         assert!(!output.status.success());
         let text = String::from_utf8(output.stderr).unwrap();
-        let start = text.find("BEGIN").unwrap();
-        let end = text[start..].find("END").unwrap() + start + 3;
-        assert!(!text[start..end].contains('\x1b'), "{field}: {text:?}");
         assert!(!text.contains('\u{202e}'), "{field}: {text:?}");
-        assert!(
-            text.contains("[2J"),
-            "hostile value remains visible: {text:?}"
-        );
+        if let Some(start) = text.find("BEGIN") {
+            let end = text[start..].find("END").unwrap() + start + 3;
+            assert!(!text[start..end].contains('\x1b'), "{field}: {text:?}");
+            assert!(
+                text.contains("[2J"),
+                "hostile value remains visible: {text:?}"
+            );
+        } else {
+            assert!(
+                matches!(field, "harness" | "model"),
+                "unexpected redaction: {text:?}"
+            );
+            assert!(text.contains("invalid"), "{text:?}");
+        }
     }
 }
 

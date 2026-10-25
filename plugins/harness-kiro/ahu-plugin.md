@@ -22,7 +22,7 @@ harness_runtime:
     environment_keys: ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "KIRO_API_KEY", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"]
     capabilities: [decode-event-batches-v1]
     tested_versions: ["2.29.0", "2.34.0"]
-    context_paths: [".kiro/"]
+    context_paths: [".kiro/", ".kiroignore"]
     private_context_paths: []
     skill_paths: [".agents/skills/"]
     native_source_paths: []
