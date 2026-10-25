@@ -64,7 +64,7 @@ Schemas use JSON Schema Draft 2020-12. An absent `$schema` selects that draft;
 an explicit value must be `https://json-schema.org/draft/2020-12/schema`.
 Supported keywords are:
 
-- Boolean schemas, `type` (including unions), `enum`, and `const`.
+- boolean schemas, `type` (including unions), `enum`, and `const`.
 - `properties`, `required`, `additionalProperties`, `minProperties`, and `maxProperties`.
 - `items`, `prefixItems`, `uniqueItems`, `minItems`, and `maxItems`.
 - `minLength`, `maxLength`, `allOf`, `anyOf`, `oneOf`, and `not`.

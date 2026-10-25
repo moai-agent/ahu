@@ -292,10 +292,10 @@ invocation adapters with the following explicit completion contracts:
 
 | Harness | Completion evidence |
 | --- | --- |
-| Codex | `item.completed`, `item.type: function_call_output`, matching `item.call_id`, Boolean `item.is_error` |
-| Claude Code | `user`, `message.content[]` with `type: tool_result`, matching `tool_use_id`, Boolean `is_error` |
+| Codex | `item.completed`, `item.type: function_call_output`, matching `item.call_id`, boolean `item.is_error` |
+| Claude Code | `user`, `message.content[]` with `type: tool_result`, matching `tool_use_id`, boolean `is_error` |
 | OpenCode | Skill tool snapshot with `part.state.status: completed` or `error`; snapshots correlate by `part.callID` |
-| Antigravity | `type: tool_result`, matching `tool_use_id`, Boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
+| Antigravity | `type: tool_result`, matching `tool_use_id`, boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
 
 Separate results correlate with invocation `call_id` (Codex) or `id` (Claude
 Code and flat Antigravity). IDs are bounded to 128 graphic bytes and held

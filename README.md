@@ -65,7 +65,7 @@ security limits, and the review criteria for adding core behavior.
 
 ## Everyday use
 
-Ahu and its maintained executable plugins use Rust; Python is only a development
+ahu and its maintained executable plugins use Rust; Python is only a development
 tooling dependency. See the [runtime inventory](docs/rust-runtime.md) for the five
 existing harness adapters and the scope of experimental harness plugins.
 
