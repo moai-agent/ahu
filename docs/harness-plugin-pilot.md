@@ -161,3 +161,27 @@ Planner exchange has a timeout and cleans up its owned process group on return.
 The pilot does not yet connect interactive launch cancellation to that exchange.
 Abrupt coordinator termination is not a guaranteed planner cleanup path; this
 needs explicit lifecycle tests before promoting the contract to supported use.
+
+## Live pilot observations
+
+A local smoke on 2026-10-25 used Codex CLI 0.163.0 and requested `gpt-6-astra`.
+The planner was a compiled Rust executable installed with a content pin. These
+observations establish the tested paths, not a complete harness extraction or a
+promise about other native versions and configurations.
+
+| Path | Observed result | Remaining limit |
+| --- | --- | --- |
+| Headless, without a terminal host or tracker | Actual MCP call, shell write, deterministic eval score 1.0, required-tool success, and complete MCP-session eval telemetry | Native tool coverage is distinct from MCP-session coverage |
+| Current-terminal interactive | Actual MCP call and shell write; task lifecycle spans arrived | MCP spans lacked task attribution; exiting the CLI retained a native-service-owned MCP child until the exact native session was archived |
+| Interactive through the Rust cmux host | Actual MCP call and shell write, task-attributed MCP spans, and task/workspace removal | This path used cmux 0.64.22's native Codex shim; it does not establish plain-terminal behavior |
+
+The disposable cmux group anchor was removed separately after ownership checks.
+Preexisting workspaces were retained. The native daemon automatic startup setting did
+not resolve the plain-terminal gap when a shared daemon was already running.
+Do not adopt that setting as a fix or require cmux to obtain working telemetry.
+
+The next runtime contract must carry per-task MCP context across native service
+boundaries and account for owned native sessions and children during cleanup.
+Do not assume a CLI exit stops a persistent service's work, infer missing usage
+as zero, or stop shared services to clean up one task. Native behavior belongs
+in the harness plugin; core retains task identity and coordination authority.

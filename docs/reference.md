@@ -171,7 +171,7 @@ arbitrary shell operations, and harness write events remain reported evidence,
 not OS-level filesystem containment. Approval summaries and targets are kept
 in the task's owner-only state directory.
 
-For offline harness plugin discovery and disabled local-package preparation, see
+For offline harness plugin discovery and preparation without activation, see
 [the setup workflow](harness-plugin-pilot.md#discover-and-prepare-a-local-package).
 These operations do not require a provider or migrate built-in harnesses.
 
