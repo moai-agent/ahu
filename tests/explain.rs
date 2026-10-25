@@ -78,7 +78,7 @@ fn the_overview_embeds_the_diagrams_and_the_standing_warnings() {
     assert!(!text.contains(ahu::harness::RELIABILITY_WARNING));
     assert!(text.contains("normal harness capabilities"));
     assert!(text.contains(ahu::hooks::NON_PROJECT_HOOK_WARNING));
-    assert!(text.contains(ahu::catalog::CATALOG_VERSION));
+    assert!(text.contains("installed Rust plugins"));
     assert!(text.contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -99,15 +99,10 @@ fn the_overview_states_the_load_bearing_invariants() {
 }
 
 #[test]
-fn every_harness_in_the_catalog_is_listed_with_its_status() {
+fn installed_behavior_is_described_without_a_builtin_provider_registry() {
     for text in [explain::overview(), explain::markdown()] {
-        for harness in ahu::catalog::HARNESSES {
-            assert!(text.contains(harness.id), "{} missing", harness.id);
-        }
-        // Each harness shows its observed behavior evidence; it is not a gate.
-        for version in ["2.1.269", "0.154.0", "1.2.2"] {
-            assert!(text.contains(version), "{version} missing from {text}");
-        }
+        assert!(text.contains("installed Rust plugins"), "{text}");
+        assert!(text.contains("ahu doctor"), "{text}");
     }
 }
 

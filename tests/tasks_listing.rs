@@ -49,7 +49,6 @@ fn write_schema_1(tasks_dir: &Path, task_id: &str) -> PathBuf {
             "selection_basis": null,
         },
         "policy_digest": "0".repeat(64),
-        "catalog_version": ahu::catalog::CATALOG_VERSION,
         "config_snapshot": {"entries": [], "skipped_directories": []},
         "config_snapshot_digest": "0".repeat(64),
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
@@ -78,17 +77,14 @@ fn write_schema_1(tasks_dir: &Path, task_id: &str) -> PathBuf {
 /// A valid current-schema record, written the way a launch writes one.
 fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are chris."), "current work").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: &delivered,
-            cwd: &discovered.root,
-            permissions: Default::default(),
-        })
-        .unwrap();
+    let command = common::record_command(&ahu::harness::LaunchRequest {
+        model: "claude-opus-5",
+        prompt: &delivered,
+        cwd: &discovered.root,
+        permissions: Default::default(),
+    });
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: task_id.to_string(),
@@ -115,7 +111,6 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -126,9 +121,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
         prompt_digest: ahu::util::digest_bytes(b"current work"),
         harness_executable: PathBuf::from("/usr/local/bin/claude"),
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: common::record_enforcement("claude-code"),
         session_host: None,
         session_ref: None,
         state: ahu::task::TaskState::Exited,

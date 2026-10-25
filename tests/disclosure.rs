@@ -34,7 +34,9 @@ fn plan_for(repo: &TestRepo, harness: &str, model: &str) -> (git::Repo, launch::
         model: model.to_string(),
         basis: "named agent".to_string(),
         policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
+        runtime_binding_digest: ahu::harness_runtime::load(&discovered, harness)
+            .unwrap()
+            .binding_digest(),
     };
     let plan = launch::plan_with_state_home(
         &discovered,
@@ -64,11 +66,9 @@ fn repo_on(harness: &str, model: &str) -> TestRepo {
             "schema_version = 1\n\
              harness_preferences = [{harness:?}]\n\
              model_selection = \"project-ranked\"\n\
-             catalog_version = {:?}\n\
              \n[model_rankings]\n\
              {harness:?} = [{model:?}]\n\
 ",
-            ahu::catalog::CATALOG_VERSION
         ),
     );
     repo.add_agent_on("sable", "1.0.0", harness, model);
@@ -751,17 +751,14 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
 /// A minimal previous-launch record for `drift::detect`.
 fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::TaskRecord {
     let discovered = git::discover(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some(&agent.instructions), "earlier").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: &delivered,
-            cwd: &discovered.root,
-            permissions: Default::default(),
-        })
-        .unwrap();
+    let command = common::record_command(&ahu::harness::LaunchRequest {
+        model: "claude-opus-5",
+        prompt: &delivered,
+        cwd: &discovered.root,
+        permissions: Default::default(),
+    });
     ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "prev0003".to_string(),
@@ -788,7 +785,6 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -799,9 +795,7 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
         prompt_digest: ahu::util::digest_bytes(b"earlier"),
         harness_executable: std::path::PathBuf::from("/usr/local/bin/claude"),
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: common::record_enforcement("claude-code"),
         session_host: None,
         session_ref: None,
         state: ahu::task::TaskState::Exited,

@@ -65,6 +65,13 @@ def decode(op,p):
         else: SNAPSHOT['unknown_events'] += 1
     return SNAPSHOT
 
+def policy(p):
+    root = pathlib.Path(p.get('project',p.get('cwd','/')))
+    for path in [root, *root.parents]:
+        candidate=path / '.fixture' / 'runtime.json'
+        if candidate.is_file(): return json.loads(candidate.read_text())
+    return {}
+
 def respond(op,p):
     if op in ['decode_start','decode_event','decode_finish']: return decode(op,p)
     if op == 'probe':
@@ -74,17 +81,24 @@ def respond(op,p):
     if op == 'models':
         return {'source':'suggested','models':D['models'],'entitlement_checked':False}
     if op == 'launch':
+        configured=policy(p)
+        if p['permissions'] in configured.get('refuse_permissions',[]): raise ValueError('refused')
+        if p['model'] in configured.get('refuse_models',[]): raise ValueError('refused')
         args = ['--model',p['model']]
         if p['permissions'] == 'auto': args += ['--auto']
         if p['permissions'] == 'accept-edits': args += ['--accept-edits']
         prompt_arg = None
         if p['mode'] != 'direct':
+            args.append('--')
             prompt_arg = len(args)
             args.append('<prompt: see prompt.txt>')
-        return {'program':D['program'],'args':args,'prompt_arg':prompt_arg,'native_eval_otlp':True}
+        result={'program':D['program'],'args':args,'prompt_arg':prompt_arg,'native_eval_otlp':True}
+        result.update(configured.get('launch_overrides',{}))
+        for field in configured.get('launch_omit',[]): result.pop(field,None)
+        return result
     if op == 'admission': return admission(p)
     if op == 'native_sources':
-        if p.get('settings',{}).get('view') == 'private_fingerprints': return {}
+        if p.get('settings',{}).get('view') == 'private_fingerprints': return {'fingerprints':{}}
         if p.get('settings',{}).get('view') == 'hooks':
             return {'hooks':[],'settings':[],'mcp_servers':[],'declared_plugins':[],
                     'unreadable':[],'checked':[],'unscanned_harness':D['id']}
