@@ -170,7 +170,7 @@ pub fn is_excluded(candidate: &Path) -> bool {
 ///
 /// This is the only place ahu turns a harness program name into something it
 /// will run, and every harness invocation goes through it -- launches, the
-/// `run-task` exec, and the `--version` probes alike. It refuses relative `PATH`
+/// `run-task` exec and explicit runtime inspection alike. It refuses relative `PATH`
 /// entries and any candidate inside a repository ahu has opened.
 pub fn resolve_executable(executable: &str) -> Option<String> {
     which(executable, |candidate| {
@@ -258,101 +258,4 @@ fn is_executable(path: &Path) -> bool {
     {
         path.is_file()
     }
-}
-
-/// Bound elapsed time, captured bytes and pipe lifetime. Config diagnostics can
-/// contain secrets, so stderr is never captured and callers never echo stdout.
-/// Callers choose whether output is needed; failed probes never return output.
-pub(crate) fn bounded_config_probe(
-    command: &mut std::process::Command,
-    capture: bool,
-    timeout: std::time::Duration,
-) -> Option<String> {
-    use std::io::Read;
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-    command
-        .stdin(Stdio::null())
-        .stdout(if capture {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stderr(Stdio::null())
-        .process_group(0);
-    let mut child = command.spawn().ok()?;
-    let mut reader = child.stdout.take();
-    let pid = child.id();
-    let deadline = Instant::now() + timeout;
-    let mut bytes = Vec::new();
-    let exited = (|| {
-        if let Some(pipe) = &reader {
-            use std::os::fd::AsRawFd;
-            let fd = pipe.as_raw_fd();
-            // SAFETY: pipe owns this live descriptor for the whole probe.
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-            {
-                return false;
-            }
-        }
-        loop {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            // Drain without waiting for EOF: a detached descendant could keep
-            // the pipe open after the leader exits. No reader thread survives.
-            if let Some(pipe) = &mut reader {
-                loop {
-                    if Instant::now() >= deadline {
-                        return false;
-                    }
-                    let mut buffer = [0; 8192];
-                    match pipe.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) if bytes.len() + n <= 1_048_576 => {
-                            bytes.extend_from_slice(&buffer[..n])
-                        }
-                        Ok(_) => return false,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => return false,
-                    }
-                }
-            }
-            match crate::headless::child_exited(pid) {
-                // One final drain after observing exit captures bytes written
-                // between the last read and the exit observation.
-                Ok(true) => {
-                    if let Some(pipe) = &mut reader {
-                        let mut tail = Vec::new();
-                        match pipe
-                            .take((1_048_577 - bytes.len()) as u64)
-                            .read_to_end(&mut tail)
-                        {
-                            Ok(_) => (),
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
-                            Err(_) => return false,
-                        }
-                        bytes.extend(tail);
-                    }
-                    return bytes.len() <= 1_048_576;
-                }
-                Err(_) => return false,
-                Ok(false) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
-    })();
-    // SAFETY: the child has not been reaped, so the process group cannot be reused.
-    // Kill descendants too: they may otherwise hold the capture pipe indefinitely.
-    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-    // A native wrapper can move itself into another process group. Target the
-    // unreaped leader as well so group movement cannot defeat the deadline.
-    let _ = child.kill();
-    let status = child.wait().ok()?;
-    if !exited || !status.success() {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
 }
