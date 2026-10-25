@@ -10,7 +10,10 @@ mod helpers;
 mod hook_inventory;
 mod isolation;
 mod process;
+mod profile;
+mod recovery;
 mod setup;
+mod source_actions;
 mod sources;
 mod trust;
 mod util;
@@ -151,6 +154,9 @@ pub(crate) fn valid_environment_names(names: &[String]) -> bool {
 /// Trust calls require a host-verified task/worktree ownership grant. Setup only
 /// proposes changes. Account calls never return credentials or raw native output.
 pub fn call(harness: &str, operation: &str, params: &Value) -> Result<Value> {
+    if operation == "admission" && params.get("action").is_some() {
+        return bound_output(profile::call(harness, params), false);
+    }
     // Validate operation-specific inputs before any native dispatch. A recognized
     // project snapshot surrounds all operations that may execute native code.
     if matches!(
@@ -226,6 +232,7 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
         }
         "setup" => setup::call(harness, params),
         "native_sources" => sources::call(harness, params),
+        "recover" => recovery::call(harness, params),
         "admission" => {
             if params.get("settings").is_some() || params.get("managed_claude").is_none() {
                 ambient::admission(harness, params)
@@ -235,30 +242,32 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
         }
         "trust_prepare" | "trust_cleanup" => {
             let p: TrustParams = decode(params)?;
-            let relocated: &[&str] = match harness {
-                "codex" => &["CODEX_HOME"],
-                "claude-code" => &["CLAUDE_CONFIG_DIR"],
-                _ => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
-            };
-            if p.overrides.len() > 512
-                || p.overrides
-                    .iter()
-                    .any(|key| relocated.contains(&key.as_str()))
-            {
-                return Err(Error::invalid());
-            }
-            directory(&p.home)?;
-            directory(&p.task_dir)?;
-            files::check_components(&p.worktree)?;
-            if p.permissions != Permissions::Auto
-                || p.mode != Mode::Interactive
-                || !matches!(harness, "codex" | "claude-code" | "antigravity")
+            if operation == "trust_prepare"
+                && (p.permissions != Permissions::Auto
+                    || p.mode != Mode::Interactive
+                    || !matches!(harness, "codex" | "claude-code" | "antigravity"))
             {
                 if std::fs::symlink_metadata(p.task_dir.join("native-trust.json")).is_ok() {
                     return Err(Error::invalid());
                 }
                 return Ok(json!({"status":"not_applicable","receipt_path":null}));
             }
+            let relocated: &[&str] = match harness {
+                "codex" => &["CODEX_HOME"],
+                "claude-code" => &["CLAUDE_CONFIG_DIR"],
+                _ => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
+            };
+            if operation == "trust_prepare"
+                && (p.overrides.len() > 512
+                    || p.overrides
+                        .iter()
+                        .any(|key| relocated.contains(&key.as_str())))
+            {
+                return Err(Error::invalid());
+            }
+            directory(&p.home)?;
+            directory(&p.task_dir)?;
+            files::check_components(&p.worktree)?;
             if operation == "trust_prepare" {
                 directory(&p.worktree)?;
             }
@@ -560,3 +569,9 @@ fn admit(harness: &str, params: &Value) -> Result<Value> {
 
 #[cfg(test)]
 mod admission_tests;
+
+#[cfg(test)]
+mod kiro_tests;
+
+#[cfg(test)]
+mod hook_tests;

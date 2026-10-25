@@ -210,6 +210,7 @@ pub(crate) fn call(harness: &str, params: &Value) -> Result<Value> {
         let roots: &[&str] = match harness {
             "kiro" => &[".agents/skills", ".kiro/skills"],
             "claude-code" => &[".agents/skills", ".claude/skills"],
+            "opencode" => &[".agents/skills", ".opencode/skills"],
             _ => &[".agents/skills"],
         };
         for root in roots {

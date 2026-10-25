@@ -41,6 +41,16 @@ pub(crate) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
+    run_command(command, timeout)
+}
+
+/// Execute a fully configured native inspection command with the same bounds.
+pub(crate) fn run_command(mut command: Command, timeout: Duration) -> Result<Vec<u8>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
     let mut child = command.spawn().map_err(|_| Error::invalid())?;
     let outcome = (|| {
         let mut stdout = child.stdout.take().ok_or_else(Error::invalid)?;

@@ -26,6 +26,9 @@ struct Import {
     format: String,
 }
 pub(crate) fn call(harness: &str, params: &Value) -> Result<Value> {
+    if params.get("action").is_some() {
+        return crate::source_actions::call(harness, params);
+    }
     let p: Params = crate::decode(params)?;
     crate::directory(&p.project)?;
     crate::directory(&p.home)?;
