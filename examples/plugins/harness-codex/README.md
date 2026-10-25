@@ -42,7 +42,7 @@ with these substitutions:
 
 Install with `ahu plugins install harness-codex`. Do not use `plugins invoke`:
 registered Codex task planning selects this package in the pilot build.
-A registered Codex agent can then run with `ahu @agent --work-mode --prompt 'TASK'`.
+A registered Codex agent can then run with `ahu @agent --headless --work-mode --allow-widened-approvals --prompt 'TASK'`.
 Use a synthetic task, a known working native sign-in, and an explicitly reviewed
 MCP configuration pointing to the pilot binary. Work mode grants unattended native
 tools and does not provide OS confinement.

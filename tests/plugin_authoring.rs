@@ -3,7 +3,12 @@
 mod common;
 
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Output};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::{Command, Output},
+};
 
 const ID: &str = "text-stats";
 const BINDING: &str = ".agents/ahu/plugins/text-stats.md";
@@ -72,27 +77,36 @@ fn independent_example_installs_invokes_disables_and_removes_offline() {
     common::git(&root, &["init", "-q"]);
 
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
-    for entry in fs::read_dir(example).unwrap() {
-        let entry = entry.unwrap();
-        fs::copy(entry.path(), package.join(entry.file_name())).unwrap();
+    fs::create_dir(package.join("bin")).unwrap();
+    for name in ["Cargo.toml", "ahu-plugin.md"] {
+        fs::copy(example.join(name), package.join(name)).unwrap();
     }
-    let entrypoint = package.join("text-stats.py");
+    // Instrument a disposable Rust build, never the shipped source or binary.
+    let build = base.join("build");
+    fs::create_dir_all(build.join("src")).unwrap();
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(example.join(name), build.join(name)).unwrap();
+    }
+    let source = fs::read_to_string(example.join("src/main.rs")).unwrap();
+    let instrumented = source.replace("fn main() {", &format!(
+        "fn main() {{ use std::io::Write as _; let mut marker = std::fs::OpenOptions::new().create(true).append(true).open({}).unwrap(); writeln!(marker, \"started\").unwrap();",
+        json!(marker.to_str().unwrap())
+    ));
+    fs::write(build.join("src/main.rs"), instrumented).unwrap();
+    let output = Command::new(env!("CARGO"))
+        .args(["build", "--offline", "--locked", "--manifest-path"])
+        .arg(build.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(base.join("target"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let entrypoint = package.join("bin/text-stats");
+    fs::copy(base.join("target/debug/text-stats"), &entrypoint).unwrap();
     assert_ne!(
         fs::metadata(&entrypoint).unwrap().permissions().mode() & 0o111,
         0
     );
-    // Observe every startup, including a hypothetical start that immediately
-    // fails. Instrument only the disposable copy, before calculating its pin.
-    let script = fs::read_to_string(&entrypoint).unwrap();
-    let (shebang, body) = script.split_once('\n').unwrap();
-    fs::write(
-        &entrypoint,
-        format!(
-            "{shebang}\nwith open({}, 'a') as marker:\n    marker.write('started\\n')\n{body}",
-            json!(marker)
-        ),
-    )
-    .unwrap();
     let digest = success(run(
         &root,
         &["plugins", "digest", package.to_str().unwrap()],

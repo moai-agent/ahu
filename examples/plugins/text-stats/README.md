@@ -1,15 +1,13 @@
 # Offline text statistics plugin
 
 This independent authoring example uses the public [executable plugin V1
-protocol](../../../docs/executable-plugins.md). It needs `/usr/bin/python3`
-(Python 3.5 or later), Git, and an already built `ahu` on PATH. There are no Python
-dependencies, build steps, credentials, network calls, `gh`, or `cmux` commands.
-`Cargo.toml` supplies the required package identity only.
+protocol](../../../docs/executable-plugins.md). Build it with Rust and Cargo;
+the resulting executable needs no Python, credentials, network calls, `gh`, or
+`cmux`. It has no dependency on ahu's Rust implementation.
 
 Ahu sends one JSON request on stdin, closes stdin, and expects one JSON response
-and a zero exit status. Only the entrypoint is copied into the execution snapshot;
-the script therefore uses only Python's standard library, with no package-relative
-assets. Its result depends only on the supplied text, not the invocation ID.
+and a zero exit status. Only the executable is copied into the execution snapshot.
+Its result depends only on the supplied text, not the invocation ID.
 Input must contain exactly one string field, `text`. The result counts Unicode
 code points and whitespace-separated words; empty text returns two zeroes.
 Invalid payloads produce the protocol's `invalid_input` response (the foreground
@@ -17,11 +15,19 @@ CLI reports a plugin error as `failed`).
 
 Run these commands from the Ahu checkout root. They create a disposable ordinary
 Git repository, commit only its synthetic binding, and use a local package pin.
-They do not change the Ahu checkout. Keep the script executable before hashing it.
+They do not change the Ahu checkout. Build and stage the executable before hashing the package. Installation never
+builds or runs package code. Release packages must be built for the target platform.
 
 ```sh
-example_package=$(cd examples/plugins/text-stats && pwd -P)
-test -x "$example_package/text-stats.py"
+example_source=$(cd examples/plugins/text-stats && pwd -P)
+example_build=$(mktemp -d)
+example_package=$(mktemp -d)
+cargo build --release --locked --manifest-path "$example_source/Cargo.toml" \
+  --target-dir "$example_build"
+mkdir -p "$example_package/bin"
+cp "$example_source/Cargo.toml" "$example_source/ahu-plugin.md" "$example_package/"
+cp "$example_build/release/text-stats" "$example_package/bin/text-stats"
+test -x "$example_package/bin/text-stats"
 example_digest=$(ahu plugins digest "$example_package")
 example_ahu_version=$(ahu --version)
 example_ahu_version=${example_ahu_version#ahu }
@@ -88,7 +94,7 @@ The offline integration test exercises this package through the public CLI:
 cargo test --offline --test plugin_authoring
 ```
 
-It copies the package into temporary storage and adds a test-only startup marker
-before computing the pin. The marker proves that installation, inventories,
+It compiles a temporary copy of the Rust source with a test-only startup marker
+before computing the package pin. Cargo dependencies must be cached for offline tests. The marker proves that installation, inventories,
 enable/disable, denied invocation, and removal never start the entrypoint. The
 temporary repositories are ordinary Git repositories, not worktrees.
