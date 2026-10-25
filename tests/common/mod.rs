@@ -78,7 +78,10 @@ impl TestRepo {
     pub fn commit(&self, message: &str) {
         // `-f` because agent configuration directories such as `.claude/` are
         // commonly ignored globally; these fixtures commit them deliberately.
-        git(self.dir.path(), &["add", "-A", "-f"]);
+        git(
+            self.dir.path(),
+            &["add", "-A", "-f", "--", ".", ":!.ahu", ":!.worktrees"],
+        );
         git(
             self.dir.path(),
             &["commit", "-q", "--allow-empty", "-m", message],
@@ -109,12 +112,13 @@ impl TestRepo {
         );
     }
 
-    /// A minimal, valid project configuration.
+    /// A minimal latest-schema configuration in the legacy fixture container.
+    /// Migration regressions deliberately read and remove this TOML path.
     pub fn init_config(&self) {
         self.install_runtime("claude-code");
         self.write(
-            ".agents/ahu/config.md",
-            &ahu::config::try_render(&ahu::config::ProjectConfig {
+            ".agents/ahu/config.toml",
+            &toml::to_string(&ahu::config::ProjectConfig {
                 schema_version: ahu::config::SUPPORTED_SCHEMA_VERSION,
                 harness_preferences: vec!["claude-code".into()],
                 model_selection: "project-ranked".into(),

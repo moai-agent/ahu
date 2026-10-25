@@ -21,7 +21,7 @@ pub fn install(
     let descriptor = serde_json::json!({
         "id":harness,"display_name":format!("Synthetic {harness}"),"program":program,
         "aliases":[],"models":models,"modes":["interactive","direct","headless"],
-        "operations":["probe","models","launch","admission","setup","native_sources","auth","budget","trust_prepare","trust_cleanup","decode_start","decode_event","decode_finish","recover"],
+        "operations":["probe","models","launch","admission","setup","native_sources","auth","decode_start","decode_event","decode_finish"],
         "context_paths":[format!("{source_dir}/"),".fixture/"],"native_source_paths":[source_dir],
         "skill_paths":[".fixture/skills"],"environment_keys":["FIXTURE_CONFIG_DIR"],"tested_versions":["1.2.3"]
     });
