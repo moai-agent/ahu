@@ -1,5 +1,5 @@
 //! Inert discovery and explicit preparation; activation stays in plugin lifecycle commands.
-use super::{apply_plan_with_kiro_updates, safe_new_path, validate_plan};
+use super::{apply_plan, safe_new_path, validate_plan};
 use crate::git::Repo;
 use crate::interactive::plugins::{PluginStatus, local};
 use crate::launcher::Console;
@@ -7,13 +7,12 @@ use crate::plugin_binding::{Binding, Compatibility, Source, SourceKind};
 use crate::util::{Error, Result};
 use std::path::Path;
 
-const LIMIT: &str = "Harness runtime discovery reads metadata only. Installed runtime activation requires an enabled committed binding, exact core compatibility and a harness-runtime grant. Caller migration from the harness-plugin-pilot launch-only path remains separate.";
+const LIMIT: &str = "Harness discovery reads metadata only. Activation requires an enabled committed binding, exact core compatibility and a harness-runtime grant.";
 
 struct Metadata {
     harness: String,
     program: String,
     tested_versions: Vec<String>,
-    grant: &'static str,
 }
 
 fn declaration(package: &PluginStatus) -> Result<Option<Metadata>> {
@@ -35,24 +34,9 @@ fn declaration(package: &PluginStatus) -> Result<Option<Metadata>> {
             harness: declaration.descriptor.id,
             program: declaration.descriptor.program,
             tested_versions: declaration.descriptor.tested_versions,
-            grant: "harness-runtime",
         }));
     }
-    package
-        .metadata
-        .get("harness_launch")
-        .map(|value| {
-            let declaration: crate::harness_plugin::Declaration =
-                serde_json::from_value(value.clone())?;
-            declaration.validate()?;
-            Ok(Metadata {
-                harness: declaration.harness,
-                program: declaration.program,
-                tested_versions: declaration.tested_versions,
-                grant: "harness-launch",
-            })
-        })
-        .transpose()
+    Ok(None)
 }
 
 pub fn list(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
@@ -111,15 +95,9 @@ fn binding(root: &Path) -> Result<Binding> {
         })?;
     let digest = crate::plugin_install::digest(root)?;
     let package = local::read_package(root)?;
-    let declaration = declaration(&package)?.ok_or_else(|| Error::new(
-        "package has no harness_runtime or harness_launch declaration; source-only packages must be built and staged separately before preparation"))?;
-    if declaration.grant == "harness-launch"
-        && package.id != format!("harness-{}", declaration.harness)
-    {
-        return Err(Error::new(
-            "harness plugin id must be harness-<declared harness> for launch selection",
-        ));
-    }
+    declaration(&package)?.ok_or_else(|| {
+        Error::new("package requires a harness_runtime declaration and a staged executable")
+    })?;
     let cargo_path = package
         .cargo_manifest
         .as_deref()
@@ -165,9 +143,6 @@ pub fn prepare(console: &mut Console<'_>, repo: &Repo, root: &Path) -> Result<i3
         return Err(Error::new("migrate the legacy context lock before setup"));
     }
     let binding = binding(root)?;
-    let grant = declaration(&local::read_package(root)?)?
-        .ok_or_else(|| Error::new("missing harness declaration"))?
-        .grant;
     let relative = format!("{}/{}.md", crate::plugin_binding::DIRECTORY, binding.id);
     let document = crate::okf::Document::new(
         "ahu:plugin-binding",
@@ -177,12 +152,12 @@ pub fn prepare(console: &mut Console<'_>, repo: &Repo, root: &Path) -> Result<i3
     .render()?;
     crate::plugin_binding::parse(&document, &binding.id)?;
     let writes = vec![(safe_new_path(&repo.root, &relative)?, document.into_bytes())];
-    validate_plan(&writes, &[])?;
-    apply_plan_with_kiro_updates(console, &writes, &[])?;
+    validate_plan(&writes)?;
+    apply_plan(console, &writes)?;
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let lock = crate::context_lock::refresh_for_setup(repo, &snapshot)?;
     console.say(&format!(
-        "Prepared disabled {} with no grants. No package code executed, built, downloaded, installed or enabled.\nReview and commit {} and {}. Then run `ahu plugins install {}` (or `ahu plugins update {}` for a retained different version). Install reads committed pins only; keep the staged package unchanged.\nFor activation, run `ahu plugins enable {}`, explicitly add the {grant} grant to the working binding, then run `ahu lock --update`. Review and commit the enabled binding and lock before launch.\n{LIMIT}\n",
+        "Prepared disabled {} with no grants. No package code executed, built, downloaded, installed or enabled.\nReview and commit {} and {}. Then run `ahu plugins install {}` (or `ahu plugins update {}` for a retained different version). Install reads committed pins only; keep the staged package unchanged.\nFor activation, run `ahu plugins enable {}`, explicitly add the harness-runtime grant to the working binding, then run `ahu lock --update`. Review and commit the enabled binding and lock before launch.\n{LIMIT}\n",
         binding.id, relative, lock.display(), binding.id, binding.id, binding.id))?;
     Ok(0)
 }

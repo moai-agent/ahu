@@ -30,7 +30,7 @@ fn repo() -> tempfile::TempDir {
 }
 fn package(root: &Path, id: &str, declaration: bool) {
     let launch = if declaration {
-        "harness_launch:\n  harness: codex\n  program: codex\n  tested_versions: [0.163.0]\n  path: planner\n  protocol_version: 2\n  timeout_ms: 1000\n"
+        "harness_runtime:\n  path: planner\n  protocol_version: 1\n  timeout_ms: 1000\n  descriptor:\n    id: sixth\n    display_name: Sixth\n    program: sixth-native\n    tested_versions: [6.0.0]\n    modes: [interactive]\n    operations: [probe, models, setup]\n    aliases: [six]\n    models: [invented/model]\n"
     } else {
         ""
     };
@@ -72,11 +72,11 @@ fn success(output: Output) -> String {
 fn prepare_commit_install_inventory_and_enable_are_separate() {
     let repo = repo();
     let source = temp();
-    package(source.path(), "harness-codex", true);
+    package(source.path(), "independent-sixth", true);
     let args = ["setup", "--harness-plugin", source.path().to_str().unwrap()];
     let output = success(run(repo.path(), &args));
-    assert!(output.contains("harness-plugin-pilot"));
-    let (binding, _) = ahu::plugin_binding::load(repo.path(), "harness-codex")
+    assert!(output.contains("harness-runtime"));
+    let (binding, _) = ahu::plugin_binding::load(repo.path(), "independent-sixth")
         .unwrap()
         .unwrap();
     assert!(!binding.enabled);
@@ -88,31 +88,37 @@ fn prepare_commit_install_inventory_and_enable_are_separate() {
     assert!(repo.path().join(".agents/ahu/lock.md").is_file());
     success(run(repo.path(), &args)); // Identical preparation preserves the binding.
     assert!(
-        !run(repo.path(), &["plugins", "install", "harness-codex"])
+        !run(repo.path(), &["plugins", "install", "independent-sixth"])
             .status
             .success()
     );
     commit(repo.path());
-    success(run(repo.path(), &["plugins", "install", "harness-codex"]));
+    success(run(
+        repo.path(),
+        &["plugins", "install", "independent-sixth"],
+    ));
     let listed = success(run(repo.path(), &["setup", "--list-harness-plugins"]));
-    assert!(listed.contains("harness-codex for codex"));
+    assert!(listed.contains("independent-sixth for sixth"));
     assert!(
-        !ahu::plugin_binding::load(repo.path(), "harness-codex")
+        !ahu::plugin_binding::load(repo.path(), "independent-sixth")
             .unwrap()
             .unwrap()
             .0
             .enabled
     );
-    success(run(repo.path(), &["plugins", "enable", "harness-codex"]));
-    let (mut binding, mut document) = ahu::plugin_binding::load(repo.path(), "harness-codex")
+    success(run(
+        repo.path(),
+        &["plugins", "enable", "independent-sixth"],
+    ));
+    let (mut binding, mut document) = ahu::plugin_binding::load(repo.path(), "independent-sixth")
         .unwrap()
         .unwrap();
     binding
         .grants
-        .push(ahu::plugin_binding::Grant::HarnessLaunch);
+        .push(ahu::plugin_binding::Grant::HarnessRuntime);
     document.set_settings(&binding).unwrap();
     fs::write(
-        repo.path().join(".agents/ahu/plugins/harness-codex.md"),
+        repo.path().join(".agents/ahu/plugins/independent-sixth.md"),
         document.render().unwrap(),
     )
     .unwrap();
@@ -136,9 +142,9 @@ fn invalid_packages_leave_no_binding() {
         package(
             source.path(),
             if variant == "identity" {
-                "other"
+                "OTHER"
             } else {
-                "harness-codex"
+                "independent-sixth"
             },
             variant != "source-only",
         );
@@ -178,7 +184,7 @@ fn discovery_reports_ambiguity_rejects_duplicate_ids_and_never_executes() {
     let repo = repo();
     let first = temp();
     let second = temp();
-    package(first.path(), "harness-codex", true);
+    package(first.path(), "independent-sixth", true);
     package(second.path(), "alternative", true);
     let paths = std::env::join_paths([first.path(), second.path()]).unwrap();
     let discover = || {
@@ -190,7 +196,7 @@ fn discovery_reports_ambiguity_rejects_duplicate_ids_and_never_executes() {
             .unwrap()
     };
     assert!(success(discover()).contains("multiple candidates; no automatic selection"));
-    package(second.path(), "harness-codex", true);
+    package(second.path(), "independent-sixth", true);
     assert!(!discover().status.success());
     assert!(!first.path().join("executed").exists());
     assert!(!second.path().join("executed").exists());
@@ -201,10 +207,10 @@ fn discovery_reports_ambiguity_rejects_duplicate_ids_and_never_executes() {
 fn source_drift_and_conflicts_preserve_prepared_binding_and_lock() {
     let repo = repo();
     let source = temp();
-    package(source.path(), "harness-codex", true);
+    package(source.path(), "independent-sixth", true);
     let args = ["setup", "--harness-plugin", source.path().to_str().unwrap()];
     success(run(repo.path(), &args));
-    let binding = repo.path().join(".agents/ahu/plugins/harness-codex.md");
+    let binding = repo.path().join(".agents/ahu/plugins/independent-sixth.md");
     let lock = repo.path().join(".agents/ahu/lock.md");
     let before = (fs::read(&binding).unwrap(), fs::read(&lock).unwrap());
     commit(repo.path());
@@ -215,7 +221,7 @@ fn source_drift_and_conflicts_preserve_prepared_binding_and_lock() {
         (fs::read(&binding).unwrap(), fs::read(&lock).unwrap())
     );
     assert!(
-        !run(repo.path(), &["plugins", "install", "harness-codex"])
+        !run(repo.path(), &["plugins", "install", "independent-sixth"])
             .status
             .success()
     );
@@ -226,13 +232,16 @@ fn source_drift_and_conflicts_preserve_prepared_binding_and_lock() {
 fn installed_discovery_checks_pins_even_without_a_current_binding() {
     let repo = repo();
     let source = temp();
-    package(source.path(), "harness-codex", true);
+    package(source.path(), "independent-sixth", true);
     success(run(
         repo.path(),
         &["setup", "--harness-plugin", source.path().to_str().unwrap()],
     ));
     commit(repo.path());
-    success(run(repo.path(), &["plugins", "install", "harness-codex"]));
+    success(run(
+        repo.path(),
+        &["plugins", "install", "independent-sixth"],
+    ));
     let output = success(run(
         repo.path(),
         &["plugins", "installed", "--output", "json"],
@@ -243,7 +252,7 @@ fn installed_discovery_checks_pins_even_without_a_current_binding() {
             .as_str()
             .unwrap(),
     );
-    fs::remove_file(repo.path().join(".agents/ahu/plugins/harness-codex.md")).unwrap();
+    fs::remove_file(repo.path().join(".agents/ahu/plugins/independent-sixth.md")).unwrap();
     commit(repo.path());
     assert!(
         success(run(repo.path(), &["setup", "--list-harness-plugins"]))
@@ -261,19 +270,19 @@ fn installed_discovery_checks_pins_even_without_a_current_binding() {
 #[test]
 fn malformed_native_metadata_cannot_prepare_or_execute_a_package() {
     for (from, to) in [
-        ("program: codex", "program: /tmp/codex"),
-        ("program: codex", "program: ''"),
-        ("tested_versions: [0.163.0]", "tested_versions: []"),
-        ("tested_versions: [0.163.0]", "tested_versions: [latest]"),
+        ("program: sixth-native", "program: /tmp/sixth"),
+        ("program: sixth-native", "program: ''"),
+        ("aliases: [six]", "aliases: [setup]"),
+        ("aliases: [six]", "aliases: [six, six]"),
         (
-            "tested_versions: [0.163.0]",
-            "tested_versions: [0.163.0, 0.163.0]",
+            "tested_versions: [6.0.0]",
+            "tested_versions: [6.0.0, 6.0.0]",
         ),
-        ("protocol_version: 2", "protocol_version: 1"),
+        ("protocol_version: 1", "protocol_version: 2"),
     ] {
         let repo = repo();
         let source = temp();
-        package(source.path(), "harness-codex", true);
+        package(source.path(), "independent-sixth", true);
         let manifest = source.path().join("ahu-plugin.md");
         let body = fs::read_to_string(&manifest).unwrap();
         fs::write(manifest, body.replace(from, to)).unwrap();

@@ -37,6 +37,14 @@ for line in sys.stdin:
     if mode == 'nested_duplicate':
         print('{"protocol_version":1,"id":1,"result":{"x":1,"x":2}}', flush=True); continue
     response = {'protocol_version':1, 'id':sequence, 'result':{'count':sequence,'operation':request['operation']}}
+    if 'native_executable' in params:
+        assert set(params) == {'project','home','native_executable','environment'}
+        assert set(params['environment']) == {'PATH'}
+        assert os.path.isabs(params['project']) and os.path.isabs(params['home'])
+        if request['operation'] == 'probe':
+            response['result'] = {'version':'6.2.0','compatibility':None,'reviewed_version':False,'enforcement':{}}
+        if request['operation'] == 'models':
+            response['result'] = {'source':'native','models':['sixth/new-exact-model'],'entitlement_checked':False}
     if mode == 'child':
         child = subprocess.Popen(['/bin/sleep', '30'])
         response['result'] = {'child':child.pid, 'parent':os.getpid()}
@@ -90,6 +98,13 @@ impl Fixture {
                 "skill_paths":[".sixth/skills"],"native_source_paths":[".sixth/agents"]}
         });
         mutate(&mut declaration);
+        let valid_declaration =
+            serde_json::from_value::<ahu_harness_api::Declaration>(declaration.clone())
+                .ok()
+                .filter(|d| d.validate().is_ok())
+                .is_some_and(|d| {
+                    ahu::catalog::validate_runtime_descriptors([&d.descriptor]).is_ok()
+                });
         fs::write(package.join("ahu-plugin.md"), format!("---\nokf_version: '0.2'\ntype: ahu:plugin\nschema_version: 1\nid: independent-package\npackage: sixth-package\nhost_api: 1\ncargo_manifest: Cargo.toml\nharness_runtime: {}\n---\nSynthetic runtime.\n", declaration)).unwrap();
         fs::write(package.join("peer"), format!("#!/usr/bin/python3\nwith open({}, 'a') as marker: marker.write('start\\n')\n{prefix}\n{PEER}", json!(marker))).unwrap();
         fs::set_permissions(package.join("peer"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -114,7 +129,7 @@ impl Fixture {
             .output()
             .unwrap();
         assert!(
-            output.status.success(),
+            output.status.success() || !valid_declaration,
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -466,4 +481,79 @@ fn exact_frame_limits_include_newline_and_cancellation_interrupts_dispatch() {
         assert!(error.to_string().contains("cancelled"));
     });
     assert!(session.call("probe", json!({})).is_err());
+}
+
+#[test]
+fn installed_registry_drives_models_and_prerequisites_without_native_core_probes() {
+    const CASE: &str =
+        "installed_registry_drives_models_and_prerequisites_without_native_core_probes";
+    if !common::is_child_case(CASE) {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let executable = directory.join("sixth-native");
+        // Core must never invoke --version or models directly on this program.
+        fs::write(&executable, "#!/bin/sh\nexit 91\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = common::run_child_case(CASE, |command| {
+            command
+                .env("HOME", &directory)
+                .env("PATH", format!("{}:/usr/bin:/bin", directory.display()));
+        });
+        common::assert_child_passed(CASE, &output);
+        return;
+    }
+    let fixture = Fixture::new("", |_| {});
+    let repo = fixture.repo();
+    let descriptors = harness_runtime::discover(&repo).unwrap();
+    let suggestions = ahu::models::suggestions(&descriptors[0]);
+    assert_eq!(suggestions.models, ["invented/exact-v6"]);
+    assert!(!fixture.marker.exists());
+    let options = ahu::models::for_harness(&repo, "sixth").unwrap();
+    assert_eq!(options.models, ["sixth/new-exact-model"]);
+    assert_eq!(options.source, ahu::models::Source::Native);
+    let prerequisite = ahu::selection::check_prerequisite(&repo, "sixth").unwrap();
+    assert!(prerequisite.satisfied());
+    assert_eq!(prerequisite.version.as_deref(), Some("6.2.0"));
+}
+
+#[test]
+fn project_rankings_select_exact_runtime_identity_without_machine_fallback() {
+    let fixture = Fixture::new("", |_| {});
+    let repo = fixture.repo();
+    let config = ahu::config::ProjectConfig {
+        schema_version: ahu::config::SUPPORTED_SCHEMA_VERSION,
+        harness_preferences: vec!["sixth".into()],
+        model_selection: "project-ranked".into(),
+        harness_version_pins: Default::default(),
+        model_rankings: [("sixth".into(), vec!["unlisted/exact-model".into()])].into(),
+        knowledge: Default::default(),
+        headless: Default::default(),
+        telemetry: Default::default(),
+    };
+    let mut loaded = ahu::config::LoadedConfig {
+        config,
+        path: fixture.root.join(".agents/ahu/config.md"),
+        digest: "a".repeat(64),
+    };
+    let pair = ahu::selection::resolve_automatic(&repo, &loaded).unwrap();
+    assert_eq!(pair.harness, "sixth");
+    assert_eq!(pair.model, "unlisted/exact-model");
+    assert_eq!(pair.runtime_binding_digest, fixture.load().binding_digest());
+    assert!(!fixture.marker.exists());
+    loaded
+        .config
+        .harness_preferences
+        .insert(0, "missing".into());
+    loaded
+        .config
+        .model_rankings
+        .insert("missing".into(), vec!["exact".into()]);
+    assert!(ahu::selection::resolve_automatic(&repo, &loaded).is_err());
+    loaded.config.harness_preferences = vec!["six".into()];
+    loaded
+        .config
+        .model_rankings
+        .insert("six".into(), vec!["exact".into()]);
+    assert!(ahu::selection::resolve_automatic(&repo, &loaded).is_err());
+    assert!(!fixture.marker.exists());
 }
