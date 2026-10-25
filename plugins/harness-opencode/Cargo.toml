@@ -1,11 +1,10 @@
 [package]
-name = "ahu-experiment-harness-codex"
+name = "ahu-plugin-opencode"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-publish = false
+description = "Independent opencode launch planner for ahu"
 
-# Independent executable: no ahu implementation dependencies.
 [workspace]
 
 [dependencies]
