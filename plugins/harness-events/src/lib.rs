@@ -190,3 +190,6 @@ fn bounded_depth(value: &Value, depth: usize) -> bool {
 
 #[cfg(test)]
 mod parity_tests;
+
+#[cfg(test)]
+mod skill_lifecycle_tests;

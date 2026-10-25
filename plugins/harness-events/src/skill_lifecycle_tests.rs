@@ -1,5 +1,5 @@
 //! Synthetic protocol contracts, not live harness conformance evidence.
-use ahu::headless::Events;
+use crate::events::Events;
 use serde_json::{Value, json};
 
 fn observe(events: &mut Events, harness: &str, event: Value) {
@@ -154,10 +154,7 @@ fn skill_separate_results_reject_conflicts_and_unbounded_ids() {
         observe(&mut events, harness, bad[1].clone());
         observe(&mut events, harness, good[1].clone());
         assert_eq!(events.skills[0].status, "invoked");
-        assert_eq!(
-            events.skills[0].execution,
-            ahu::telemetry::SkillEvidence::Unverified
-        );
+        assert_eq!(events.skills[0].execution, crate::SkillEvidence::Unverified);
         assert!(events.skills[0].elapsed_ms.is_none());
 
         let (invocation_path, result_path) = match harness {

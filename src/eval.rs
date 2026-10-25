@@ -1427,7 +1427,11 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 group.runs
             ));
         }
-        if trajectory.observations.keys().any(|key| key.starts_with("metering_")) {
+        if trajectory
+            .observations
+            .keys()
+            .any(|key| key.starts_with("metering_"))
+        {
             out.push_str("             Native metering is partial: prompt completions are not model steps; context is a window snapshot; credits are not USD\n");
             for name in [
                 "metering_context_usage_percent",
