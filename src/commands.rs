@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
-use crate::catalog;
 use crate::config::{self, LoadedConfig};
 use crate::context_lock;
 use crate::drift;
@@ -35,92 +34,25 @@ pub fn repo_from_cwd() -> Result<Repo> {
     git::discover(&cwd).map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
-/// Open a coordinating Codex session in the invoking terminal, on the project's
-/// top-ranked Codex model, with approval prompts and the sandbox bypassed.
+/// Open a coordinating session using the installed runtime and exact project model.
 /// Repository discovery registers executable exclusions before resolving the
 /// harness, just as for agents.
-pub fn codex(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "codex",
-        "Codex",
-        &["--dangerously-bypass-approvals-and-sandbox"],
-    )
-}
-
-/// Open Claude Code on the project's top-ranked Claude Code model with
-/// permission checks bypassed.
-pub fn claude(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "claude",
-        "Claude",
-        &["--dangerously-skip-permissions"],
-    )
-}
-
-/// Open Kiro V3 with the project's ranked model and explicit automatic tool approvals.
-pub fn kiro(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "kiro-cli", "Kiro CLI", &["--trust-all-tools"])
-}
-
-/// Open OpenCode on the project's top-ranked OpenCode model with `--auto`, which
-/// auto-approves every permission OpenCode does not explicitly deny.
-///
-/// `--auto` is OpenCode's only permission-widening flag, so it is how this
-/// shortcut matches the other three. Permissions set to `deny` in OpenCode's own
-/// configuration still apply; ahu passes no `--pure`, so the user's plugins load.
-pub fn opencode(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "opencode", "OpenCode", &["--auto"])
-}
-
-/// Open the Antigravity CLI on the project's top-ranked Antigravity model, in
-/// its unattended (YOLO) permission mode.
-pub fn antigravity(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "agy",
-        "Antigravity CLI",
-        &["--dangerously-skip-permissions"],
-    )
-}
-
-/// Open a coordinating session: the project's top-ranked model for the harness,
-/// plus the shortcut's own approval-bypass flags, in the invoking terminal.
-///
-/// `bypass` is the approval widening the shortcut owns. The model comes from the
-/// project's `model_rankings`, through the same mapping the headless adapters use
-/// for the model option, so a coordinator and an agent on one harness cannot end
-/// up passing different flags for the same thing. A harness with no ranked model
-/// launches without a model option rather than on one ahu invented.
-fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]) -> Result<i32> {
-    let harness = match program {
-        "claude" => "claude-code",
-        "agy" => "antigravity",
-        "kiro-cli" => "kiro",
-        other => other,
-    };
+pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
+    let runtime = crate::harness_runtime::load(repo, selector)?;
+    let descriptor = runtime.descriptor();
+    let harness = descriptor.id.as_str();
+    let program = descriptor.program.as_str();
+    let label = descriptor.display_name.as_str();
     let loaded = config::load(&repo.root)?;
     let ranked = loaded
         .as_ref()
         .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
-    // Telemetry and session metadata still need a value for a harness with no
-    // ranked model; the argument list gets no model option in that case.
-    let model = ranked.clone().unwrap_or_else(|| "unconfigured".to_string());
-    let mut args: Vec<String> = match &ranked {
-        Some(ranked) => harness::model_args(harness, ranked)?,
-        None => Vec::new(),
-    };
-    if harness == "kiro" {
-        args.splice(0..0, ["chat".into(), "--v3".into()]);
-    }
-    args.extend(bypass.iter().map(|flag| flag.to_string()));
-    let model_note = ranked.is_none().then(|| {
-        format!(
-            "no model is ranked for {harness} in this project's configuration, so ahu passes no \
-             model option and {label} opens on whichever model it is configured with."
-        )
-    });
+    let model = ranked.ok_or_else(|| {
+        Error::new("direct harness sessions require an exact project-ranked model; run ahu setup")
+    })?;
+    let version = selection::probe_runtime(repo, &runtime)?;
+    let plan = harness::direct_command(repo, harness, &model)?;
+    let args = plan.args;
     if let Some(loaded) = &loaded {
         crate::telemetry::initialize(&loaded.config.telemetry)?;
     }
@@ -130,28 +62,10 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
-    selection::check_interactive_cli(
-        std::path::Path::new(&executable),
-        harness,
-        &mut args,
-        &repo.root,
-    )?;
-    if let Some(ranked) = &ranked {
-        selection::check_launch_compatibility(
-            std::path::Path::new(&executable),
-            harness,
-            ranked,
-            crate::agent::Permissions::Prompt,
-            &repo.root,
-        )?;
-    }
     crate::state::ensure_checkout_state(&repo.root)?;
     let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
-    }
-    if let Some(note) = &model_note {
-        eprintln!("ahu: {}", display_safe(note));
     }
     if placement.opened_workspace {
         return Ok(0);
@@ -169,7 +83,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
             .unwrap_or_default(),
         harness,
         &model,
-        selection::installed_version(program).as_deref(),
+        Some(&version),
     );
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
@@ -440,23 +354,19 @@ pub fn onboard_cmd(
             display_safe(&candidate.blockers.join("; "))
         );
     }
-    let harness = candidate.format.native_harness().unwrap_or("claude-code");
+    let harness = candidate
+        .format
+        .native_harness()
+        .ok_or_else(|| Error::new("native definition has no declared harness identity"))?;
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
-        // Listed for the harness this definition actually belongs to. A Claude
-        // Code list in front of someone registering an OpenCode agent names
-        // models their manifest would be refused for.
-        _ => bail!(kind: crate::util::ErrorKind::Usage,
-            "{name} does not declare a usable model, so ahu needs an explicit one.\n\
-             Re-run with --model <exact identifier>. Catalog {} lists for {}: {}.",
-            catalog::CATALOG_VERSION,
-            harness,
-            catalog::models_for(harness)
-                .iter()
-                .map(|m| m.model)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        _ => {
+            let runtime = crate::harness_runtime::load(repo, harness)?;
+            bail!(kind: crate::util::ErrorKind::Usage,
+                "{name} needs an explicit --model <exact identifier>. Installed suggestions: {}",
+                runtime.descriptor().models.iter().map(|m| display_safe(m)).collect::<Vec<_>>().join(", ")
+            )
+        }
     };
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
     console.say(&format!(".agents/ahu/agents/{}.md\n\n", display_safe(name)))?;
@@ -523,6 +433,21 @@ pub fn doctor_with_options(
     let mut problems = 0;
     let mut warnings = 0;
     let mut project_harnesses = std::collections::BTreeSet::new();
+    let registry = match repo {
+        Ok(repo) => match crate::harness_runtime::discover(repo) {
+            Ok(registry) => registry,
+            Err(error) => {
+                problems += 1;
+                console.say(&format!(
+                    "runtimes     {}\n",
+                    display_safe(&error.to_string())
+                ))?;
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut prerequisites = std::collections::BTreeMap::new();
     let mut loaded_config: Option<LoadedConfig> = None;
     let mut registered_agents = Vec::new();
     if work_mode {
@@ -558,10 +483,9 @@ pub fn doctor_with_options(
                 loaded_config = Some(loaded.clone());
                 if verbose {
                     console.say(&format!(
-                        "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
+                        "config       {} ({})\n  harnesses  {}\n",
                         display_path(&loaded.path),
                         loaded.short_digest(),
-                        display_safe(&loaded.config.catalog_version),
                         display_safe(&loaded.config.harness_preferences.join(", "))
                     ))?;
                 } else {
@@ -597,11 +521,13 @@ pub fn doctor_with_options(
 
     if !work_mode && let Ok(repo) = repo {
         for harness in &project_harnesses {
-            if hooks::hook_surface_is_implemented(harness) {
+            {
                 match hooks::collect(&repo.root, harness) {
                     Ok(found) => {
-                        let display_name = catalog::harness(harness)
-                            .map(|h| h.display_name)
+                        let display_name = registry
+                            .iter()
+                            .find(|d| &d.id == harness)
+                            .map(|d| d.display_name.as_str())
                             .unwrap_or(harness);
                         let count = found.hooks.len() + found.declared_plugins.len();
                         console.say(&format!(
@@ -652,18 +578,33 @@ pub fn doctor_with_options(
     }
 
     for harness in &project_harnesses {
-        let prerequisite = selection::check_prerequisite(harness);
-        let status = if !catalog::harness(harness).is_some_and(|entry| entry.adapter_available) {
-            problems += 1;
-            "unsupported by this ahu version".to_string()
-        } else if !prerequisite.satisfied() {
-            problems += 1;
-            "not installed".to_string()
-        } else if let Some(version) = &prerequisite.version {
-            let version = version.strip_prefix("codex-cli ").unwrap_or(version);
-            format!("{} — executable ready", display_safe(version))
-        } else {
-            "installed (version unavailable)".to_string()
+        let prerequisite = repo
+            .as_ref()
+            .map_err(|_| Error::new("repository unavailable"))
+            .and_then(|repo| selection::check_prerequisite(repo, harness));
+        let status = match prerequisite {
+            Ok(prerequisite) => {
+                let status = if prerequisite.satisfied() {
+                    format!(
+                        "{} — executable ready",
+                        display_safe(
+                            prerequisite
+                                .version
+                                .as_deref()
+                                .unwrap_or("version unavailable")
+                        )
+                    )
+                } else {
+                    problems += 1;
+                    "declared native executable not installed".into()
+                };
+                prerequisites.insert(harness.clone(), prerequisite);
+                status
+            }
+            Err(error) => {
+                problems += 1;
+                display_safe(&error.to_string())
+            }
         };
         console.say(&format!(
             "harness      {} {status}\n",
@@ -802,8 +743,7 @@ pub fn doctor_with_options(
         .unwrap_or(std::env::current_dir()?);
     if work_mode {
         for harness in &project_harnesses {
-            let version = crate::catalog::harness(harness)
-                .and_then(|entry| crate::selection::installed_version(entry.executable));
+            let version = prerequisites.get(harness).and_then(|p| p.version.clone());
             let pin = loaded_config
                 .as_ref()
                 .and_then(|loaded| loaded.config.harness_version_pins.get(harness))
@@ -819,13 +759,14 @@ pub fn doctor_with_options(
                     "  warning    CLI version unavailable or differs from the project pin\n",
                 )?;
             }
-            let supported =
-                crate::catalog::harness(harness).is_some_and(|entry| entry.adapter_available);
+            let supported = registry.iter().any(|d| {
+                &d.id == harness && d.modes.contains(&crate::harness_runtime::Mode::Headless)
+            });
             console.say(&format!(
                 "work mode    {}: {}; native compatibility unverified\n",
                 display_safe(harness),
                 if supported {
-                    "ahu adapter supports explicit headless work mode"
+                    "installed runtime declares headless mode"
                 } else {
                     "unsupported by this ahu version"
                 }
@@ -837,9 +778,8 @@ pub fn doctor_with_options(
             }
         }
     } else {
-        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-            let version = crate::catalog::harness(harness)
-                .and_then(|entry| crate::selection::installed_version(entry.executable));
+        for harness in &project_harnesses {
+            let version = prerequisites.get(harness).and_then(|p| p.version.clone());
             let status = native_admission::inspect(&integration_root, harness)
                 .with_version(version.as_deref());
             if status
@@ -2624,11 +2564,15 @@ pub(crate) fn resolve_identity(
                     resolved.manifest.name, resolved.manifest.version
                 ),
                 policy_digest: loaded.digest.clone(),
-                catalog_version: loaded.config.catalog_version.clone(),
+                runtime_binding_digest: crate::harness_runtime::load(
+                    repo,
+                    &resolved.manifest.harness,
+                )?
+                .binding_digest(),
             };
             Ok((Some(resolved), pair))
         }
-        None => Ok((None, selection::resolve_automatic(loaded)?)),
+        None => Ok((None, selection::resolve_automatic(repo, loaded)?)),
     }
 }
 
@@ -2644,11 +2588,10 @@ pub fn interactive(
     };
 
     console.say(&format!(
-        "ahu {} — {}\n  policy {} · catalog {}\n\n",
+        "ahu {} — {}\n  policy {}\n\n",
         env!("CARGO_PKG_VERSION"),
         display_path(&repo.root),
-        loaded.short_digest(),
-        loaded.config.catalog_version
+        loaded.short_digest()
     ))?;
 
     let registered = agent::load_all(&repo.root)?;
@@ -2678,7 +2621,7 @@ pub fn interactive(
         style::stdout().paint(Role::Runtime, &display_safe(&pair.model)),
         display_safe(&pair.basis)
     ))?;
-    let prerequisite = selection::check_prerequisite(&pair.harness);
+    let prerequisite = selection::check_prerequisite(repo, &pair.harness)?;
     if !prerequisite.satisfied() {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
             "{} is not installed on this machine ({} not found on PATH).\n\
@@ -2791,12 +2734,6 @@ fn submit(
     }
     crate::telemetry::initialize(&loaded.config.telemetry)?;
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
-    selection::check_interactive_command(
-        &plan.harness_executable,
-        &plan.pair.harness,
-        &mut plan.command,
-        &repo.root,
-    )?;
     let mut _span = crate::telemetry::span(
         "ahu.launch",
         [
@@ -3112,9 +3049,9 @@ pub fn render_preview(
         display_safe(&plan.pair.basis)
     ));
     out.push_str(&format!(
-        "  policy     {} · catalog {}\n",
+        "  policy     {} · runtime binding {}\n",
         &plan.pair.policy_digest[..12],
-        display_safe(&plan.pair.catalog_version)
+        display_safe(&plan.pair.runtime_binding_digest)
     ));
     if let Some(agent) = &plan.agent {
         // Attribution covers the delivered bytes: ahu delivers

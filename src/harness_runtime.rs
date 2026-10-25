@@ -150,3 +150,38 @@ impl Prepared {
         Ok(())
     }
 }
+
+/// Explicit inputs for native inspection. This is an allowlist, not an ambient
+/// environment copy: native services receive a canonical project/home, selected
+/// executable and PATH only. Secret-bearing native configuration stays native.
+pub fn native_params(repo: &Repo, descriptor: &Descriptor) -> Result<serde_json::Value> {
+    let executable =
+        crate::selection::resolve_executable(&descriptor.program).ok_or_else(|| {
+            Error::new("declared native executable is unavailable outside repositories")
+        })?;
+    let home = native_home()?;
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| Error::new("native inspection requires an explicit PATH"))?;
+    let directories: Vec<_> = std::env::split_paths(&path)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.canonicalize().ok())
+        .filter(|p| p.is_dir() && !crate::selection::is_excluded(p))
+        .collect();
+    let path = std::env::join_paths(directories)
+        .map_err(|_| Error::new("invalid native PATH"))?
+        .into_string()
+        .map_err(|_| Error::new("native PATH must be UTF-8"))?;
+    Ok(serde_json::json!({
+        "project": repo.root.canonicalize()?, "home": home,
+        "native_executable": executable, "environment": {"PATH":path},
+    }))
+}
+
+pub(crate) fn native_home() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .ok_or_else(|| Error::new("native operation requires an absolute existing home"))?;
+    home.canonicalize()
+        .map_err(|_| Error::new("cannot resolve native home"))
+}
