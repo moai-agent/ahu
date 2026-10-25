@@ -614,3 +614,45 @@ fn bounded_recovery_validates_export_and_never_replays() {
         json!({"recovered":false})
     );
 }
+
+#[test]
+fn kiro_interactive_model_gate_withholds_native_errors_and_never_starts_chat() {
+    for mode in ["available", "unavailable", "malformed", "signed-out"] {
+        let f = Fixture::new(&format!(
+            r#"
+if [ "$1" = whoami ]; then
+  test '{mode}' != signed-out || exit 1
+  printf '%s\n' '{{"accountType":"SocialGitHub","email":"fixture@example.invalid"}}'
+  exit 0
+fi
+if [ "$3" = --list-models ]; then
+  case '{mode}' in
+    malformed) printf 'private-marker';;
+    unavailable) printf '%s\n' '{{"models":[{{"model_id":"auto"}}]}}';;
+    *) printf '%s\n' '{{"models":[{{"model_id":"claude-sonnet-4.5"}}]}}';;
+  esac
+  exit 0
+fi
+printf started > started
+exit 7
+"#
+        ));
+        let mut params = f.admission();
+        params["mode"] = json!("interactive");
+        let result = call("kiro", "admission", &params);
+        assert_eq!(result.is_ok(), mode == "available", "{mode}: {result:?}");
+        if let Err(error) = result {
+            assert!(!error.to_string().contains("private-marker"));
+        }
+        assert!(!f.root.join("started").exists());
+    }
+}
+
+#[test]
+fn kiro_unknown_headless_version_does_not_gain_admission() {
+    let f = Fixture::new("exit 1");
+    let mut params = f.admission();
+    params["version"] = json!("kiro-cli 2.34.0");
+    let result = call("kiro", "admission", &params).unwrap();
+    assert_eq!(result["allowed"], false);
+}
