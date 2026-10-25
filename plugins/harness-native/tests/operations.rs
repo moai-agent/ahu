@@ -510,3 +510,105 @@ fn native_hook_view_redacts_commands_and_reports_unknown_scope() {
     assert_eq!(v["unscanned_harness"], "claude-code");
     assert!(!v["unreadable"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn exact_native_source_actions_preserve_delivery_and_model_conflicts() {
+    let f = Fixture::new("exit 99");
+    let text = "---\r\nmodel: exact-model\r\ntools: Read, Grep\r\n---\r\nDo the work.\n";
+    let parsed=call("claude-code","native_sources",&json!({"action":"parse","format":"claude-agent","text":text,"path":".claude/agents/reviewer.md"})).unwrap();
+    assert_eq!(
+        parsed,
+        json!({"instructions":"Do the work.\n","native_model":"exact-model","native_settings":{"model":"exact-model","tools":"Read, Grep"}})
+    );
+    let toml = "model = \"not-the-manifest-model\"\ninstructions = \"Keep all TOML\"\n";
+    assert_eq!(call("codex","native_sources",&json!({"action":"parse","format":"codex-agent","text":toml,"path":".codex/agents/a.toml"})).unwrap(),json!({"instructions":toml,"native_model":null,"native_settings":{}}));
+    assert!(
+        call(
+            "codex",
+            "native_sources",
+            &json!({"action":"parse","format":"claude-agent","text":text,"path":"x"})
+        )
+        .is_err()
+    );
+    fs::create_dir_all(f.root.join(".claude/agents")).unwrap();
+    fs::write(f.root.join(".claude/agents/reviewer.md"), text).unwrap();
+    let discovered = call(
+        "claude-code",
+        "native_sources",
+        &json!({"action":"discover","project_dir":f.root}),
+    )
+    .unwrap();
+    assert_eq!(discovered[0]["path"], ".claude/agents/reviewer.md");
+    assert_eq!(discovered[0]["native_model"], "exact-model");
+    assert_eq!(discovered[0].as_object().unwrap().len(), 7);
+    symlink(f.exe, f.root.join(".claude/agents/linked.md")).unwrap();
+    assert!(
+        call(
+            "claude-code",
+            "native_sources",
+            &json!({"action":"discover","project_dir":f.root})
+        )
+        .is_err()
+    );
+}
+#[test]
+fn exact_native_profile_freezes_controls_and_rejects_identity_substitution() {
+    let mut p = json!({"action":"native_profile","request":{"harness":"codex","harness_version":"0.160.0","policy":"disabled","session_model":"gpt-6-astra","helper_model":null,"helper_role":"reviewer","max_concurrent":1,"max_depth":1,"budget_usd":null,"assignment_writes":true}});
+    let profile = call("codex", "admission", &p).unwrap();
+    let args = profile["args"].as_array().unwrap();
+    assert!(args.iter().any(|v| v == "agents.enabled=false"));
+    assert!(args.iter().any(|v| v == "features.hooks=true"));
+    assert!(call("kiro", "admission", &p).is_err());
+    p["request"]["policy"] = json!("bounded");
+    assert!(call("codex", "admission", &p).is_err());
+}
+#[test]
+fn cleanup_reconciles_owned_receipt_after_eligibility_changes() {
+    let f = Fixture::new("exit 99");
+    let task = f.root.join("task");
+    let tree = f.root.join("tree");
+    fs::create_dir(&task).unwrap();
+    fs::create_dir(&tree).unwrap();
+    let mut p = json!({"task_dir":task,"worktree":tree,"home":f.home,"permissions":"prompt","mode":"interactive","overrides":[]});
+    for permission in ["prompt", "accept-edits"] {
+        p["permissions"] = json!(permission);
+        assert_eq!(
+            call("codex", "trust_prepare", &p).unwrap()["status"],
+            "not_applicable"
+        );
+    }
+    p["permissions"] = json!("auto");
+    call("codex", "trust_prepare", &p).unwrap();
+    assert!(task.join("native-trust.json").exists());
+    p["permissions"] = json!("prompt");
+    p["mode"] = json!("headless");
+    call("codex", "trust_cleanup", &p).unwrap();
+    assert!(!task.join("native-trust.json").exists());
+}
+#[test]
+fn bounded_recovery_validates_export_and_never_replays() {
+    use sha2::{Digest, Sha256};
+    let export = json!({"info":{"id":"ses_synthetic123","outcome":"succeeded","time":{"created":1010,"updated":1900,"idle":1900}},"messages":[{"id":"prompt","type":"user","time":{"created":1011}},{"id":"answer","type":"assistant","finish":"stop","content":[],"time":{"created":1012,"completed":1800}},{"id":"idle","type":"idle","outcome":"succeeded","time":{"created":1900}}]});
+    let f = Fixture::new(&format!(
+        "test \"$1 $2 $3 $4 $5\" = 'session export --sanitize --standalone ses_synthetic123' || exit 98\nprintf '%s' '{}'",
+        export
+    ));
+    let digest = format!("{:x}", Sha256::digest(fs::read(&f.exe).unwrap()));
+    let mut p = json!({"harness":"opencode","native_version":"2.0.32","native_executable":f.exe,"expected_executable_digest":digest,"worktree":f.root,"session":"ses_synthetic123","attempt_started_ms":1000});
+    assert_eq!(
+        call("opencode", "recover", &p).unwrap(),
+        json!({"recovered":true})
+    );
+    p["attempt_started_ms"] = json!(2000);
+    assert_eq!(
+        call("opencode", "recover", &p).unwrap(),
+        json!({"recovered":false})
+    );
+    p["expected_executable_digest"] = json!("a".repeat(64));
+    assert!(call("opencode", "recover", &p).is_err());
+    p["native_version"] = json!("2.0.33");
+    assert_eq!(
+        call("opencode", "recover", &p).unwrap(),
+        json!({"recovered":false})
+    );
+}
