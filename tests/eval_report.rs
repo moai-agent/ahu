@@ -1064,7 +1064,7 @@ fn evidence_sources_and_legacy_unknowns_are_independent() {
     let repo = TestRepo::new();
     let outside = TempDir::new().unwrap();
     let trajectory = serde_json::to_string(&ahu::eval::trajectory::Observation {
-        source: ahu::eval::trajectory::Source::CodexTurns,
+        source: ahu::eval::trajectory::Source::try_from("fixture_turns".to_owned()).unwrap(),
         coverage: ahu::eval::trajectory::Coverage::Partial,
         steps: Some(1),
         stream_incomplete: true,
@@ -2032,7 +2032,7 @@ fn trajectory_report_exposes_rate_coverage_and_guards_without_inventing_legacy_r
     let external = TempDir::new().unwrap();
     let records = external.path().join("trajectory.jsonl");
     let complete = Observation {
-        source: Source::CodexTurns,
+        source: Source::try_from("fixture_turns".to_owned()).unwrap(),
         coverage: Coverage::CompleteObservedStream,
         steps: Some(1),
         tool_calls: Some(2),

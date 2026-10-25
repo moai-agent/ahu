@@ -56,7 +56,7 @@ fields should be ignored by wrappers; incompatible versions must be rejected.
 | `native` | Helper records, task-kind classifications, background shell IDs, refusal counters, reported spawn/completion/depth/role counts, unknown count, terminal visibility, and `stream_incomplete`. Helpers retain native ID, role, depth, status, background flag, output-file reference, and token count. Their `summary` is always empty. File references are never opened. |
 | `native_completeness`, `native_blockers` | Lifecycle/visibility assessment: joined, unjoined, unobserved work, unknowns, and evidence completeness. `violations` is empty: frozen policy/depth/budget enforcement belongs to core. A completed lifecycle is not necessarily a successful helper or an accepted task; core must inspect statuses and apply its policy. |
 | `trajectory` | Native stream source/coverage, optional steps/calls/completed calls/errors/repeats/recoveries, malformed/unclassified counts, tracking limit and incomplete flags. IDs/tool names are hashed internally and never serialized. |
-| `trajectory.kiro_metering` | Optional context-window latest/peak percentages, attributed prompt completions, observed credits and elapsed milliseconds, counts of observations/duplicates/rejected/unattributed completions. Credits are not USD or tokens; prompt completions are not model steps. |
+| `trajectory.metering` | Optional context-window latest/peak percentages, attributed prompt completions, observed credits and elapsed milliseconds, counts of observations/duplicates/rejected/unattributed completions. Credits are not USD or tokens; prompt completions are not model steps. |
 | `write_target_candidates` | Sorted, unique native write-path strings. These are untrusted candidates, including relative paths, not proof of a write or an outside-worktree verdict. Core resolves paths and applies worktree and structured-result exceptions. |
 
 Skill receipt intervals use a monotonic clock, bounded to `u64` milliseconds.
@@ -227,3 +227,23 @@ Core integration regressions include an independent JSONL peer for malformed
 responses, invalid snapshots, explicit errors, mixed streams, cancellation,
 EOF timeout and owned-process cleanup. The native parser regression suite lives
 here; core telemetry/evaluation tests inject normalized observations.
+
+### Invocation capability admission
+
+Core uses the native-services runtime admission operation before structured
+output or broker dispatch. Request:
+`{"action":"execution_capabilities","harness":ID,"native_version":VERSION,"permissions":"prompt"|"auto"|"accept-edits","work_mode":BOOL}`.
+The exact response is `{"structured_output":BOOL,"broker_transport":BOOL}`.
+Both fields are mandatory booleans; unsupported/malformed responses refuse the
+requested feature. The native service must preserve native read-only restrictions
+(including both false for a Codex prompt/read-only invocation). Broker dispatch
+also checks the runtime binding against its frozen parent. No provider fallback
+or prompt-based permission override exists in core.
+
+Trajectory `source` is a 1–128 byte provenance label using ASCII letters, digits,
+periods, underscores or hyphens. `unsupported` is the explicit absence sentinel;
+other bounded labels are plugin-owned and need no core enum variant. Optional
+`trajectory.metering` has provider-independent context percentage, observed credit,
+elapsed-millisecond and completion counters. Its amounts are partial observations,
+never interchangeable with tokens or USD. Core exports these as `ahu.metering.*`
+and groups them under `metering_*` keys. Old provider-specific aliases are rejected.

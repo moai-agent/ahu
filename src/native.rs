@@ -99,6 +99,32 @@ impl Profile {
     }
 }
 
+/// Invocation features admitted by the selected runtime for this exact request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecutionCapabilities {
+    pub structured_output: bool,
+    pub broker_transport: bool,
+}
+
+pub(crate) fn execution_capabilities(
+    repo: &crate::git::Repo,
+    harness: &str,
+    version: &str,
+    permissions: crate::agent::Permissions,
+    work_mode: bool,
+) -> Result<ExecutionCapabilities> {
+    let runtime = crate::harness_runtime::load(repo, harness)?;
+    let value = runtime.call(
+        "admission",
+        serde_json::json!({
+            "action":"execution_capabilities", "harness":harness,
+            "native_version":version, "permissions":permissions, "work_mode":work_mode,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|_| Error::new("invalid runtime execution capabilities"))
+}
+
 /// Repository-scoped native helper profile supplied by the installed runtime.
 pub fn profile_at(repo: &crate::git::Repo, request: &Request<'_>) -> Result<Profile> {
     let runtime = crate::harness_runtime::load(repo, request.harness)?;
@@ -467,6 +493,22 @@ impl Completeness {
 mod profile_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn capability_evidence_requires_both_explicit_booleans_and_no_extra_fields() {
+        for value in [
+            json!({}),
+            json!({"structured_output":true}),
+            json!({"structured_output":true,"broker_transport":1}),
+            json!({"structured_output":true,"broker_transport":true,"raw":"PRIVATE"}),
+        ] {
+            assert!(serde_json::from_value::<ExecutionCapabilities>(value).is_err());
+        }
+        let denied: ExecutionCapabilities =
+            serde_json::from_value(json!({"structured_output":false,"broker_transport":false}))
+                .unwrap();
+        assert!(!denied.structured_output && !denied.broker_transport);
+    }
 
     #[test]
     fn normalized_profile_cannot_expand_policy_or_change_host_environment() {

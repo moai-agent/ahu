@@ -365,11 +365,23 @@ pub fn request(
         bail!("parent is cancelling; child admission refused");
     }
     let capability=std::env::var("AHU_BROKER_TOKEN").map_err(|_|Error::new("owning supervisor has no live child broker; do not launch a nested harness or widen its sandbox"))?;
-    if record.identity.harness == "codex"
-        && record.identity.permissions == crate::agent::Permissions::Prompt
+    let runtime = crate::harness_runtime::load(repo, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!("broker runtime binding differs from the frozen parent task");
+    }
+    if !crate::native::execution_capabilities(
+        repo,
+        &record.identity.harness,
+        &spec.harness_version,
+        record.identity.permissions,
+        spec.options.work_mode,
+    )?
+    .broker_transport
     {
         bail!(
-            "broker_transport_unavailable_for_read_only: this Codex task retains read-only sandboxing; submit from the host with an explicitly authorized workspace-write coordinator and frozen child grant"
+            "broker_transport_unavailable_for_read_only: selected runtime does not admit broker transport under the frozen permission controls"
         );
     }
     let request = Request {
@@ -525,6 +537,31 @@ fn bounded_dispatch(
 }
 
 #[cfg(test)]
+use crate as core_api;
+#[cfg(test)]
+#[path = "../tests/common/runtime.rs"]
+mod fixture_runtime;
+#[cfg(test)]
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -540,6 +577,14 @@ mod tests {
                 .status()
                 .unwrap()
                 .success()
+        );
+        fixture_runtime::install(
+            dir.path(),
+            "claude-code",
+            "claude",
+            ".claude/agents",
+            "claude-agent",
+            &["claude-opus-5"],
         );
         let repo = crate::git::discover(dir.path()).unwrap();
         (dir, repo)
@@ -610,7 +655,7 @@ mod tests {
             "config_snapshot": {"entries": [], "skipped_directories": []},
             "config_snapshot_digest": "snapshot-digest",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-            "launch_command": {"program": "claude", "args": []},
+            "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
             "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "n", "agent_instructions": null, "digest": "d"},
             "prompt_digest": "p",
             "enforcement": {

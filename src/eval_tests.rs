@@ -1448,7 +1448,7 @@ fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifa
 #[test]
 fn trajectory_records_preserve_missing_zero_and_report_budget_outcomes() {
     let observation = trajectory::Observation {
-        source: trajectory::Source::CodexTurns,
+        source: trajectory::Source::try_from("fixture_turns".to_owned()).unwrap(),
         coverage: trajectory::Coverage::CompleteObservedStream,
         steps: Some(1),
         tool_calls: Some(0),
@@ -1534,7 +1534,7 @@ fn native_trajectory_projection_preserves_reasoning_tokens_and_malformed_coverag
         ..Default::default()
     };
     events.trajectory.observation = trajectory::Observation {
-        source: trajectory::Source::CodexTurns,
+        source: trajectory::Source::try_from("fixture_turns".to_owned()).unwrap(),
         coverage: trajectory::Coverage::CompleteObservedStream,
         steps: Some(1),
         tool_calls: Some(1),
@@ -1585,7 +1585,7 @@ fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
         ..Default::default()
     };
     let complete = Observation {
-        source: Source::CodexTurns,
+        source: Source::try_from("fixture_turns".to_owned()).unwrap(),
         coverage: Coverage::CompleteObservedStream,
         steps: Some(2),
         tool_calls: Some(4),
@@ -1657,12 +1657,12 @@ fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
 }
 
 #[test]
-fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
+fn metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
     let mut observer = trajectory::Observer::default();
     observer.observation = trajectory::Observation {
-        source: trajectory::Source::KiroSessionUpdates,
+        source: trajectory::Source::try_from("fixture_session_updates".to_owned()).unwrap(),
         coverage: trajectory::Coverage::Partial,
-        kiro_metering: Some(trajectory::KiroMetering {
+        metering: Some(trajectory::Metering {
             context_usage_percent: Some(0.0),
             peak_context_usage_percent: Some(0.0),
             prompt_completions: Some(1),
@@ -1680,7 +1680,7 @@ fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
     assert!(reported_tokens(Some(&envelope), None).is_none());
     let measured = serde_json::to_string(&projected["trajectory"]).unwrap();
     let legacy = serde_json::to_string(&trajectory::Observation {
-        source: trajectory::Source::KiroSessionUpdates,
+        source: trajectory::Source::try_from("fixture_session_updates".to_owned()).unwrap(),
         coverage: trajectory::Coverage::Partial,
         ..Default::default()
     })
@@ -1693,11 +1693,14 @@ fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
     let records = parse_records(Path::new("synthetic.jsonl"), &text).unwrap();
     let groups = group(&records);
     assert_eq!(
-        groups[0].trajectory.observations["kiro_observed_credits"],
+        groups[0].trajectory.observations["metering_observed_credits"],
         1
     );
-    assert_eq!(groups[0].trajectory.means["kiro_observed_credits"], 0.0);
-    assert_eq!(groups[0].trajectory.means["kiro_prompt_completions"], 1.0);
+    assert_eq!(groups[0].trajectory.means["metering_observed_credits"], 0.0);
+    assert_eq!(
+        groups[0].trajectory.means["metering_prompt_completions"],
+        1.0
+    );
     assert!(!groups[0].trajectory.means.contains_key("steps"));
     assert!(groups[0].mean_tokens.is_empty());
     assert!(groups[0].mean_reported_cost_usd.is_empty());
@@ -1709,12 +1712,12 @@ fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
         groups,
     };
     let text = render_at(&report, 120);
-    assert!(text.contains("Kiro metering is partial"));
-    assert!(text.contains("kiro_observed_credits mean 0 (1/2 observations)"));
+    assert!(text.contains("Native metering is partial"));
+    assert!(text.contains("metering_observed_credits mean 0 (1/2 observations)"));
 }
 
 #[test]
-fn kiro_metering_records_reject_invalid_units_and_inconsistent_coverage() {
+fn metering_records_reject_invalid_units_and_inconsistent_coverage() {
     for metering in [
         serde_json::json!({"context_usage_percent":101,"peak_context_usage_percent":101}),
         serde_json::json!({"context_usage_percent":5,"peak_context_usage_percent":4}),
@@ -1725,12 +1728,12 @@ fn kiro_metering_records_reject_invalid_units_and_inconsistent_coverage() {
         serde_json::json!({"usd":1}),
     ] {
         let mut observation = serde_json::to_value(trajectory::Observation {
-            source: trajectory::Source::KiroSessionUpdates,
+            source: trajectory::Source::try_from("fixture_session_updates".to_owned()).unwrap(),
             coverage: trajectory::Coverage::Partial,
             ..Default::default()
         })
         .unwrap();
-        observation["kiro_metering"] = metering;
+        observation["metering"] = metering;
         let text = record(&[("trajectory", &observation.to_string())]);
         assert!(parse_records(Path::new("synthetic.jsonl"), &text).is_err());
     }

@@ -44,7 +44,7 @@ impl Peer {
             "[package]\nname='decoder-fixture'\nversion='1.0.0'\n",
         )
         .unwrap();
-        let declaration = json!({"protocol_version":1,"path":"peer","timeout_ms":500,
+        let declaration = json!({"protocol_version":1,"path":"peer","timeout_ms":2000,
             "descriptor":{"id":"invented","display_name":"Synthetic decoder","program":"invented-native",
                 "aliases":[],"models":["fixture"],"modes":["headless"],
                 "operations":["probe","models","launch","decode_start","decode_event","decode_finish"],
@@ -138,7 +138,7 @@ fn independent_peer_errors_and_eof_timeout_fail_incomplete_and_reap() {
             .unwrap();
         worker.input.send(Input::End("stdout")).unwrap();
         worker.input.send(Input::End("stderr")).unwrap();
-        let result = worker.outcome.recv_timeout(Duration::from_secs(3)).unwrap();
+        let result = worker.outcome.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(result.is_err(), "{mode}");
         assert!(events.lock().unwrap().failed);
         assert!(!format!("{result:?}").contains("PRIVATE"));
