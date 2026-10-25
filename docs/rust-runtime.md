@@ -22,7 +22,7 @@ The five harness adapters are in `src/harness/`; their launch, native capability
 event and telemetry behavior is also exercised by the headless and integration
 tests. Rust implementation does not establish current account availability or
 live compatibility with every native version. Read the
-[harness compatibility evidence](reference.md#harness-compatibility-evidence)
+[harness compatibility evidence](reference.md#harness-compatibility-by-execution-mode)
 for execution-mode and evidence limits.
 
 The GitHub and cmux migrations retain independent protocol fixtures, including
