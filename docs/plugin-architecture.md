@@ -36,11 +36,12 @@ live integration checks. Do not claim existing adapters already meet this policy
 | Generic plugin discovery, pins, grants and bounded transports | Provider installation guidance and workflow skills |
 | Bounded task telemetry and evaluation evidence | Provider-specific diagnostics and live conformance tests |
 
-Harness adapters remain in core today. The [Rust harness packages](harness-plugins.md)
-prepare independent launch planning for Codex, Claude Code, Antigravity and OpenCode;
-configuration and event decoding still require extraction. This boundary does
-not claim that every harness is already a dynamically installable plugin. Git worktrees separate changes;
-they do not confine processes or filesystem access.
+Native harness implementations live in [Rust runtime packages](harness-plugins.md).
+Core discovers installed descriptors and validates their bounded responses; it
+links only the data contract. Native flags, configuration formats, account probes,
+trust receipts and event decoding belong to those external executables. No
+provider implementation is selected as a built-in fallback. Git worktrees
+separate changes; they do not confine processes or filesystem access.
 
 ## Choose the smallest integration
 
