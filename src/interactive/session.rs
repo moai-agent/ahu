@@ -148,7 +148,7 @@ impl<'a> SessionManager<'a> {
         label: &str,
         harness: &str,
         model: &str,
-        args: &[String],
+        plan: &crate::harness::LaunchCommand,
     ) -> Result<CoordinatorPlacement> {
         self.client.check_persistence()?;
         if self.client.inherited_workspace().is_none() {
@@ -164,14 +164,20 @@ impl<'a> SessionManager<'a> {
             .map(|loaded| loaded.config.telemetry)
             .unwrap_or_default();
         let mut command = std::process::Command::new(executable);
-        command.args(args).env("AHU_BIN", std::env::current_exe()?);
+        command
+            .args(&plan.args)
+            .env("AHU_BIN", std::env::current_exe()?);
         crate::telemetry::configure_coordinator(
             &mut command,
             &telemetry,
             harness,
             model,
-            crate::selection::probe_version(executable).as_deref(),
+            Some(&crate::harness::probe_version(
+                self.repo,
+                &crate::harness_runtime::load(self.repo, harness)?,
+            )?),
         );
+        crate::telemetry::configure_native_export(&mut command, plan.native_eval_otlp);
         let startup = coordinator_startup(&command);
         let result = self.client.place_coordinator(&CoordinatorRequest {
             repository_identity: &self.repo.identity(),
@@ -195,7 +201,7 @@ pub fn group_coordinator(
     label: &str,
     harness: &str,
     model: &str,
-    args: &[String],
+    plan: &crate::harness::LaunchCommand,
 ) -> Result<CoordinatorPlacement> {
     let Some(client) = super::discover_for_coordinator()? else {
         return Ok(CoordinatorPlacement {
@@ -204,7 +210,7 @@ pub fn group_coordinator(
         });
     };
     SessionManager::new(client.as_ref(), repo)
-        .group_coordinator(executable, label, harness, model, args)
+        .group_coordinator(executable, label, harness, model, plan)
 }
 
 /// Serialize only explicitly configured environment entries for an interactive

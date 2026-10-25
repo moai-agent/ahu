@@ -147,7 +147,7 @@ pub(crate) fn direct_command(
     let value = runtime.call(
         "launch",
         serde_json::json!({
-            "mode": "direct", "model": model, "permissions": "prompt", "work_mode": false,
+            "mode": "direct", "model": model, "permissions": "auto", "work_mode": false,
             "session": null, "native_version": version, "timeout_seconds": 1800,
             "cwd": repo.root, "broker_dir": null, "native_profile": null, "native_controls": [],
         }),

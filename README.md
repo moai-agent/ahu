@@ -28,7 +28,7 @@ The running process keeps its old file open, and new invocations use the fresh
 file. If an overwritten path already exits with status 137 and no output,
 replace it using one of these fresh-file procedures before troubleshooting ahu.
 
-Tasks require Git and the selected harness installed and
+Tasks require Git, the selected installed ahu harness plugin, and its native CLI installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
 OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
@@ -51,8 +51,9 @@ See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model 
 
 ## Integration boundary
 
-ahu keeps harness launch, task/attempt state, Git worktree lifecycle, MCP
-coordination, and bounded telemetry/evaluation in core. External tools belong in
+ahu keeps task/attempt state, Git worktree lifecycle, process supervision, MCP
+coordination, and bounded telemetry/evaluation in core. Native harness behavior
+is supplied by installed Rust runtime plugins. External tools belong in
 optional plugins and skills. Users can run current-terminal and headless tasks
 without cmux, GitHub, or an issue tracker.
 
@@ -66,9 +67,9 @@ security limits, and the review criteria for adding core behavior.
 ## Everyday use
 
 ahu and its maintained executable plugins use Rust; Python is only a development
-tooling dependency. See the [runtime inventory](docs/rust-runtime.md) for the five
-existing harness adapters and the [prepared Rust harness packages](docs/harness-plugins.md)
-for the experimental plugin integration and its remaining extraction work.
+tooling dependency. See the [runtime inventory](docs/rust-runtime.md) and
+[Rust harness plugin setup](docs/harness-plugins.md) for package installation and
+the native behavior owned by each independently versioned plugin.
 
 From any Git checkout:
 
@@ -77,7 +78,8 @@ ahu doctor
 ahu
 ```
 
-Run `ahu setup` once in each project. It detects installed harnesses, asks you
+Install and activate the desired [harness plugins](docs/harness-plugins.md), then
+run `ahu setup` in each project. It uses installed capability metadata and asks you
 to choose models for their ahu development agents, installs the bundled skills, adds
 project MCP entries, and writes `.agents/ahu/config.md` and `.agents/ahu/lock.md`.
 Review and commit the generated files so future ahu commands can use the same
@@ -288,32 +290,23 @@ the candidate checkout when they contain information the candidate should not
 see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and
 `ahu help all` prints the full reference.
 
-All coordinator shortcuts open the same way: approvals bypassed, on this project's
-top-ranked model for that harness, both passed explicitly on the command line.
+Coordinator shortcuts are aliases supplied by installed plugins. `ahu harness ID`
+selects an exact installed descriptor. They use the project's top-ranked exact
+model and request automatic approval through the plugin's native mapping. Missing
+rankings, unsupported permission modes and missing plugins are errors; ahu does
+not silently choose a different model or weaken the requested approval mode.
 
-| Shortcut | Arguments ahu passes |
-| --- | --- |
-| `ahu agy` | `--model <m> --dangerously-skip-permissions` |
-| `ahu claude` | `--model <m> --dangerously-skip-permissions` |
-| `ahu codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
-| `ahu opencode` | `--model <provider>/<model> --auto` |
-| `ahu kiro` | `chat --v3 --model <m> --trust-all-tools` |
+Codex, Claude Code, Antigravity and Kiro packages provide direct automatic modes.
+The reviewed OpenCode mini version has no unattended interactive override, so its
+automatic direct shortcut is refused; its headless work mode supports automatic
+approval. Native configuration can still deny tools, and automatic mode is not
+filesystem confinement. See [harness plugins](docs/harness-plugins.md) for evidence
+and version boundaries.
 
-`<m>` is the first model listed for that harness in `[model_rankings]`, and each
-shortcut prints its whole argument list before starting, so the disclosed line is
-exactly what was launched. When a harness has no ranked model, ahu passes no
-model option, says so on stderr, and the harness opens on whichever model it is
-configured with; ahu does not invent an identifier. OpenCode's `--auto` approves
-every permission OpenCode does not *explicitly deny*, without asking. Permissions
-set to `deny` in OpenCode's own configuration or agent frontmatter still apply,
-and ahu passes no `--pure`, so the user's plugins still load.
-
-Each shortcut names the installed executable (`codex`, `claude`, `agy`,
-`opencode`, `kiro-cli`) and accepts no additional arguments. Registered child agents keep
-their own manifest permissions and launch requirements. Coordinator shortcuts use
-the current terminal by default. Explicitly select an enabled session-host plugin
-with `AHU_INTERACTIVE_PLUGIN` to request provider-specific placement. See
-[coordinator sessions](docs/reference.md#coordinator-sessions) for details.
+Aliases accept no extra native flags. Coordinator sessions use the current
+terminal by default. An enabled session-host plugin can supply workspace
+placement through `AHU_INTERACTIVE_PLUGIN`; headless tasks need no session host.
+See [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
 agent and task inspection over stdio, and can expose the optional

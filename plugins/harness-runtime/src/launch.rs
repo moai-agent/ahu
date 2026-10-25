@@ -80,6 +80,20 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
     };
     let mut args: Vec<String> = Vec::new();
     let mut add = |values: &[&str]| args.extend(values.iter().map(|s| (*s).to_owned()));
+    if r.mode == Mode::Direct && r.permissions == Permissions::Auto {
+        match harness {
+            "codex" => add(&["-m", &r.model, "--dangerously-bypass-approvals-and-sandbox"]),
+            "claude-code" => add(&["--model", &r.model, "--dangerously-skip-permissions"]),
+            "antigravity" => add(&["--model", &r.model, "--dangerously-skip-permissions"]),
+            "kiro" => add(&["chat", "--v3", "--model", &r.model, "--trust-all-tools"]),
+            // The reviewed mini CLI has no unattended permission override.
+            "opencode" => return Err(()),
+            _ => return Err(()),
+        }
+        return Ok(
+            json!({"program":program,"args":args,"prompt_arg":null,"native_eval_otlp":harness != "kiro"}),
+        );
+    }
     if r.mode == Mode::Headless {
         match harness {
             "codex" => {
@@ -355,6 +369,16 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn direct_automatic_approval_is_never_silently_weakened() {
+        for (h,v,flag) in [("codex","0.163.0","--dangerously-bypass-approvals-and-sandbox"),("claude-code","2.1.310","--dangerously-skip-permissions"),("antigravity","1.4.7","--dangerously-skip-permissions"),("kiro","2.29.0","--trust-all-tools")] {
+            let mut request=params("direct",v,"model");request["permissions"]=json!("auto");
+            let result=plan(h,request).unwrap();assert!(result["args"].as_array().unwrap().contains(&json!(flag)));
+            assert!(result["prompt_arg"].is_null());
+        }
+        let mut request=params("direct","2.0.32","provider/model");request["permissions"]=json!("auto");
+        assert!(plan("opencode",request).is_err());
     }
     #[test]
     fn invalid_flags_and_unsupported_permissions_are_refused() {
