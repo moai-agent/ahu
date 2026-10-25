@@ -194,6 +194,7 @@ pub fn native_params(repo: &Repo, descriptor: &Descriptor) -> Result<serde_json:
     let executable =
         crate::selection::resolve_executable(&descriptor.program).ok_or_else(|| {
             Error::new("declared native executable is unavailable outside repositories")
+                .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
     let home = native_home()?;
     let path = std::env::var_os("PATH")

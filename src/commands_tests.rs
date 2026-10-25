@@ -206,16 +206,16 @@ fn onboarding_confirmation_registration_and_removal_preserve_native_file_and_ind
 }
 
 #[test]
-fn onboarding_rejects_missing_unknown_and_blocked_models_before_confirmation() {
+fn onboarding_rejects_missing_and_invalid_models_before_confirmation() {
     let (_root, repo) = repository();
     let native = repo.root.join(".claude/agents/reviewer.md");
     std::fs::create_dir_all(native.parent().unwrap()).unwrap();
     for (text, expected) in [
-        ("---\nmodel: inherit\n---\nReview", "needs an explicit one"),
         (
-            "---\nmodel: nonexistent-model\n---\nReview",
-            "cannot register",
+            "---\nmodel: inherit\n---\nReview",
+            "needs an explicit --model",
         ),
+        ("---\nmodel: bad model\n---\nReview", "model"),
     ] {
         std::fs::write(&native, text).unwrap();
         let (result, output) = scripted("y\n", |c| {
@@ -896,7 +896,7 @@ fn doctor_work_mode_checks_headless_prerequisites_without_native_or_session_host
     assert!(result.is_ok(), "{text}");
     assert!(text.contains("explicit headless work mode"), "{text}");
     assert!(
-        text.contains("work mode    claude-code: ahu adapter supports explicit headless work mode"),
+        text.contains("work mode    claude-code: installed runtime declares headless mode"),
         "{text}"
     );
     assert!(text.contains("native compatibility unverified"), "{text}");
@@ -937,7 +937,7 @@ fn indexed_headless_task_refuses_a_different_repository_before_lookup() {
         error.contains("task index repository identity mismatch"),
         "{error}"
     );
-    assert!(!repo.root.join(".ahu").exists());
+    assert!(!repo.root.join(".ahu/tasks").exists());
 }
 
 #[test]

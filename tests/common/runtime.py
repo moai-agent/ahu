@@ -96,12 +96,14 @@ def respond(op,p):
         result.update(configured.get('launch_overrides',{}))
         for field in configured.get('launch_omit',[]): result.pop(field,None)
         return result
-    if op == 'admission': return admission(p)
+    if op == 'admission':
+        if policy(p).get('refuse_admission'): raise ValueError('refused')
+        return admission(p)
     if op == 'native_sources':
         if p.get('settings',{}).get('view') == 'private_fingerprints': return {'fingerprints':{}}
         if p.get('settings',{}).get('view') == 'hooks':
-            return {'hooks':[],'settings':[],'mcp_servers':[],'declared_plugins':[],
-                    'unreadable':[],'checked':[],'unscanned_harness':D['id']}
+            return policy(p).get('hooks', {'hooks':[],'settings':[],'mcp_servers':[],'declared_plugins':[],
+                    'unreadable':[],'checked':[],'unscanned_harness':D['id']})
         if p.get('action') == 'parse':
             if p['format'] != FIXTURE['format']: raise ValueError('unsupported format')
             return parse(p['text'])
