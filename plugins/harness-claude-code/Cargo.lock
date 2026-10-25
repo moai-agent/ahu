@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "ahu-experiment-harness-codex"
+name = "ahu-plugin-claude-code"
 version = "0.1.0"
 dependencies = [
  "serde",
