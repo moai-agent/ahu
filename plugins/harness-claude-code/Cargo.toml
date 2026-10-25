@@ -3,10 +3,12 @@ name = "ahu-plugin-claude-code"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Independent claude-code launch planner for ahu"
+description = "External claude-code harness runtime for ahu"
 
 [workspace]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+ahu-harness-runtime = { path = "../harness-runtime" }
+
+[dev-dependencies]
 serde_json = "1"
