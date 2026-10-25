@@ -742,6 +742,18 @@ pub fn resolve_source_path(
     Ok(canonical)
 }
 
+/// Closing delimiter for ahu's own manifest envelope. Native formats are plugin-owned.
+fn find_frontmatter_end(rest: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            return Some((offset, line.len()));
+        }
+        offset += line.len();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

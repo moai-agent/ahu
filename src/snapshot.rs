@@ -30,7 +30,7 @@ impl ContextPaths {
         };
         if root.join(crate::plugin_binding::DIRECTORY).exists() {
             let repo = crate::git::discover(root)?;
-            for descriptor in crate::harness_runtime::discover(&repo)? {
+            for descriptor in crate::harness_runtime::discover_context(&repo)? {
                 for path in descriptor.context_paths {
                     let plain = path.trim_end_matches('/');
                     if !crate::plugin_binding::plain_relative(plain) {

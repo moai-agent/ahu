@@ -5,7 +5,6 @@
 //! translate an agent to another harness, drop native settings, or widen
 //! permissions beyond the manifest request.
 
-pub mod codex_metadata;
 pub(crate) mod native_trust;
 
 use serde::{Deserialize, Serialize};

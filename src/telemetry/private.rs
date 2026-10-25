@@ -168,11 +168,7 @@ impl PrivateMapping {
                 .is_some_and(|usd| !usd.is_finite() || usd < 0.0)
                 || sample.cost.usd.is_some() != sample.cost.source.is_some()
                 || sample.cost.source.as_deref().is_some_and(|source| {
-                    !matches!(
-                        source,
-                        "claude_code_result_total" | "opencode_step_finish_sum"
-                    ) || (source == "claude_code_result_total" && sample.harness != "claude-code")
-                        || (source == "opencode_step_finish_sum" && sample.harness != "opencode")
+                    !matches!(source, "native_cumulative_usd" | "native_step_sum_usd")
                 })
             {
                 return Err(invalid());
@@ -327,8 +323,8 @@ fn aggregate_reported_cost<'a>(costs: impl Iterator<Item = &'a ReportedCost>) ->
         if let Some(amount) = cost.usd {
             let (count, mean) = amounts
                 .entry(match source {
-                    "claude_code_result_total" => "claude_code_result_total",
-                    "opencode_step_finish_sum" => "opencode_step_finish_sum",
+                    "native_cumulative_usd" => "native_cumulative_usd",
+                    "native_step_sum_usd" => "native_step_sum_usd",
                     _ => unreachable!("source validated before aggregation"),
                 })
                 .or_default();

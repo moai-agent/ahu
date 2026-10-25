@@ -245,6 +245,10 @@ fn plan_with_mode(
         );
     }
     let runtime = crate::harness_runtime::load(repo, &pair.harness)?;
+    if runtime.binding_digest() != pair.runtime_binding_digest {
+        bail!("selected runtime binding changed before launch planning");
+    }
+
     if !work_mode {
         crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
     }

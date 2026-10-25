@@ -63,6 +63,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
             model: "gpt-6".into(),
             basis: "project ranking".into(),
             policy_digest: loaded.digest.clone(),
+            runtime_binding_digest: "synthetic-binding".into(),
         },
         enforcement: EnforcementReport {
             harness: "codex".into(),
