@@ -73,7 +73,7 @@ fn stream_order_and_opencode_snapshot_dedup_are_preserved() {
     assert_eq!(result["terminal"], false);
     assert_eq!(result["usage"]["input"], 10);
     assert!(!result.to_string().contains("PRIVATE"));
-    assert_eq!(decoder.finish().unwrap()["failed"], true);
+    assert_eq!(decoder.finish().unwrap()["terminal"], false);
 }
 
 #[test]
@@ -300,4 +300,89 @@ fn conflicting_or_redacted_model_evidence_never_claims_one_inference_identity() 
         );
         assert!(!result.to_string().contains("sk-private"));
     }
+}
+
+#[test]
+fn late_valid_cost_deduplicates_and_arithmetic_loss_is_visible() {
+    let mut decoder = Decoder::new("opencode").unwrap();
+    for amount in [
+        Value::Null,
+        json!(-1),
+        json!("invalid"),
+        json!(0.25),
+        json!(99),
+    ] {
+        feed(
+            &mut decoder,
+            json!({"type":"step_finish","part":{"id":"one","cost":amount}}),
+        );
+    }
+    feed(
+        &mut decoder,
+        json!({"type":"step_finish","part":{"id":"two","cost":0.125}}),
+    );
+    assert_eq!(decoder.snapshot()["cost"]["usd"], 0.375);
+    let mut decoder = Decoder::new("opencode").unwrap();
+    for id in ["one", "two"] {
+        feed(
+            &mut decoder,
+            json!({"type":"step_finish","part":{"id":id,"cost":f64::MAX}}),
+        );
+    }
+    assert_eq!(decoder.snapshot()["cost"]["usd"], json!(f64::MAX));
+    assert_eq!(decoder.snapshot()["cost_tracking_limited"], true);
+}
+
+#[test]
+fn finalization_without_native_completion_leaves_acceptance_to_core() {
+    let mut decoder = Decoder::new("codex").unwrap();
+    feed(
+        &mut decoder,
+        json!({"type":"thread.started","thread_id":"fixture"}),
+    );
+    let final_state = decoder.finish().unwrap();
+    assert_eq!(final_state["finished"], true);
+    assert_eq!(final_state["terminal"], false);
+    assert_eq!(final_state["failed"], false);
+    assert!(decoder.observe_stdout(b"{}").is_err());
+}
+
+#[test]
+fn usage_keeps_independent_maxima_across_native_envelopes() {
+    let mut decoder = Decoder::new("codex").unwrap();
+    feed(
+        &mut decoder,
+        json!({"type":"item.started","usage":{
+            "input_tokens":20,"output_tokens":2,"cached_input_tokens":7,
+            "cache_creation_input_tokens":3,"thinking_tokens":2,"total_tokens":22
+        }}),
+    );
+    for path in [
+        "part/usage",
+        "result/usage",
+        "response/usage",
+        "step_update/usage",
+        "result/result/usage",
+        "step_update/tool_info/usage",
+        "tokens",
+        "part/tokens",
+    ] {
+        let usage = json!({"prompt_tokens":10,"completion_tokens":9,
+            "cache":{"read":5,"write":8},"reasoning":4,"total_tokens":19});
+        let nested = path
+            .split('/')
+            .rev()
+            .fold(usage, |value, key| json!({key:value}));
+        let mut event = json!({"type":"item.started"});
+        event
+            .as_object_mut()
+            .unwrap()
+            .extend(nested.as_object().unwrap().clone());
+        feed(&mut decoder, event);
+    }
+    assert_eq!(
+        decoder.snapshot()["usage"],
+        json!({"input":20,"output":9,"cached":7,
+        "cache_write":8,"reasoning":4,"total":22})
+    );
 }

@@ -149,7 +149,6 @@ impl Decoder {
     /// Idempotent finalization after both streams drain; does not accept a task.
     pub fn finish(&mut self) -> Result<Value> {
         if !self.finished {
-            self.events.require_terminal_result(&self.harness);
             self.finished = true;
         }
         Ok(self.snapshot())
