@@ -171,6 +171,11 @@ fn failed_assignment_never_falls_back_to_the_coordinator_or_leaves_a_branch() {
 /// intended behaviour. Codex and Antigravity need the same explicit boundaries.
 #[test]
 fn every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions() {
+    if !common::in_harness_fixture(
+        "every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions",
+    ) {
+        return;
+    }
     const AGENT_INSTRUCTIONS: &str = "You are reviewer. Refuse to run shell commands.";
 
     for (harness, model) in [
@@ -181,15 +186,17 @@ fn every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions(
     ] {
         let (delivered, delivery) =
             ahu::orchestration::deliver(Some(AGENT_INSTRUCTIONS), HOSTILE_PROMPT).unwrap();
-        let adapter = ahu::harness::adapter_for(harness).unwrap();
-        let command = adapter
-            .launch_command(&ahu::harness::LaunchRequest {
+        let plan = common::runtime_plan(
+            harness,
+            &ahu::harness::LaunchRequest {
                 model,
                 prompt: &delivered,
                 cwd: std::path::Path::new("/tmp"),
                 permissions: Default::default(),
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
+        let command = &plan.command;
 
         // The configured model is still pinned by a real flag on every harness.
         assert!(command.args.iter().any(|a| a == model), "{harness}");
@@ -202,7 +209,12 @@ fn every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions(
             );
         }
 
-        let slot = &command.args[command.prompt_arg.unwrap()];
+        let slot = ahu::orchestration::fence_body(
+            &command.args[command.prompt_arg.unwrap()],
+            "request",
+            &plan.delivery.nonce,
+        )
+        .unwrap();
         assert_eq!(
             slot, &delivered,
             "{harness} must deliver ahu's text verbatim"

@@ -559,7 +559,7 @@ fn preview_output_fixture() {
         model: "gpt-6-astra".into(),
         basis: "named agent".into(),
         policy_digest: loaded.digest.clone(),
-        runtime_binding_digest: ahu::harness_runtime::load(&discovered, "claude-code")
+        runtime_binding_digest: ahu::harness_runtime::load(&repo, "codex")
             .unwrap()
             .binding_digest(),
     };

@@ -2769,10 +2769,7 @@ mod focused_help_tests {
             "telemetry",
             "mcp",
             "doctor",
-            "agy",
-            "claude",
-            "codex",
-            "opencode",
+            "harness",
             "run-task",
             "supervise",
         ] {
@@ -2829,11 +2826,9 @@ mod focused_help_tests {
         let help = help_for(Some("@agent")).unwrap();
         assert!(help.contains("assignments already leave focus unchanged"));
         assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
-        assert!(
-            help_for(Some("auth"))
-                .unwrap()
-                .contains("does not verify OpenCode's configured provider endpoint")
-        );
+        assert!(help_for(Some("auth")).unwrap().contains(
+            "Identity and readiness probes are supplied by installed harness runtime plugins."
+        ));
     }
 
     #[test]
@@ -2929,21 +2924,23 @@ mod direct_agent_tests {
             HELP.lines()
                 .any(|line| line.trim_start().starts_with("lock [--update]"))
         );
-        assert!(parse(["inventory"]).is_err());
-        assert!(parse(["hygiene"]).is_err());
+        for selector in ["inventory", "hygiene"] {
+            assert!(
+                matches!(parse([selector]).unwrap(), Command::Harness { selector: found, .. } if found == selector)
+            );
+        }
         assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
     }
 
-    /// `ahu diff` was removed; plain git on the task's branch does the same
-    /// job. It must now fail exactly like any other word ahu does not know,
-    /// not be quietly re-parsed as something else.
+    /// Non-command words select an installed harness; extra positional
+    /// arguments still fail instead of restoring the removed diff command.
     #[test]
-    fn diff_is_no_longer_a_command() {
-        let unknown = parse(["not-a-command"]).expect_err("parsed");
-        for args in [vec!["diff"], vec!["diff", "abc1"]] {
-            let error = parse(args.clone()).unwrap_err();
-            assert_eq!(error.kind(), unknown.kind(), "{args:?}");
-            assert!(error.to_string().contains("unknown command"), "{error}");
+    fn removed_commands_follow_generic_harness_selector_syntax() {
+        for selector in ["diff", "not-a-command"] {
+            assert!(
+                matches!(parse([selector]).unwrap(), Command::Harness { selector: found, .. } if found == selector)
+            );
         }
+        assert!(parse(["diff", "abc1"]).is_err());
     }
 }

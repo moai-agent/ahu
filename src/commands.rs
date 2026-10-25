@@ -385,6 +385,7 @@ pub fn onboard_cmd(
             )
         }
     };
+    config::validate_model_id(&model, &repo.root.join(&candidate.path))?;
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
     console.say(&format!(".agents/ahu/agents/{}.md\n\n", display_safe(name)))?;
     console.say(&onboard::proposed_manifest(candidate, &model, version))?;

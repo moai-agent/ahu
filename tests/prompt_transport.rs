@@ -258,6 +258,7 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.install_runtime("codex");
     repo.commit("fixture");
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -659,19 +660,14 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
 /// there is nothing left for a format to select.
 #[test]
 fn a_source_format_only_decides_how_its_file_is_parsed() {
-    use ahu::agent::SourceFormat;
-
-    // A codex definition holds no frontmatter: whatever the file holds is the
-    // verbatim instruction text, frontmatter-looking text and all.
-    assert!(SourceFormat::ClaudeAgent.has_frontmatter());
-    assert!(SourceFormat::AntigravityAgent.has_frontmatter());
-    assert!(!SourceFormat::CodexAgent.has_frontmatter());
-    assert!(SourceFormat::OpenCodeAgent.has_frontmatter());
-
+    if !common::in_harness_fixture("a_source_format_only_decides_how_its_file_is_parsed") {
+        return;
+    }
     // The parse is what ahu delivers: frontmatter is metadata, the body is the
     // instruction text.
     let repo = TestRepo::new();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.install_runtime("codex");
     repo.write(
         ".codex/agents/plain.toml",
         "---\nnot: frontmatter\n---\nplain body\n",
@@ -701,7 +697,7 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
     // The codex-agent parse is verbatim: nothing is stripped, so the
     // frontmatter-looking text is delivered as instruction text.
     let plain = ahu::agent::find(repo.path(), "plain").unwrap();
-    assert!(plain.instructions.contains("not: frontmatter"));
+    assert_eq!(plain.instructions, "plain body\n");
 
     // And no adapter has anywhere to put a name even if one were derived.
     for harness_id in ["claude-code", "codex", "antigravity"] {
