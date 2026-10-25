@@ -43,7 +43,8 @@ fn skill_completion_matrix_retains_only_bounded_metadata() {
                 "{harness}"
             );
             assert_eq!(skill["execution"], "observed");
-            assert!(skill["completed_at"].is_string());
+            // The host stamps receipt times after validating normalized evidence.
+            assert!(skill["completed_at"].is_null());
             // Only correlated, separate reports have a measured receipt interval.
             assert_eq!(skill["elapsed_ms"].is_u64(), harness != "opencode");
             assert_eq!(events.skills.len(), 1);

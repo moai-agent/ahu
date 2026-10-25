@@ -230,6 +230,24 @@ impl Snapshot {
         {
             return Err(invalid());
         }
+        // Receipt timestamps belong to the supervising host, not provider payloads.
+        for (index, skill) in next.skills.iter_mut().enumerate() {
+            let prior = previous
+                .skills
+                .get(index)
+                .filter(|old| old.name == skill.name && old.harness == skill.harness);
+            skill.observed_at = prior
+                .and_then(|old| old.observed_at.clone())
+                .or_else(|| Some(crate::task::now_rfc3339()));
+            skill.completed_at = if matches!(skill.status.as_str(), "completed" | "failed") {
+                prior
+                    .filter(|old| old.status == skill.status)
+                    .and_then(|old| old.completed_at.clone())
+                    .or_else(|| Some(crate::task::now_rfc3339()))
+            } else {
+                None
+            };
+        }
         next.failed |= previous.failed;
         next.cost_tracking_limited |= previous.cost_tracking_limited;
         if previous.trajectory.observation.stream_incomplete {
@@ -527,6 +545,37 @@ mod tests {
         );
         assert_eq!(events.session.as_deref(), Some("first"));
     }
+    #[test]
+    fn skill_receipt_times_are_host_owned_and_stable_until_evidence_is_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = Events::default();
+        let mut value = fixture();
+        value["skills"] = json!([{"name":"review","harness":"invented","status":"completed",
+            "completed_at":"provider-supplied","observed_at":"provider-supplied",
+            "execution":"observed","evidence":"observed"}]);
+        Snapshot::parse(value.clone(), "invented", false)
+            .unwrap()
+            .apply(&mut events, dir.path())
+            .unwrap();
+        let observed = events.skills[0].observed_at.clone();
+        let completed = events.skills[0].completed_at.clone();
+        assert!(completed.as_ref().is_some_and(|time| time.ends_with('Z')));
+        assert_ne!(observed.as_deref(), Some("provider-supplied"));
+        Snapshot::parse(value.clone(), "invented", false)
+            .unwrap()
+            .apply(&mut events, dir.path())
+            .unwrap();
+        assert_eq!(events.skills[0].observed_at, observed);
+        assert_eq!(events.skills[0].completed_at, completed);
+        value["skills"][0]["status"] = json!("invoked");
+        value["skills"][0]["execution"] = json!("unverified");
+        Snapshot::parse(value, "invented", false)
+            .unwrap()
+            .apply(&mut events, dir.path())
+            .unwrap();
+        assert!(events.skills[0].completed_at.is_none());
+    }
+
     #[test]
     fn arbitrary_plugin_trajectory_and_metering_are_validated_without_provider_catalog() {
         let mut value = fixture();
