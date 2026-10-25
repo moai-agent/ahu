@@ -138,12 +138,12 @@ fn budget_with_probe(
             {
                 return Err(invalid_observation());
             }
-            if observation.status == "available" || observation.status == "unknown" {
-                if observation.fingerprint.as_deref() != Some(&binding.fingerprint) {
-                    return Err(Error::new(
-                        "current native account does not match the active auth profile; signal omitted",
-                    ));
-                }
+            if (observation.status == "available" || observation.status == "unknown")
+                && observation.fingerprint.as_deref() != Some(&binding.fingerprint)
+            {
+                return Err(Error::new(
+                    "current native account does not match the active auth profile; signal omitted",
+                ));
             }
             signal["status"] = json!(observation.status);
             signal["source"] = json!(observation.source.unwrap_or_else(|| "none".into()));

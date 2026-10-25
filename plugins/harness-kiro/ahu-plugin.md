@@ -23,6 +23,7 @@ harness_runtime:
     capabilities: []
     tested_versions: ["2.29.0", "2.34.0"]
     context_paths: [".kiro/"]
+    private_context_paths: []
     skill_paths: [".agents/skills/"]
     native_source_paths: []
 ---

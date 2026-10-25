@@ -23,6 +23,7 @@ harness_runtime:
     capabilities: []
     tested_versions: ["0.163.0"]
     context_paths: [".codex/", "AGENTS.md"]
+    private_context_paths: []
     skill_paths: [".agents/skills/"]
     native_source_paths: []
 ---

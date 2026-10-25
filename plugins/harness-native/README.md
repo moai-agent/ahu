@@ -499,3 +499,65 @@ static catalog reference. External callers must migrate provider-specific
 private-lock keys to `native_mcp::fingerprints(repo,harness)` and classify
 `native:` entries as private. Native parser tests belong here; core tests use
 invented providers and generic observations.
+
+## Exact extraction operations
+
+Native source calls also accept these mutually exclusive, strict action forms:
+
+- `{"action":"parse","format":string,"text":string,"path":string}` returns
+  exactly `{instructions:string,native_model:string|null,native_settings:object}`.
+  Settings values are strings; structured declared values are JSON strings and
+  never executed. Formats are `codex-agent`, `claude-agent`, `opencode-agent`,
+  `antigravity-agent`, `kiro-json`, and `kiro-markdown`, only for their provider.
+  Codex TOML is delivered verbatim with null native_model and empty settings;
+  its TOML model key never overrides the manifest. Markdown frontmatter models
+  are returned for core's fixed-model conflict check. Kiro file:// prompt imports
+  refuse. Parse reads no paths and accepts at most 1 MiB of text.
+- `{"action":"discover","project_dir":absolute_canonical_path}` returns an
+  array of exactly `{name,path,format,native_model,blockers,preserved_fields,
+  description}`. Paths are project-relative. Discovery reads at most 1,024
+  directory entries and returns at most 256 candidates, bounded to 1 MiB per
+  definition. Symlinks refuse; subdirectories are not recursively traversed,
+  except the recognized Antigravity `<name>/agent.md` layout. Invalid definitions
+  carry a fixed blocker. No registration or write occurs.
+
+Admission also accepts `{"action":"native_profile","request":REQUEST}` with
+optional canonical `project`. REQUEST contains exactly `harness`,
+`harness_version`, `policy`, `session_model`, nullable `helper_model`,
+`helper_role`, `max_concurrent`, `max_depth`, nullable `budget_usd`, and
+`assignment_writes`. The result is the existing helper Profile shape (policy,
+harness, args, env, env_remove, helper_tools, helper_model, max_concurrent,
+max_depth, enforced, gaps). Provider mismatch refuses. Disabled/bounded helper
+constraints remain enforced. Codex's agents.enabled=false and version-specific
+invocation-isolation flags are included in the frozen profile. This pure
+operation does not establish native configuration admission or live conformance.
+Interactive/direct admission requires an exact live native model-list match
+for OpenCode and Kiro before accepting the requested invocation.
+
+`recover` accepts exactly `harness`, `native_version`, `native_executable`,
+nullable `expected_executable_digest`, `worktree`, `session`, and
+`attempt_started_ms`, plus optional canonical `home` and string-map
+`environment`. It returns exactly `{"recovered":bool}`. Only OpenCode 2.0.32 is
+eligible; unsupported versions/providers or absent frozen executable digest
+return false without execution. A digest mismatch refuses. It invokes only
+`session export --sanitize --standalone SESSION`, with no stdin or model replay,
+within one 30-second deadline and 1 MiB output bound. Only non-JSON exports retry;
+a valid but insufficient export returns false. The event crate's pure validator
+checks session identity, attempt timestamps, final completion and tool outcomes.
+Native output never crosses into core. Executable bytes and recognized worktree
+inputs are checked again after retrieval. Outer timeout or lost response remains
+unknown effects. Optional explicit home/environment should match the launch;
+without home, no HOME override is passed and native default-home selection
+applies. The subprocess environment is cleared and OTel is disabled for this
+inspection, without altering the main task's telemetry configuration.
+
+Native trust cleanup reconciles an existing owned receipt even when current
+permissions/mode no longer qualify for preparation. Ineligible preparation with
+no receipt is a no-op, including relocated configuration overrides. Core cleanup
+uses the frozen home without requiring the native CLI to remain installed.
+
+Installed descriptors declare `private_context_paths`, a bounded list of plain
+relative files/subtrees already covered by context_paths. Core filters these
+from shared lock entries and keeps their acceptance in private owner state.
+Native fingerprint inspection likewise does not resolve or execute the native
+CLI. The fixed provider filename list lives only in this implementation crate.

@@ -386,9 +386,9 @@ impl HookInventory {
 pub fn collect(repo_root: &Path, harness_id: &str) -> Result<HookInventory> {
     let repo = crate::git::discover(repo_root)?;
     let runtime = crate::harness_runtime::load(&repo, harness_id)?;
-    let common = crate::harness_runtime::native_params(&repo, runtime.descriptor())?;
+    let home = crate::harness_runtime::native_home()?;
     let result=runtime.call("native_sources",serde_json::json!({
-        "project":repo_root,"home":common.get("home"),"settings":{"view":"hooks","environment_names":std::env::vars_os().filter_map(|(name,_)|name.into_string().ok()).collect::<Vec<_>>()}
+        "project":repo_root,"home":home,"settings":{"view":"hooks","environment_names":std::env::vars_os().filter_map(|(name,_)|name.into_string().ok()).collect::<Vec<_>>()}
     }))?;
     validate_inventory(result)
 }

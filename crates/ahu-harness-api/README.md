@@ -24,6 +24,7 @@ harness_runtime:
     capabilities: []
     tested_versions: []
     context_paths: [.independent/]
+    private_context_paths: [.independent/local.json]
     skill_paths: [.independent/skills]
     native_source_paths: [.independent/agents]
 ```
@@ -81,3 +82,8 @@ envelopes and bounds I/O; consumer modules must validate typed operation payload
 before using them, including launch program/argv/prompt rules, proposed setup
 writes and exact trust receipts. The returned Value grants no command execution,
 filesystem mutation, credential access or task-state authority by itself.
+
+Private context paths are optional, limited to 64 unique plain relative paths,
+and must be covered by context_paths. A trailing slash names a subtree. They
+select owner-local acceptance rather than shared lock fingerprints; declaring
+a path does not authorize reading outside the project or following links.

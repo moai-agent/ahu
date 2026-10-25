@@ -23,6 +23,7 @@ harness_runtime:
     capabilities: []
     tested_versions: ["2.1.310"]
     context_paths: [".claude/", "CLAUDE.md", ".mcp.json"]
+    private_context_paths: [".claude/settings.local.json"]
     skill_paths: [".claude/skills/"]
     native_source_paths: []
 ---

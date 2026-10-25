@@ -322,21 +322,6 @@ pub fn validate_launch(
     // independently validated interactive invocation.
     validate(result, harness, false)
 }
-pub fn enforce_headless_executable_with_opencode_state(
-    root: &Path,
-    harness: &str,
-    version: &str,
-    executable: &Path,
-    trust_native_account_state: bool,
-) -> Result<Status> {
-    enforce_with_settings(
-        root,
-        harness,
-        version,
-        executable,
-        json!({"trust_native_account_state":trust_native_account_state}),
-    )
-}
 /// Provider-specific policy stays opaque; caller authorizes settings before dispatch.
 pub fn enforce_with_settings(
     root: &Path,
@@ -377,14 +362,6 @@ pub fn enforce_headless(root: &Path, harness: &str, version: &str) -> Result<Sta
         .ok_or_else(invalid)?;
     enforce_headless_executable(root, harness, version, Path::new(executable))
 }
-pub fn enforce(root: &Path, harness: &str) -> Result<Status> {
-    let status = inspect_result(root, harness)?;
-    if !status.headless.allowed {
-        return Err(invalid());
-    }
-    Ok(status)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
