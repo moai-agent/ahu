@@ -23,6 +23,7 @@ dependencies = [
 name = "ahu-harness-native"
 version = "0.1.0"
 dependencies = [
+ "ahu-harness-events",
  "libc",
  "reqwest",
  "serde",

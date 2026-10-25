@@ -454,7 +454,9 @@ fn kiro_declarative_agents_are_accepted_but_executable_unknown_fields_refuse() {
 
 #[test]
 fn provider_selected_settings_keep_inventory_distinct_from_admission() {
-    let f = Fixture::new("exit 99");
+    let f = Fixture::new(
+        "case \"$1\" in whoami) printf '{\"accountType\":\"SocialGitHub\"}';; chat) printf '{\"models\":[{\"model_id\":\"claude-sonnet-4.5\"}]}';; *) exit 99;; esac",
+    );
     let mut p = f.probe();
     p["environment_names"] = json!(["PATH", "synthetic_lowercase"]);
     p["settings"] = json!({"inspection_only":true});

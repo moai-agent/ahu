@@ -8,6 +8,10 @@ use ahu::hooks::{self, HookInventory, Scope};
 use ahu::snapshot;
 use common::TestRepo;
 
+fn settings_with_hooks(event: &str, matcher: Option<&str>, command: &str) -> String {
+    serde_json::json!({"hooks":{event:[{"matcher":matcher,"hooks":[{"type":"command","command":command}]}]}}).to_string()
+}
+
 #[test]
 fn hook_scripts_travel_into_the_worktree_with_their_executable_bit() {
     let repo = TestRepo::new();

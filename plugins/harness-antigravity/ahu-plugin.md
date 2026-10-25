@@ -23,6 +23,7 @@ harness_runtime:
     capabilities: []
     tested_versions: ["1.4.7"]
     context_paths: [".gemini/", "GEMINI.md", ".agy/"]
+    private_context_paths: []
     skill_paths: [".agents/skills/"]
     native_source_paths: []
 ---

@@ -17,7 +17,7 @@ pub(crate) fn fingerprints(repo: &Repo, harness: &str) -> Result<BTreeMap<String
         .map_err(|_| Error::new("invalid native private fingerprints"))?;
     if response.fingerprints.len() > 64
         || response.fingerprints.iter().any(|(key, value)| {
-            !key.starts_with("native:")
+            !key.starts_with(&format!("native:{}:", runtime.descriptor().id))
                 || key.len() > 256
                 || key.chars().any(char::is_control)
                 || value.len() != 64

@@ -62,6 +62,9 @@ pub struct Descriptor {
     pub tested_versions: Vec<String>,
     #[serde(default)]
     pub context_paths: Vec<String>,
+    /// Context whose acceptance belongs only in owner-local state.
+    #[serde(default)]
+    pub private_context_paths: Vec<String>,
     #[serde(default)]
     pub skill_paths: Vec<String>,
     #[serde(default)]
@@ -147,11 +150,31 @@ impl Descriptor {
         {
             return Err(ValidationError);
         }
+        if self.private_context_paths.len() > 64
+            || self.private_context_paths.iter().any(|path| {
+                let plain = path.strip_suffix('/').unwrap_or(path);
+                plain.len() > 4096
+                    || plain.split('/').any(|part| {
+                        part.is_empty()
+                            || part == "."
+                            || part == ".."
+                            || part.eq_ignore_ascii_case(".git")
+                            || part.contains(['\\', ':'])
+                            || part.chars().any(char::is_control)
+                    })
+                    || !self.context_paths.iter().any(|context| {
+                        context == path || (context.ends_with('/') && path.starts_with(context))
+                    })
+            })
+        {
+            return Err(ValidationError);
+        }
         for values in [
             &self.models,
             &self.capabilities,
             &self.tested_versions,
             &self.context_paths,
+            &self.private_context_paths,
             &self.skill_paths,
             &self.native_source_paths,
         ] {
@@ -224,6 +247,27 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_paths_are_bounded_relative_and_inside_declared_context() {
+        let mut descriptor:Descriptor=serde_json::from_value(serde_json::json!({"id":"invented","display_name":"Invented","program":"invented","modes":["direct"],"operations":["native_sources"],"context_paths":[".invented/"]})).unwrap();
+        descriptor.private_context_paths =
+            vec![".invented/local.json".into(), ".invented/private/".into()];
+        descriptor.validate().unwrap();
+        for path in [
+            "../escape",
+            "/absolute",
+            ".invented/../escape",
+            ".git/config",
+            ".other/local",
+            ".invented//local",
+        ] {
+            descriptor.private_context_paths = vec![path.into()];
+            assert!(descriptor.validate().is_err(), "{path}");
+        }
+        descriptor.private_context_paths = (0..65).map(|i| format!(".invented/{i}")).collect();
+        assert!(descriptor.validate().is_err());
+    }
 
     #[test]
     fn routing_keys_are_explicit_bounded_and_cannot_override_host_identity() {

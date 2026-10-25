@@ -23,14 +23,9 @@ const LOCK_SCHEMA_VERSION: u32 = 1;
 /// admission without adding user-specific fingerprints to shared `.agents/ahu/lock.md`.
 fn private_paths(repo: &Repo) -> Result<Vec<String>> {
     let mut paths = BTreeSet::new();
-    for descriptor in crate::harness_runtime::discover(repo)? {
-        // Read the optional descriptor extension as data while registry owns
-        // the shared contract type. It is validated again before path use.
-        let value = serde_json::to_value(descriptor)?;
-        if let Some(items) = value.get("private_context_paths") {
-            for path in parse_private_paths(items)? {
-                paths.insert(path);
-            }
+    for descriptor in crate::harness_runtime::discover_context(repo)? {
+        for path in parse_private_paths(&serde_json::to_value(descriptor.private_context_paths)?)? {
+            paths.insert(path);
         }
     }
     Ok(paths.into_iter().collect())
@@ -182,13 +177,13 @@ fn shared_snapshot(snapshot: &ConfigSnapshot, private: &[String]) -> ConfigSnaps
     let mut shared = snapshot.clone();
     shared
         .entries
-        .retain(|entry| !is_local_context_path(&entry.path, &private));
+        .retain(|entry| !is_local_context_path(&entry.path, private));
     shared
         .unscanned_config
-        .retain(|path| !is_local_context_path(path, &private));
+        .retain(|path| !is_local_context_path(path, private));
     shared
         .symlinks
-        .retain(|path| !is_local_context_path(path, &private));
+        .retain(|path| !is_local_context_path(path, private));
     shared
 }
 
@@ -284,7 +279,7 @@ fn reject_local_symlinks(snapshot: &ConfigSnapshot, private: &[String]) -> Resul
     if snapshot
         .symlinks
         .iter()
-        .any(|path| is_local_context_path(path, &private))
+        .any(|path| is_local_context_path(path, private))
     {
         return Err(Error::new(
             "private local agent settings cannot be symlinks; replace the link with a regular file before accepting context",

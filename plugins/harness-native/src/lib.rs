@@ -474,6 +474,15 @@ fn admit(harness: &str, params: &Value) -> Result<Value> {
         system_codex: p.system_codex,
         codex_managed_preferences: p.codex_managed_preferences,
     };
+    if p.mode != Mode::Headless && matches!(harness, "opencode" | "kiro") {
+        let listing = models(harness, &probe)?;
+        if !listing["models"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&p.model)))
+        {
+            return Err(Error::invalid());
+        }
+    }
     if harness == "opencode" && p.mode != Mode::Headless {
         let v2 = compatibility::version_token(&p.version).is_some_and(|v| v.starts_with("2."));
         if v2 && p.permissions == Permissions::Auto {

@@ -26,8 +26,11 @@ pub fn plan(
     allowed_roots: &[PathBuf],
 ) -> Result<Vec<Plan>> {
     let runtime = crate::harness_runtime::load(repo, harness)?;
-    let common = crate::harness_runtime::native_params(repo, runtime.descriptor())?;
-    let value=runtime.call("setup",json!({"project":repo.root,"home":common.get("home"),"ahu_executable":executable,"skills":skills}))?;
+    let home = crate::harness_runtime::native_home()?;
+    let value = runtime.call(
+        "setup",
+        json!({"project":repo.root,"home":home,"ahu_executable":executable,"skills":skills}),
+    )?;
     parse_proposals(value, allowed_roots)
 }
 pub fn parse_proposals(value: Value, allowed_roots: &[PathBuf]) -> Result<Vec<Plan>> {

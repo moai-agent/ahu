@@ -183,6 +183,21 @@ impl Drop for AcceptanceLock {
     }
 }
 
+fn valid_fingerprint_key(key: &str) -> bool {
+    if key.len() > 4096 {
+        return false;
+    }
+    crate::plugin_binding::plain_relative(key)
+        || (key.len() <= 256
+            && key.contains(':')
+            && key.split(':').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            }))
+}
+
 fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -212,10 +227,7 @@ fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
         || acceptance.repo_identity != identity
         || acceptance.fingerprints.len() > 64
         || acceptance.fingerprints.iter().any(|(path, digest)| {
-            !(crate::plugin_binding::plain_relative(path)
-                || (path.starts_with("native:")
-                    && path.len() <= 256
-                    && !path.chars().any(char::is_control)))
+            !valid_fingerprint_key(path)
                 || digest.len() != 64
                 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
@@ -358,6 +370,26 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn private_keys_accept_generic_legacy_namespaces_without_path_escape() {
+        for key in [
+            "user:invented-config",
+            "native:invented:0",
+            ".invented/local.json",
+        ] {
+            assert!(valid_fingerprint_key(key));
+        }
+        for key in [
+            "/absolute",
+            "../escape",
+            "native:../escape",
+            "native::empty",
+            "native:bad\n",
+        ] {
+            assert!(!valid_fingerprint_key(key));
+        }
     }
 
     #[test]
