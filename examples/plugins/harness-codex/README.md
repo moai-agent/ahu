@@ -33,7 +33,7 @@ instructed in the contract. Use its absolute path below. Create an ordinary Git
 repository, then follow the [local package binding example](../text-stats/README.md),
 with these substitutions:
 
-- Package directory: the absolute `$package_dir` prepared above.
+- Package directory: the absolute `$package_dir` prepared earlier.
 - Binding ID and filename: `harness-codex` and `harness-codex.md`.
 - Package version: `0.1.0`.
 - Grant: `[harness-launch]` instead of `[execute]`.
