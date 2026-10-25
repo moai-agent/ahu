@@ -13,8 +13,9 @@ JSON line to `observe_stdout`, and each stderr line to `observe_stderr`, in rece
 order. Both return **cumulative snapshots**, not deltas: replace observations,
 never sum successive snapshots. Do not feed stderr into the stdout parser.
 
-Call `finish` after draining both streams. It is idempotent and checks for a
-native terminal result; input after finish fails. `snapshot` does not finalize.
+Call `finish` after draining both streams. It is idempotent and freezes observation
+input; it does not fabricate a missing terminal result or decide task acceptance.
+Input after finish fails. `snapshot` does not finalize.
 A boundary error returns a fixed, non-sensitive `Error` and permanently marks
 failure and incomplete evidence; `snapshot` remains available for diagnostics.
 Valid native failure events return `Ok` with `failed: true`. Wrappers must handle
@@ -138,3 +139,83 @@ retrieval, or external service tests belong to this crate's focused validation.
 The only dependencies are serde/serde_json for the value boundary and sha2 for
 bounded, non-serialized trajectory identity fingerprints. Manifest/lock review
 and the repository's dependency security scan remain release integration gates.
+
+## Core integration contract
+
+Core `headless::decoder` consumes this schema without linking this crate. A single
+runtime session receives `decode_start {"harness":ID}`, ordered
+`decode_event {"stream":"stdout"|"stderr","line":UTF8_STRING}` requests and
+`decode_finish {}` only after both pipe readers report complete drain. The
+worker serializes calls from a bounded 16-line queue; readers apply cancellable,
+10-second bounded backpressure. The supervisor never holds its observation lock
+across a plugin call. Plugin errors, wrong schema/harness, invalid bounds,
+incomplete drains and decoder finalization failure prevent acceptance. Input is
+not retried. Non-UTF-8 native lines and unterminated stdout are explicit failures.
+
+Runtime frames have a 1 MiB limit including escaping/envelopes; a native line or
+cumulative snapshot that cannot fit fails closed. Core also checks the snapshot's
+1 MiB size, required field set, nesting/count/string bounds, finite amounts,
+session consistency and cumulative usage/counter behavior. It discards plugin
+lifecycle verdicts after shape validation and recomputes helper policy assessment
+from normalized observations and the frozen profile. Core resolves normalized
+write candidates against the actual worktree and its exact structured-result
+exception. Generic scoring and policy remain in core.
+
+Finalization is deliberately separate from native completion: a finalized decoder
+may return `terminal:false, failed:false`. Core may then request recorded recovery
+only for a fresh session, clean process exit, successful decoder finalization,
+known session, no blockers/unknown events and no prior failure. Core always
+requires terminal evidence before accepting success. Previously this crate marked
+missing terminal as failure during `finish`; that decision now belongs to core so
+eligible recovery cannot erase an observed failure.
+
+The headless launch operation matches the coordinator's runtime launch payload:
+
+```json
+{"mode":"headless","model":"exact-model","permissions":"auto","work_mode":true,"session":null,"native_version":"1.2.3","timeout_seconds":1800,"cwd":"/task/worktree","broker_dir":"/task/requests","native_profile":null,"native_controls":[]}
+```
+
+The response is exactly `{program,args,prompt_arg}`. `program` must match the
+installed runtime descriptor; args must end with one literal
+`<prompt: see prompt.txt>` placeholder at `prompt_arg`. Core substitutes the
+actual prompt after validating bounds and freezes `Runtime::binding_digest()` in
+`LaunchCommand.planner_binding_digest`. Decoder startup compares that frozen
+binding before invoking any native model process. No launch-only pilot or built-in
+adapter is used by the headless command builder.
+
+Two native-services payloads require coordinator integration; the inspected
+sibling currently has no matching handlers:
+
+- `admission {"action":"native_profile","project":ABSOLUTE_PROJECT,"request":REQUEST}`
+  returns the serialized core-compatible `native::Profile` directly. REQUEST
+  contains `harness`, `harness_version`, `policy`, `session_model`, `helper_model`,
+  `helper_role`, `max_concurrent`, `max_depth`, `budget_usd`, `assignment_writes`.
+  This is pure native policy/flag planning. It must include invocation/isolation
+  controls in `enforced`; core no longer adds provider-specific isolation flags.
+  The service must explicitly distinguish this request from its existing full
+  configuration-inspection admission payload. Core validates the requested
+  identity/policy/ceilings and rejects profile environment changes to host-owned
+  HOME/PATH/PWD, AHU_* or OTEL_* variables. Legacy `native::profile` refuses;
+  repository-aware callers use `native::profile_at`.
+- `recover {"harness":ID,"native_version":VERSION,"native_executable":PATH,"expected_executable_digest":DIGEST,"worktree":PATH,"session":SESSION,"attempt_started_ms":EPOCH_MS}`
+  returns exactly `{"recovered":true|false}`. Core invokes it only if the frozen
+  runtime declares `recover`. The service owns native version eligibility,
+  executable digest verification, bounded external-home session retrieval and
+  pure format validation. Unsupported recovery returns false or a fixed refusal;
+  it must never launch another model attempt. Core records a generic recovery
+  provenance label and cannot clear prior failure through this operation.
+
+The bridge uses sibling `Session::call_cancellable` for event/final decoder calls,
+then `Session::finish` for clean EOF/exit and group cleanup. The latter currently
+has an operation deadline but no cancellation argument; cancellation during that
+EOF/exit phase can therefore wait for the runtime operation deadline. Core times
+out its final drain wait and marks evidence incomplete rather than accepting a
+late result. The worker is cancelled and joined on drop, so even early returns
+wait for owned decoder cleanup rather than leaving its process behind. Making that final peer cleanup directly cancellable is a transport
+integration follow-up, not authority to restore built-in decoding.
+
+Legacy tests outside the assigned source files that directly call
+`Events::observe`, `Observer::observe`, or `native::Observations::observe` must
+move to plugin tests or consume normalized fixtures. Those methods no longer
+exist in core. Parser regression coverage lives in this standalone package;
+core boundary tests use an invented harness and normalized observations.

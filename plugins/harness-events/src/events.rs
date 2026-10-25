@@ -548,22 +548,6 @@ impl Events {
         self.terminal = true;
         self.failed |= failed;
     }
-
-    /// Called after stdout drain; process success cannot supply a missing result.
-    pub(crate) fn require_terminal_result(&mut self, harness: &str) {
-        if !self.terminal {
-            self.failed = true;
-            self.blockers.push("no terminal harness result".into());
-            if harness == "opencode" {
-                self.blockers.push(
-                    "OpenCode stdout has no final stop step; completed tool calls and a zero exit \
-                     do not establish completion. Review task changes before explicitly resuming \
-                     or retrying."
-                        .into(),
-                );
-            }
-        }
-    }
 }
 fn native_metadata(harness: &str, event: &Value) -> Value {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
