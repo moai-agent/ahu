@@ -100,15 +100,39 @@ impl State<'_> {
                     stream: String,
                     line: String,
                 }
-                let event: Event =
-                    serde_json::from_value(params).map_err(|_| RemoteError::InvalidInput)?;
-                let decoder = self.decoder.as_mut().ok_or(RemoteError::InvalidInput)?;
-                match event.stream.as_str() {
-                    "stdout" => decoder.observe_stdout(event.line.as_bytes()),
-                    "stderr" => decoder.observe_stderr(event.line.as_bytes()),
-                    _ => return Err(RemoteError::InvalidInput),
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Batch {
+                    events: Vec<Event>,
                 }
-                .map_err(|_| RemoteError::Failed)
+                let events = if params.get("events").is_some() {
+                    let batch: Batch =
+                        serde_json::from_value(params).map_err(|_| RemoteError::InvalidInput)?;
+                    if batch.events.is_empty()
+                        || batch.events.len() > 64
+                        || batch.events.iter().map(|e| e.line.len()).sum::<usize>() > 64 * 1024
+                    {
+                        return Err(RemoteError::InvalidInput);
+                    }
+                    batch.events
+                } else {
+                    vec![serde_json::from_value(params).map_err(|_| RemoteError::InvalidInput)?]
+                };
+                if events
+                    .iter()
+                    .any(|e| !matches!(e.stream.as_str(), "stdout" | "stderr"))
+                {
+                    return Err(RemoteError::InvalidInput);
+                }
+                let decoder = self.decoder.as_mut().ok_or(RemoteError::InvalidInput)?;
+                for event in events {
+                    match event.stream.as_str() {
+                        "stdout" => decoder.ingest_stdout(event.line.as_bytes()),
+                        _ => decoder.ingest_stderr(event.line.as_bytes()),
+                    }
+                    .map_err(|_| RemoteError::Failed)?;
+                }
+                Ok(decoder.snapshot())
             }
             Operation::DecodeFinish => {
                 if params != json!({}) {
@@ -150,6 +174,62 @@ mod tests {
         .unwrap();
         line.push(b'\n');
         line
+    }
+    #[test]
+    fn batches_match_individual_events_and_reject_invalid_bounds() {
+        let mut individual = State {
+            harness: "codex",
+            decoder: None,
+        };
+        let mut batched = State {
+            harness: "codex",
+            decoder: None,
+        };
+        for state in [&mut individual, &mut batched] {
+            state
+                .call(Operation::DecodeStart, json!({"harness":"codex"}))
+                .unwrap();
+        }
+        let events = vec![
+            json!({"stream":"stdout","line":r#"{"type":"thread.started","thread_id":"fixture-session"}"#}),
+            json!({"stream":"stderr","line":"diagnostic"}),
+            json!({"stream":"stdout","line":r#"{"type":"item.completed","item":{"type":"tool_call","name":"write_file","arguments":{"path":"src/example.rs"}}}"#}),
+        ];
+        let mut expected = Value::Null;
+        for event in &events {
+            expected = individual
+                .call(Operation::DecodeEvent, event.clone())
+                .unwrap();
+        }
+        let actual = batched
+            .call(Operation::DecodeEvent, json!({"events":events}))
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual["session"], "fixture-session");
+        assert!(
+            actual["write_target_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "src/example.rs")
+        );
+        for params in [
+            json!({"events":[]}),
+            json!({"events":vec![json!({"stream":"stderr","line":"x"});65]}),
+            json!({"events":[{"stream":"stderr","line":"x".repeat(65537)}]}),
+            json!({"events":[{"stream":"stdin","line":"x"}]}),
+            json!({"events":[{"stream":"stderr","line":"x"}],"line":"unexpected"}),
+        ] {
+            assert!(batched.call(Operation::DecodeEvent, params).is_err());
+        }
+        assert!(
+            batched
+                .call(
+                    Operation::DecodeEvent,
+                    json!({"events":[{"stream":"stdout","line":"not json"}]})
+                )
+                .is_err()
+        );
     }
     #[test]
     fn frames_are_ordered_strict_and_bounded() {

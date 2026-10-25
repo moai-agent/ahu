@@ -20,7 +20,7 @@ harness_runtime:
     modes: [interactive, headless, direct]
     operations: [probe, models, launch, admission, setup, native_sources, auth, budget, trust_prepare, trust_cleanup, decode_start, decode_event, decode_finish]
     environment_keys: ["CODEX_HOME", "XDG_CONFIG_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"]
-    capabilities: []
+    capabilities: [decode-event-batches-v1]
     tested_versions: ["0.163.0"]
     context_paths: [".codex/", "AGENTS.md"]
     private_context_paths: []

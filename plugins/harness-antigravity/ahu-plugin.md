@@ -20,7 +20,7 @@ harness_runtime:
     modes: [interactive, headless, direct]
     operations: [probe, models, launch, admission, setup, native_sources, auth, budget, trust_prepare, trust_cleanup, decode_start, decode_event, decode_finish]
     environment_keys: ["GEMINI_CLI_HOME", "AGY_CONFIG_DIR", "XDG_CONFIG_HOME", "GOOGLE_APPLICATION_CREDENTIALS", "GEMINI_API_KEY", "GOOGLE_API_KEY"]
-    capabilities: []
+    capabilities: [decode-event-batches-v1]
     tested_versions: ["1.4.7"]
     context_paths: [".gemini/", "GEMINI.md", ".agy/"]
     private_context_paths: []

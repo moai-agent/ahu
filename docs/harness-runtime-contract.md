@@ -96,3 +96,11 @@ Live validation separately records native version, model, execution mode, actual
 MCP calls, task-attributed local OTel, deterministic evals and cleanup. Account or
 quota failures are explicit skips, never successful conformance. Keep raw traces
 outside repositories and publication artifacts.
+
+Runtimes advertising `decode-event-batches-v1` accept `decode_event` parameters
+with an `events` array instead of a single `stream` and `line`. Each entry has
+those same two fields. A batch contains 1–64 ordered events, with at most
+64 KiB of unescaped line bytes. The host batches only stderr diagnostics, retaining individual frames for
+stdout, larger lines and runtimes without this capability. A batch returns the cumulative
+snapshot, including every observed write target; malformed events still fail
+the operation. Stream-end markers are never reordered around batches.

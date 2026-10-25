@@ -101,6 +101,11 @@ impl Decoder {
         Ok(())
     }
     pub fn observe_stdout(&mut self, line: &[u8]) -> Result<Value> {
+        self.ingest_stdout(line)?;
+        Ok(self.snapshot())
+    }
+    /// Consume one event without allocating an intermediate snapshot.
+    pub fn ingest_stdout(&mut self, line: &[u8]) -> Result<()> {
         self.bound(line)?;
         let event: Value = match serde_json::from_slice(line) {
             Ok(Value::Object(map)) => Value::Object(map),
@@ -137,14 +142,19 @@ impl Decoder {
             self.events.summary.clear();
             return Err(self.reject("native summary bound exceeded"));
         }
-        Ok(self.snapshot())
+        Ok(())
     }
     pub fn observe_stderr(&mut self, line: &[u8]) -> Result<Value> {
+        self.ingest_stderr(line)?;
+        Ok(self.snapshot())
+    }
+    /// Consume one diagnostic without allocating an intermediate snapshot.
+    pub fn ingest_stderr(&mut self, line: &[u8]) -> Result<()> {
         self.bound(line)?;
         self.events.observe_stderr(line);
         self.events.stderr_diagnostics.sort();
         self.events.stderr_diagnostics.dedup();
-        Ok(self.snapshot())
+        Ok(())
     }
     /// Idempotent finalization after both streams drain; does not accept a task.
     pub fn finish(&mut self) -> Result<Value> {

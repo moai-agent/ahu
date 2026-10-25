@@ -20,7 +20,7 @@ harness_runtime:
     modes: [interactive, headless, direct]
     operations: [probe, models, launch, admission, setup, native_sources, auth, budget, decode_start, decode_event, decode_finish]
     environment_keys: ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "KIRO_API_KEY", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"]
-    capabilities: []
+    capabilities: [decode-event-batches-v1]
     tested_versions: ["2.29.0", "2.34.0"]
     context_paths: [".kiro/"]
     private_context_paths: []

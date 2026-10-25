@@ -354,7 +354,12 @@ pub(super) fn start(
         return Err(invalid());
     }
     initial.apply(&mut *events.lock().map_err(|_| invalid())?, &worktree)?;
-    let (input, receiver) = mpsc::sync_channel(16);
+    let batches = runtime
+        .descriptor()
+        .capabilities
+        .iter()
+        .any(|c| c == "decode-event-batches-v1");
+    let (input, receiver) = mpsc::sync_channel(64);
     let (completion, outcome) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = Arc::clone(&cancelled);
@@ -362,11 +367,16 @@ pub(super) fn start(
         let run = || -> Result<()> {
             let mut stdout_done = false;
             let mut stderr_done = false;
+            let mut pending = None;
             loop {
                 if cancel.load(Ordering::Acquire) {
                     return Err(Error::new("runtime decoder cancelled"));
                 }
-                let input = match receiver.recv_timeout(Duration::from_millis(50)) {
+                let input = match pending
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| receiver.recv_timeout(Duration::from_millis(50)))
+                {
                     Ok(input) => input,
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(_) => return Err(Error::new("runtime decoder input disconnected")),
@@ -378,11 +388,35 @@ pub(super) fn start(
                         {
                             return Err(invalid());
                         }
-                        let value = session.call_cancellable(
-                            "decode_event",
-                            json!({"stream":stream,"line":line}),
-                            &cancel,
-                        )?;
+                        let params = if batches && stream == "stderr" && line.len() <= 64 * 1024 {
+                            let mut bytes = line.len();
+                            let mut batch = vec![json!({"stream":stream,"line":line})];
+                            while batch.len() < 64 {
+                                match receiver.try_recv() {
+                                    Ok(Input::Line { stream, line })
+                                        if stream == "stderr"
+                                            && bytes + line.len() <= 64 * 1024 =>
+                                    {
+                                        if (stream == "stdout" && stdout_done)
+                                            || (stream == "stderr" && stderr_done)
+                                        {
+                                            return Err(invalid());
+                                        }
+                                        bytes += line.len();
+                                        batch.push(json!({"stream":stream,"line":line}));
+                                    }
+                                    Ok(other) => {
+                                        pending = Some(other);
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            json!({"events":batch})
+                        } else {
+                            json!({"stream":stream,"line":line})
+                        };
+                        let value = session.call_cancellable("decode_event", params, &cancel)?;
                         let snapshot = Snapshot::parse(value, &owner.harness, false)?;
                         let checkpoint_session = {
                             let mut current = events.lock().map_err(|_| invalid())?;
