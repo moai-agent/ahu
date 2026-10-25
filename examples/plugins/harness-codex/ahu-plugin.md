@@ -9,7 +9,7 @@ host_api: 1
 cargo_manifest: Cargo.toml
 harness_launch:
   harness: codex
-  path: codex.py
+  path: bin/ahu-experiment-harness-codex
   protocol_version: 1
   timeout_ms: 5000
 ---

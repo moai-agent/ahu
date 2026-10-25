@@ -1,5 +1,13 @@
-# Package identity only. Installation never builds or executes this Python plugin.
 [package]
 name = "ahu-experiment-harness-codex"
 version = "0.1.0"
+edition = "2024"
+license = "MIT"
 publish = false
+
+# Independent executable: no ahu implementation dependencies.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

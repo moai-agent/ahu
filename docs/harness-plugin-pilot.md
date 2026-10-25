@@ -16,10 +16,13 @@ The planner runs as a short-lived subprocess, not an in-process Rust library.
 It uses a dedicated launch-planning protocol, separate from the one-shot action
 and session-host protocols. It shares only executable verification, executable snapshots,
 restricted process environment, bounded pipe exchange, and process cleanup.
-The independent Python package is a development-only protocol experiment. It
-must be replaced with a Rust executable before supported customer distribution,
-under the [customer runtime language policy](rust-style-guide.md#customer-runtime-language-policy).
-The protocol does not require linking Rust implementation types.
+The independent Rust executable has its own Cargo workspace and lockfile and
+links no ahu implementation crates. Python is used only by independent test
+fixtures, never by the packaged planner. The protocol remains language independent.
+Prepare the platform-specific package using the [example build instructions](../examples/plugins/harness-codex/README.md)
+before computing its digest or creating a binding. Installation copies verified
+package contents; it does not build or execute the planner. Binaries stay outside
+Git. This migration is not live provider certification.
 
 In a pilot build, missing installation, policy that is turned off, a missing grant, changed
 package bytes, or invalid protocol output refuses registered Codex task launch.
@@ -78,13 +81,18 @@ workspace-write mapping; it is not equivalent to unrestricted headless work mode
 Run from the repository root:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/ahu-harness-pilot-build cargo build --locked --features codex-plugin-pilot
-CARGO_TARGET_DIR=/tmp/ahu-harness-pilot-build cargo test --locked --features codex-plugin-pilot --test harness_plugin --test plugin_authoring
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --manifest-path examples/plugins/harness-codex/Cargo.toml
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --features codex-plugin-pilot
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo test --locked --features codex-plugin-pilot --test harness_plugin
 ```
 
-The tests install a pinned package into a disposable ordinary Git repository,
+The first build prepares the independent dependency cache. The tests explicitly
+compile the independent Rust crate offline with its lockfile, then
+install that real executable in a pinned package into a disposable ordinary Git repository,
 compare launch commands with the existing adapter, exercise refusal paths, and
-verify that the planner never receives the prompt. They do not require Codex,
+verify that the planner never receives the prompt. Direct executable tests cover
+strict request validation, duplicate/missing fields, framing, and byte limits;
+independent Python fixtures exercise malformed responses and pre-execution refusal. They do not require Codex,
 a provider account, cmux, or GitHub. Real harness tests must separately establish
 MCP use, local telemetry, results, integration, and normal cleanup.
 
