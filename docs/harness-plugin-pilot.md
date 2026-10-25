@@ -131,12 +131,12 @@ help and its [native launch policy](https://github.com/openai/codex/blob/rust-v0
 It selects an embedded native server even when a shared daemon is running.
 Headless `exec` and `exec resume` mappings are unchanged. Older native versions
 without this option fail at launch; the planner does not silently fall back to
-a shared daemon. Rebuild and repin the package before using this change.
+a shared daemon. Rebuild the package and update its content pins before using this change.
 
 The concrete consumer is the current-terminal task supervisor: its existing
 per-task environment must reach the native MCP launcher, and native work must
 remain under the launched process's ownership. A skill cannot select this
-process topology reliably. The existing argv contract suffices; no new inputs,
+process topology reliably. The existing argument-vector contract suffices; no new inputs,
 outputs, grants, task identifiers, or cleanup commands are added. Core continues
 to supply identity and supervise processes. The plugin selects native embedded
 execution without changing shared services, account settings, hooks, or native
@@ -204,10 +204,52 @@ Preexisting workspaces were retained. The native daemon automatic startup settin
 not resolve the plain-terminal gap when a shared daemon was already running.
 Do not adopt that setting as a fix or require cmux to obtain working telemetry.
 
-The plugin now selects embedded execution as described above; the observations
+The plugin now selects embedded execution as described in the preceding section; the observations
 in this table predate that change and are not post-change live certification.
 Any future shared-service runtime contract must carry per-task MCP context across
 native service boundaries and account for owned native sessions and children during cleanup.
 Do not assume a CLI exit stops a persistent service's work, infer missing usage
 as zero, or stop shared services to clean up one task. Native behavior belongs
 in the harness plugin; core retains task identity and coordination authority.
+
+## Controlled embedded-server check
+
+A follow-up on 2026-10-25 compared the built-in adapter and the updated Rust
+planner with Codex CLI 0.163.0, requested `gpt-6-astra`, the same project MCP
+configuration and an existing shared daemon. Both used the current terminal,
+without cmux or a tracker. The MCP command pointed explicitly to the candidate
+ahu executable. The plugin was independently built, content-pinned, installed
+and granted `harness-launch` through the documented setup workflow.
+
+| Check | Built-in baseline | Updated plugin |
+| --- | --- | --- |
+| Actual MCP agent-list call and shell write | Passed | Passed |
+| Task-attributed MCP spans in the local collector | Not observed; only task lifecycle spans matched | Initialize, discovery, tool-call and session spans matched |
+| Normal CLI exit | Shared daemon retained the MCP child; archiving the exact owned native session stopped it | Native CLI and its MCP child exited without an archive operation |
+| Coordinator cancellation after MCP completion | Not repeated | Cancellation confirmed; native CLI and MCP child stopped |
+| Headless deterministic eval | Not repeated in this comparison | Score 1.0, required MCP tool passed, complete-session MCP telemetry |
+
+Accepted synthetic work was committed and integrated before removal. Removed
+interactive tasks also relinquished their temporary native folder trust. Shared
+services and unrelated sessions were preserved. These observations cover normal
+exit and cancellation of an idle interactive session, not arbitrary detached
+native tools, abrupt coordinator death, or cancellation during plugin planning.
+The eval establishes the asserted answer and MCP behavior; it does not establish
+complete native tool accounting or general model quality. Full native extraction
+and the other preceding limitations remain outstanding.
+
+Headless resume now routes through the same installed planner as initial launch
+and frozen-command verification. Previously it used the built-in command builder,
+so the supervisor refused the changed planner identity before starting Codex.
+A CLI regression reproduces that refusal before the fix and verifies a successful
+second attempt with the same native session afterward. The failed pre-dispatch
+attempt preserves the earlier completed result and its worktree. CI runs this
+feature-enabled regression separately from the default adapter suite.
+
+The live resumed session also completed its MCP call and shell write with the
+original native session identity; the local collector attributed MCP spans to
+the new attempt. The launcher exceeded its 15-second startup acknowledgement
+window during that run, then the preserved attempt completed successfully.
+This warning is not a safe reason to repeat work: inspect the task result first.
+Its cause was not established by this check. No clean startup-timing claim is
+made for resume from this single observation.

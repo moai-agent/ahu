@@ -434,3 +434,133 @@ fn rust_planner_preserves_ascii_framing_and_exact_limits() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
 }
+
+#[cfg(feature = "codex-plugin-pilot")]
+#[test]
+fn headless_resume_keeps_installed_planner_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new(None);
+    let external = tempfile::tempdir().unwrap();
+    let bin = external.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let native = bin.join("codex");
+    fs::write(
+        &native,
+        r#"#!/usr/bin/python3
+import sys,json
+if '--version' in sys.argv:
+ print('codex-cli 0.163.0'); sys.exit(0)
+a=sys.argv[1:]
+assert a[0]=='exec'
+if a[1]=='resume': assert a[-2]=='synthetic-session'
+print(json.dumps({'type':'thread.started','thread_id':'synthetic-session'}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(f.root.join(".agents/ahu/agents")).unwrap();
+    fs::write(f.root.join(".agents/ahu/agents/probe.md"), "---\nokf_version: '0.2'\ntype: ahu:agent\ntitle: probe\ndescription: Synthetic probe\nharness: codex\nmodel: gpt-6-astra\npermissions: auto\nversion: 1.0.0\n---\nPerform synthetic work.\n").unwrap();
+    fs::write(f.root.join(".agents/ahu/config.md"), format!("---\nokf_version: '0.2'\ntype: ahu:project\nahu:\n  schema_version: 1\n  catalog_version: '{}'\n  harness_preferences: [codex]\n  model_selection: project-ranked\n  model_rankings:\n    codex: [gpt-6-astra]\n---\nSynthetic configuration.\n", ahu::catalog::CATALOG_VERSION)).unwrap();
+    fs::write(f.root.join(".gitignore"), ".ahu/\n.worktrees/\n").unwrap();
+    let command = || {
+        let mut command = common::ahu();
+        command
+            .current_dir(&f.root)
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", external.path())
+            .env("XDG_STATE_HOME", external.path().join("state"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    };
+    let success = |output: std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    success(command().args(["lock", "--update"]).output().unwrap());
+    common::git(&f.root, &["add", ".agents", ".gitignore"]);
+    f.commit();
+    let initial: serde_json::Value = serde_json::from_slice(&success(
+        command()
+            .args([
+                "@probe",
+                "--headless",
+                "--work-mode",
+                "--allow-widened-approvals",
+                "--prompt",
+                "synthetic first attempt",
+                "--output",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(initial["outcome"], "succeeded");
+    let id = initial["task_id"].as_str().unwrap();
+    let initial_result_path = PathBuf::from(initial["review"]["result_path"].as_str().unwrap());
+    let initial_task =
+        ahu::task::load(initial_result_path.parent().unwrap().parent().unwrap()).unwrap();
+    let initial_planner = initial_task.launch_command.planner_binding_digest;
+    assert!(initial_planner.is_some());
+    let prompt = external.path().join("followup.txt");
+    fs::write(&prompt, "synthetic followup").unwrap();
+    // A primary-checkout policy update must not silently select a new planner
+    // identity for a task whose worktree still carries the original binding.
+    let original_binding = fs::read_to_string(&f.binding).unwrap();
+    fs::write(
+        &f.binding,
+        original_binding.replace("[harness-launch]", "[harness-launch, execute]"),
+    )
+    .unwrap();
+    f.commit();
+    let refused = command()
+        .args(["resume", id, "--prompt-file"])
+        .arg(&prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("changed identity"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let unchanged =
+        ahu::task::load(initial_result_path.parent().unwrap().parent().unwrap()).unwrap();
+    assert_eq!(
+        unchanged.launch_command.planner_binding_digest,
+        initial_planner
+    );
+    fs::write(&f.binding, original_binding).unwrap();
+    f.commit();
+    success(
+        command()
+            .args(["resume", id, "--prompt-file"])
+            .arg(&prompt)
+            .args(["--output", "json"])
+            .output()
+            .unwrap(),
+    );
+    let resumed: serde_json::Value = serde_json::from_slice(&success(
+        command()
+            .args(["wait", id, "--output", "json"])
+            .output()
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(resumed["outcome"], "succeeded");
+    assert_eq!(resumed["attempt"], 2);
+    assert_eq!(resumed["harness"]["session"], "synthetic-session");
+    let result_path = PathBuf::from(resumed["review"]["result_path"].as_str().unwrap());
+    let task = ahu::task::load(result_path.parent().unwrap().parent().unwrap()).unwrap();
+    assert_eq!(task.launch_command.planner_binding_digest, initial_planner);
+    success(command().args(["cleanup", id]).output().unwrap());
+    success(command().args(["remove", id]).output().unwrap());
+}

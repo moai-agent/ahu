@@ -4062,7 +4062,10 @@ pub fn control(
                     state: Some(spec.coordination_state()),
                 },
             )?;
-            let command = batch_command(
+            // Resume must use the same dispatch boundary as initial launch and
+            // frozen-command validation, including an installed harness planner.
+            let command = crate::harness::task_command(
+                repo,
                 &record.identity.harness,
                 &LaunchRequest {
                     model: &record.identity.model,
@@ -4070,8 +4073,13 @@ pub fn control(
                     cwd: &record.worktree,
                     permissions: record.identity.permissions,
                 },
-                &spec,
+                Some(&spec),
             )?;
+            if command.planner_binding_digest != record.launch_command.planner_binding_digest {
+                bail!(
+                    "harness planner identity changed; previous attempt preserved, resume refused"
+                );
+            }
             let approval_lease =
                 crate::approval::retire_for_resume(&dir, &record.task_id, previous_spec.attempt)?;
             let old_attempt = attempt_dir(&dir, &previous_spec);

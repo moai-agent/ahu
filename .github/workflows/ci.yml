@@ -69,6 +69,11 @@ jobs:
           done
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check experimental harness plugin lifecycle
+        run: |
+          cargo test --manifest-path examples/plugins/harness-codex/Cargo.toml --locked
+          cargo clippy --all-targets --locked --features codex-plugin-pilot -- -D warnings
+          cargo test --locked --features codex-plugin-pilot --test harness_plugin --test setup_harness_plugins
       - name: Check optional session plugin absence
         run: |
           cargo clippy --no-default-features --all-targets --locked -- -D warnings
