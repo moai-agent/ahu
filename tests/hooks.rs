@@ -4,243 +4,9 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use ahu::hooks::{self, HookInventory, Locations, Scope};
+use ahu::hooks::{self, HookInventory, Scope};
 use ahu::snapshot;
 use common::TestRepo;
-
-/// Locations pointing at a throwaway home, so a developer's own
-/// `~/.claude/settings.json` can never change a test's outcome.
-fn locations(home: &Path) -> Locations {
-    Locations {
-        home: Some(home.to_path_buf()),
-        managed: None,
-    }
-}
-
-fn settings_with_hooks(event: &str, matcher: Option<&str>, command: &str) -> String {
-    let matcher = match matcher {
-        Some(matcher) => format!("\"matcher\": {matcher:?}, "),
-        None => String::new(),
-    };
-    format!(
-        "{{\"hooks\": {{{event:?}: [{{{matcher}\"hooks\": [{{\"type\": \"command\", \"command\": {command:?}}}]}}]}}}}"
-    )
-}
-
-#[test]
-fn doctor_separates_project_hook_inventory_from_all_harness_integration_status() {
-    for (claude_preference, claude_agent) in [(false, false), (true, false), (false, true)] {
-        let repo = TestRepo::new();
-        repo.init_config();
-        if !claude_preference {
-            let config = repo
-                .read(".agents/ahu/config.toml")
-                .replace("claude-code", "codex")
-                .replace("\"claude-opus-5\", \"claude-sonnet-5\"", "\"gpt-6-astra\"");
-            repo.write(".agents/ahu/config.toml", &config);
-        }
-        if claude_agent {
-            repo.add_agent("chris", "1.0.0", "claude-opus-5");
-        }
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(".claude")).unwrap();
-        let settings = home.path().join(".claude/settings.json");
-        let used = claude_preference || claude_agent;
-        // Generic inventory follows project harnesses; integration status reports
-        // all native scopes, including unrelated malformed settings.
-        std::fs::write(
-            &settings,
-            if used {
-                settings_with_hooks("Stop", None, "notify-me")
-            } else {
-                "invalid unrelated settings".to_string()
-            },
-        )
-        .unwrap();
-        let output = common::ahu()
-            .args(["doctor", "--verbose"])
-            .current_dir(repo.path())
-            .env("HOME", home.path())
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert!(!text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
-        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-            assert!(
-                text.contains(&format!("native safety {harness}:")),
-                "{text}"
-            );
-        }
-        if used {
-            assert!(
-                text.contains("hooks        Claude Code: 1 configured"),
-                "{text}"
-            );
-            assert!(text.contains("user         Stop → notify-me"), "{text}");
-        } else {
-            assert!(!text.contains("hooks        "), "{text}");
-            assert!(text.contains("settings.json"), "{text}");
-        }
-    }
-}
-
-#[test]
-fn project_hooks_are_found_and_marked_as_travelling() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    repo.write(
-        ".claude/settings.json",
-        &settings_with_hooks("PreToolUse", Some("Bash"), "./.claude/hooks/guard.sh"),
-    );
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    assert_eq!(found.hooks.len(), 1);
-    let hook = &found.hooks[0];
-    assert_eq!(hook.event, "PreToolUse");
-    assert_eq!(hook.matcher.as_deref(), Some("Bash"));
-    assert_eq!(hook.kind, "command");
-    assert_eq!(hook.scope, Scope::Project);
-    assert!(hook.scope.is_project_policy());
-    assert!(hook.scope.travels_into_worktree());
-    assert_eq!(found.travelling().len(), 1);
-    assert!(
-        found.outside_project_policy().is_empty(),
-        "a project hook is project policy"
-    );
-    assert!(hook.label().contains("PreToolUse:Bash"), "{}", hook.label());
-}
-
-#[test]
-fn hooks_outside_the_repository_are_flagged_and_do_not_travel() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-    std::fs::write(
-        home.path().join(".claude/settings.json"),
-        settings_with_hooks("Stop", None, "notify-me"),
-    )
-    .unwrap();
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    assert_eq!(found.hooks.len(), 1);
-    let hook = &found.hooks[0];
-    assert_eq!(hook.scope, Scope::User);
-    assert!(!hook.scope.is_project_policy());
-    assert!(!hook.scope.travels_into_worktree());
-    assert_eq!(found.outside_project_policy().len(), 1);
-    assert!(found.travelling().is_empty());
-}
-
-#[test]
-fn a_project_local_hook_travels_but_is_still_not_project_policy() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    // `.claude/settings.local.json` is inside the repository but conventionally
-    // ignored by Git, so it reaches the worktree without being shared or reviewed.
-    repo.write(
-        ".claude/settings.local.json",
-        &settings_with_hooks("UserPromptSubmit", None, "inject-context"),
-    );
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    let hook = &found.hooks[0];
-    assert_eq!(hook.scope, Scope::ProjectLocal);
-    assert!(hook.scope.travels_into_worktree());
-    assert!(!hook.scope.is_project_policy());
-    assert_eq!(found.outside_project_policy().len(), 1);
-    assert!(
-        hook.scope.why_not_project_policy().contains("does travel"),
-        "a project-local hook must not be described as non-travelling"
-    );
-}
-
-#[test]
-fn an_unreadable_settings_file_reports_unknown_hooks_rather_than_none() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    repo.write(".claude/settings.json", "{ this is not json");
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    assert!(found.hooks.is_empty());
-    assert_eq!(found.unreadable.len(), 1, "{found:?}");
-    assert!(found.unreadable[0].contains("settings.json"));
-}
-
-#[test]
-fn a_hooks_key_ahu_does_not_understand_is_reported_not_ignored() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    // A shape ahu cannot walk must never be reported as "no hooks".
-    repo.write(
-        ".claude/settings.json",
-        "{\"hooks\": {\"PreToolUse\": \"nope\"}}",
-    );
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    assert!(found.hooks.is_empty());
-    assert_eq!(found.unreadable.len(), 1, "{found:?}");
-}
-
-#[test]
-fn settings_without_hooks_are_read_cleanly() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    repo.write(".claude/settings.json", "{\"model\": \"claude-opus-5\"}");
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    assert!(found.hooks.is_empty());
-    assert!(found.unreadable.is_empty());
-    assert!(!found.checked.is_empty(), "the file was actually examined");
-}
-
-#[test]
-fn the_hook_digest_covers_scopes_the_config_snapshot_cannot_see() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-    let user_settings = home.path().join(".claude/settings.json");
-    std::fs::write(&user_settings, settings_with_hooks("Stop", None, "one")).unwrap();
-
-    let before = hooks::collect_in(repo.path(), &locations(home.path()))
-        .unwrap()
-        .digest();
-    let snapshot_before = snapshot::collect(repo.path()).unwrap().digest();
-
-    std::fs::write(&user_settings, settings_with_hooks("Stop", None, "two")).unwrap();
-
-    let after = hooks::collect_in(repo.path(), &locations(home.path()))
-        .unwrap()
-        .digest();
-    assert_ne!(before, after, "a user hook change must show as drift");
-    assert_eq!(
-        snapshot_before,
-        snapshot::collect(repo.path()).unwrap().digest(),
-        "the repository snapshot cannot see it, which is why the hook digest exists"
-    );
-}
-
-#[test]
-fn reading_hooks_never_modifies_a_settings_file() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    let body = settings_with_hooks("PreToolUse", Some("Bash"), "guard");
-    repo.write(".claude/settings.json", &body);
-    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-    let user_settings = home.path().join(".claude/settings.json");
-    std::fs::write(&user_settings, settings_with_hooks("Stop", None, "notify")).unwrap();
-
-    for _ in 0..3 {
-        hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
-    }
-    assert_eq!(repo.read(".claude/settings.json"), body);
-    assert_eq!(
-        std::fs::read_to_string(&user_settings).unwrap(),
-        settings_with_hooks("Stop", None, "notify"),
-        "ahu must never write a hook"
-    );
-}
-
-// --- executable configuration travelling into a worktree ---
 
 #[test]
 fn hook_scripts_travel_into_the_worktree_with_their_executable_bit() {
@@ -449,18 +215,18 @@ fn control_characters_from_repository_content_never_reach_the_terminal_raw() {
 /// Hook arguments routinely carry credentials; only the program is shown.
 #[test]
 fn hook_arguments_are_not_printed_or_persisted() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    repo.write(
-        ".claude/settings.json",
-        &settings_with_hooks(
-            "Stop",
-            None,
-            "curl -H \"Authorization: Bearer sk-secret-TOKEN-abcdef\" https://example.invalid",
-        ),
-    );
-
-    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
+    let found = HookInventory {
+        hooks: vec![ahu::hooks::Hook {
+            event: "Stop".into(),
+            matcher: None,
+            kind: "command".into(),
+            command: Some("curl -H Authorization:sk-secret-TOKEN-abcdef".into()),
+            command_digest: "a".repeat(64),
+            scope: Scope::Project,
+            source: "invented.conf".into(),
+        }],
+        ..Default::default()
+    };
     let rendered = hooks::render_for_preview(&found, 0);
     assert!(
         !rendered.contains("sk-secret-TOKEN-abcdef"),

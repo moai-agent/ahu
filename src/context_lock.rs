@@ -21,7 +21,32 @@ const LOCK_SCHEMA_VERSION: u32 = 1;
 
 /// User-local inputs are locked in owner-only host state so they affect launch
 /// admission without adding user-specific fingerprints to shared `.agents/ahu/lock.md`.
-const LOCAL_CONTEXT_PATHS: &[&str] = &[".claude/settings.local.json"];
+fn private_paths(repo: &Repo) -> Result<Vec<String>> {
+    let mut paths = BTreeSet::new();
+    for descriptor in crate::harness_runtime::discover(repo)? {
+        // Read the optional descriptor extension as data while registry owns
+        // the shared contract type. It is validated again before path use.
+        let value = serde_json::to_value(descriptor)?;
+        if let Some(items) = value.get("private_context_paths") {
+            for path in parse_private_paths(items)? {
+                paths.insert(path);
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+fn parse_private_paths(value: &serde_json::Value) -> Result<Vec<String>> {
+    let paths: Vec<String> = serde_json::from_value(value.clone())
+        .map_err(|_| Error::new("invalid private context paths"))?;
+    if paths.len() > 64
+        || paths.iter().any(|path| {
+            path.len() > 4096 || !crate::plugin_binding::plain_relative(path.trim_end_matches('/'))
+        })
+    {
+        return Err(Error::new("invalid private context paths"));
+    }
+    Ok(paths)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -70,7 +95,7 @@ pub struct Status {
 
 impl LockFile {
     pub(crate) fn from_snapshot(snapshot: &ConfigSnapshot) -> Self {
-        let snapshot = shared_snapshot(snapshot);
+        let snapshot = snapshot.clone();
         Self {
             schema_version: LOCK_SCHEMA_VERSION,
             digest: context_digest(&snapshot),
@@ -146,38 +171,49 @@ fn lock_digest(
     digest_bytes(canonical.to_string().as_bytes())
 }
 
-fn is_local_context_path(path: &str) -> bool {
-    LOCAL_CONTEXT_PATHS.contains(&path)
+fn is_local_context_path(path: &str, paths: &[String]) -> bool {
+    path.starts_with("native:")
+        || paths.iter().any(|local| {
+            path == local.trim_end_matches('/') || (local.ends_with('/') && path.starts_with(local))
+        })
 }
 
-fn shared_snapshot(snapshot: &ConfigSnapshot) -> ConfigSnapshot {
+fn shared_snapshot(snapshot: &ConfigSnapshot, private: &[String]) -> ConfigSnapshot {
     let mut shared = snapshot.clone();
     shared
         .entries
-        .retain(|entry| !is_local_context_path(&entry.path));
+        .retain(|entry| !is_local_context_path(&entry.path, &private));
     shared
         .unscanned_config
-        .retain(|path| !is_local_context_path(path));
-    shared.symlinks.retain(|path| !is_local_context_path(path));
+        .retain(|path| !is_local_context_path(path, &private));
+    shared
+        .symlinks
+        .retain(|path| !is_local_context_path(path, &private));
     shared
 }
 
-fn local_fingerprints(snapshot: &ConfigSnapshot) -> Result<BTreeMap<String, String>> {
+fn local_fingerprints(
+    repo: &Repo,
+    snapshot: &ConfigSnapshot,
+    private: &[String],
+) -> Result<BTreeMap<String, String>> {
     let mut fingerprints: BTreeMap<String, String> = snapshot
         .entries
         .iter()
-        .filter(|entry| is_local_context_path(&entry.path))
+        .filter(|entry| is_local_context_path(&entry.path, private))
         .map(|entry| (entry.path.clone(), entry.digest.clone()))
         .collect();
-    // The project registration declares Antigravity use. Its interactive
-    // native registration is user-owned and must not churn the shared lock.
-    if snapshot
-        .entries
-        .iter()
-        .any(|entry| entry.path == ".agents/mcp_config.json")
-        && let Some(digest) = crate::native_mcp::fingerprint_antigravity()?
-    {
-        fingerprints.insert(crate::native_mcp::ANTIGRAVITY_KEY.into(), digest);
+    for descriptor in crate::harness_runtime::discover(repo)? {
+        if descriptor
+            .operations
+            .contains(&crate::harness_runtime::Operation::NativeSources)
+        {
+            for (key, digest) in crate::native_mcp::fingerprints(repo, &descriptor.id)? {
+                if fingerprints.insert(key, digest).is_some() {
+                    return Err(Error::new("duplicate private native fingerprint"));
+                }
+            }
+        }
     }
     Ok(fingerprints)
 }
@@ -189,9 +225,13 @@ pub fn refresh(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> {
 /// Refresh project context as part of explicit setup. A first setup establishes
 /// local acceptance, while rerunning setup never silently accepts later drift.
 pub fn refresh_for_setup(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> {
-    reject_local_symlinks(snapshot)?;
+    let private = private_paths(repo)?;
+    reject_local_symlinks(snapshot, &private)?;
     let path = write_shared_lock(repo, snapshot)?;
-    crate::private_context_lock::initialize_if_missing(repo, &local_fingerprints(snapshot)?)?;
+    crate::private_context_lock::initialize_if_missing(
+        repo,
+        &local_fingerprints(repo, snapshot, &private)?,
+    )?;
     Ok(path)
 }
 
@@ -201,9 +241,10 @@ pub fn refresh_with_state_home(
     snapshot: &ConfigSnapshot,
     state_home: Option<&Path>,
 ) -> Result<PathBuf> {
-    reject_local_symlinks(snapshot)?;
+    let private = private_paths(repo)?;
+    reject_local_symlinks(snapshot, &private)?;
     let path = write_shared_lock(repo, snapshot)?;
-    let fingerprints = local_fingerprints(snapshot)?;
+    let fingerprints = local_fingerprints(repo, snapshot, &private)?;
     // Explicit acceptance includes deletion of the last private input. The
     // private store avoids creating state when there is nothing to accept.
     crate::private_context_lock::accept(repo, &fingerprints, state_home)?;
@@ -225,7 +266,8 @@ fn write_shared_lock(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> 
     } else {
         None
     };
-    let lock = LockFile::from_snapshot(snapshot);
+    let private = private_paths(repo)?;
+    let lock = LockFile::from_snapshot(&shared_snapshot(snapshot, &private));
     let body = lock.render(previous.as_deref())?;
     crate::private_io::atomic_write(&path, body.as_bytes(), Durability::Durable)?;
     Ok(path)
@@ -238,11 +280,11 @@ pub fn refresh_shared_only(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<Pat
     write_shared_lock(repo, snapshot)
 }
 
-fn reject_local_symlinks(snapshot: &ConfigSnapshot) -> Result<()> {
+fn reject_local_symlinks(snapshot: &ConfigSnapshot, private: &[String]) -> Result<()> {
     if snapshot
         .symlinks
         .iter()
-        .any(|path| is_local_context_path(path))
+        .any(|path| is_local_context_path(path, &private))
     {
         return Err(Error::new(
             "private local agent settings cannot be symlinks; replace the link with a regular file before accepting context",
@@ -282,36 +324,40 @@ pub fn check_with_state_home(
     };
     let lock = LockFile::parse(&path)?;
 
-    let current = LockFile::from_snapshot(snapshot);
+    let private = private_paths(repo)?;
+    let current = LockFile::from_snapshot(&shared_snapshot(snapshot, &private));
     let mut problems = Vec::new();
     let obsolete_local_metadata = lock
         .entries
         .iter()
-        .any(|entry| is_local_context_path(&entry.path))
+        .any(|entry| is_local_context_path(&entry.path, &private))
         || lock
             .unscanned_config
             .iter()
-            .any(|path| is_local_context_path(path))
-        || lock.symlinks.iter().any(|path| is_local_context_path(path));
+            .any(|path| is_local_context_path(path, &private))
+        || lock
+            .symlinks
+            .iter()
+            .any(|path| is_local_context_path(path, &private));
     if obsolete_local_metadata {
         problems.push("shared lock contains obsolete per-user metadata; refresh it".into());
     }
     let lock_entries: Vec<_> = lock
         .entries
         .iter()
-        .filter(|entry| !is_local_context_path(&entry.path))
+        .filter(|entry| !is_local_context_path(&entry.path, &private))
         .cloned()
         .collect();
     let lock_unscanned: Vec<_> = lock
         .unscanned_config
         .iter()
-        .filter(|path| !is_local_context_path(path))
+        .filter(|path| !is_local_context_path(path, &private))
         .cloned()
         .collect();
     let lock_symlinks: Vec<_> = lock
         .symlinks
         .iter()
-        .filter(|path| !is_local_context_path(path))
+        .filter(|path| !is_local_context_path(path, &private))
         .cloned()
         .collect();
     let comparable_lock_digest = if obsolete_local_metadata {
@@ -363,7 +409,7 @@ pub fn check_with_state_home(
         .collect();
     paths.extend(lock.entries.iter().map(|entry| entry.path.as_str()));
     for path in paths {
-        if is_local_context_path(path) {
+        if is_local_context_path(path, &private) {
             continue;
         }
         if !is_tracked(&repo.root, path)? {
@@ -373,7 +419,7 @@ pub fn check_with_state_home(
         }
     }
 
-    let shared = shared_snapshot(snapshot);
+    let shared = shared_snapshot(snapshot, &private);
     if !shared.symlinks.is_empty() {
         problems.push(format!(
             "context symlinks cannot be locked safely: {}",
@@ -390,11 +436,11 @@ pub fn check_with_state_home(
     let has_local_symlink = snapshot
         .symlinks
         .iter()
-        .any(|path| is_local_context_path(path));
+        .any(|path| is_local_context_path(path, &private));
     if has_local_symlink
         || !crate::private_context_lock::is_current(
             repo,
-            &local_fingerprints(snapshot)?,
+            &local_fingerprints(repo, snapshot, &private)?,
             state_home,
         )?
     {
@@ -517,123 +563,47 @@ mod tests {
     }
 
     #[test]
-    fn ignored_claude_local_settings_use_private_acceptance_without_churning_shared_lock() {
-        let fixture = tempfile::tempdir().unwrap();
-        git_cmd(fixture.path(), &["init", "-q", "-b", "main"]);
-        git_cmd(fixture.path(), &["config", "user.name", "ahu tests"]);
-        git_cmd(
-            fixture.path(),
-            &["config", "user.email", "tests@example.invalid"],
-        );
-        std::fs::create_dir_all(fixture.path().join(".agents/ahu")).unwrap();
-        std::fs::create_dir_all(fixture.path().join(".claude")).unwrap();
-        std::fs::write(
-            fixture.path().join(".gitignore"),
-            ".claude/settings.local.json\n",
-        )
+    fn declared_private_context_never_enters_shared_lock() {
+        let private = parse_private_paths(&serde_json::json!([
+            ".invented/local.json",
+            ".invented/private/"
+        ]))
         .unwrap();
-        std::fs::write(
-            fixture.path().join(".agents/ahu/config.toml"),
-            "schema_version = 1\n",
-        )
-        .unwrap();
-        let local_settings = fixture.path().join(".claude/settings.local.json");
-        std::fs::write(
-            &local_settings,
-            r#"{"enabledMcpjsonServers":["ahu"],"privateNote":"LOCAL-ONLY-DETAIL"}"#,
-        )
-        .unwrap();
-
-        let repo = git::discover(fixture.path()).unwrap();
-        let snapshot = crate::snapshot::collect(fixture.path()).unwrap();
-        assert!(
-            snapshot
-                .entries
-                .iter()
-                .any(|entry| entry.path == ".claude/settings.local.json")
-        );
-        let state_home_dir = tempfile::tempdir().unwrap();
-        let state_home = state_home_dir.path().canonicalize().unwrap();
-        refresh_with_state_home(&repo, &snapshot, Some(&state_home)).unwrap();
-        let lock_text = std::fs::read_to_string(fixture.path().join(LOCK_PATH)).unwrap();
-        assert!(!lock_text.contains(".claude/settings.local.json"));
-        assert!(!lock_text.contains("LOCAL-ONLY-DETAIL"));
-
-        git_cmd(
-            fixture.path(),
-            &["add", ".gitignore", ".agents/ahu/config.toml", LOCK_PATH],
-        );
-        git_cmd(
-            fixture.path(),
-            &["commit", "-q", "-m", "lock public context"],
-        );
-        let repo = git::discover(fixture.path()).unwrap();
-        assert!(
-            check_with_state_home(&repo, &snapshot, Some(&state_home))
-                .unwrap()
-                .current
-        );
-
-        // A value change affects agent behavior, so it must make this user's
-        // local acceptance stale without changing the shared lock.
-        std::fs::write(
-            &local_settings,
-            r#"{"enabledMcpjsonServers":["ahu"],"privateNote":"CHANGED-LOCAL-DETAIL"}"#,
-        )
-        .unwrap();
-        let changed = crate::snapshot::collect(fixture.path()).unwrap();
-        let status = check_with_state_home(&repo, &changed, Some(&state_home)).unwrap();
-        assert!(!status.current);
-        assert!(status.detail.contains("private local agent settings"));
-        assert!(!status.detail.contains("CHANGED-LOCAL-DETAIL"));
-
-        refresh_with_state_home(&repo, &changed, Some(&state_home)).unwrap();
-        let updated_lock = std::fs::read_to_string(fixture.path().join(LOCK_PATH)).unwrap();
-        assert_eq!(updated_lock, lock_text);
-        assert!(
-            check_with_state_home(&repo, &changed, Some(&state_home))
-                .unwrap()
-                .current
-        );
-        assert!(
-            git::run(fixture.path(), &["status", "--porcelain"])
-                .unwrap()
-                .stdout
-                .is_empty()
-        );
-
-        // Removing the final private input needs explicit acceptance too.
-        std::fs::remove_file(&local_settings).unwrap();
-        let removed = crate::snapshot::collect(fixture.path()).unwrap();
-        assert!(local_fingerprints(&removed).unwrap().is_empty());
-        assert!(
-            !check_with_state_home(&repo, &removed, Some(&state_home))
-                .unwrap()
-                .current
-        );
-        refresh_with_state_home(&repo, &removed, Some(&state_home)).unwrap();
-        assert!(
-            check_with_state_home(&repo, &removed, Some(&state_home))
-                .unwrap()
-                .current
-        );
-        assert_eq!(
-            std::fs::read_to_string(fixture.path().join(LOCK_PATH)).unwrap(),
-            lock_text
-        );
-
-        // No private inputs must not create a store, but an existing unsafe
-        // acceptance must still be refused rather than silently replaced.
-        let fresh = tempfile::tempdir().unwrap();
-        refresh_with_state_home(&repo, &removed, Some(fresh.path())).unwrap();
-        assert!(!fresh.path().join("ahu").exists());
-        let acceptance = state_home
-            .join("ahu/context-locks")
-            .join(repo.identity())
-            .join("acceptance.json");
-        std::fs::write(&acceptance, "invalid").unwrap();
-        assert!(refresh_with_state_home(&repo, &removed, Some(&state_home)).is_err());
-        assert_eq!(std::fs::read_to_string(acceptance).unwrap(), "invalid");
+        let snapshot = ConfigSnapshot {
+            entries: vec![
+                SnapshotEntry {
+                    path: "AGENTS.md".into(),
+                    digest: "a".repeat(64),
+                    bytes: 3,
+                    executable: false,
+                },
+                SnapshotEntry {
+                    path: ".invented/local.json".into(),
+                    digest: "b".repeat(64),
+                    bytes: 4,
+                    executable: false,
+                },
+                SnapshotEntry {
+                    path: "native:invented:0".into(),
+                    digest: "c".repeat(64),
+                    bytes: 0,
+                    executable: false,
+                },
+            ],
+            skipped_directories: vec![],
+            unscanned_config: vec![".invented/private/child".into()],
+            symlinks: vec![".invented/local.json".into()],
+        };
+        let shared = shared_snapshot(&snapshot, &private);
+        assert_eq!(shared.entries.len(), 1);
+        assert!(shared.unscanned_config.is_empty());
+        assert!(shared.symlinks.is_empty());
+        assert!(reject_local_symlinks(&snapshot, &private).is_err());
+        let rendered = LockFile::from_snapshot(&shared).render(None).unwrap();
+        assert!(!rendered.contains("invented"));
+        assert!(!rendered.contains(&"b".repeat(64)));
+        assert!(parse_private_paths(&serde_json::json!(["../escape"])).is_err());
+        assert!(parse_private_paths(&serde_json::json!(["/absolute"])).is_err());
     }
 
     #[test]

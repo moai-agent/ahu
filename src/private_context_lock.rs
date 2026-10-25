@@ -212,10 +212,11 @@ fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
         || acceptance.repo_identity != identity
         || acceptance.fingerprints.len() > 64
         || acceptance.fingerprints.iter().any(|(path, digest)| {
-            !matches!(
-                path.as_str(),
-                ".claude/settings.local.json" | crate::native_mcp::ANTIGRAVITY_KEY
-            ) || digest.len() != 64
+            !(crate::plugin_binding::plain_relative(path)
+                || (path.starts_with("native:")
+                    && path.len() <= 256
+                    && !path.chars().any(char::is_control)))
+                || digest.len() != 64
                 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     {
@@ -377,8 +378,8 @@ mod tests {
         let bob_state = tempfile::tempdir().unwrap();
         let alice_home = alice_state.path().canonicalize().unwrap();
         let bob_home = bob_state.path().canonicalize().unwrap();
-        let alice = BTreeMap::from([(".claude/settings.local.json".into(), "a".repeat(64))]);
-        let bob = BTreeMap::from([(".claude/settings.local.json".into(), "b".repeat(64))]);
+        let alice = BTreeMap::from([(".invented/settings.local.json".into(), "a".repeat(64))]);
+        let bob = BTreeMap::from([(".invented/settings.local.json".into(), "b".repeat(64))]);
 
         assert!(!is_current(&repo, &alice, Some(&alice_home)).unwrap());
         accept(&repo, &alice, Some(&alice_home)).unwrap();
@@ -436,8 +437,8 @@ mod tests {
         let repo = crate::git::discover(checkout.path()).unwrap();
         let state = tempfile::tempdir().unwrap();
         let home = state.path().canonicalize().unwrap();
-        let initial = BTreeMap::from([(".claude/settings.local.json".into(), "a".repeat(64))]);
-        let changed = BTreeMap::from([(".claude/settings.local.json".into(), "b".repeat(64))]);
+        let initial = BTreeMap::from([(".invented/settings.local.json".into(), "a".repeat(64))]);
+        let changed = BTreeMap::from([(".invented/settings.local.json".into(), "b".repeat(64))]);
 
         initialize_if_missing_at(&repo, &initial, &home).unwrap();
         assert!(is_current(&repo, &initial, Some(&home)).unwrap());

@@ -23,9 +23,11 @@ configuration or it fails.
 
 Use skills for workflows that agents can perform with an existing CLI. Use an
 optional executable plugin when ahu needs a machine-readable integration contract.
-Core owns harness launch, task/attempt state, worktrees, MCP coordination and
-bounded telemetry/evaluation. Plugins own provider API calls, credentials, terminal
-workspace mappings and external issue transitions. Neither cmux nor GitHub is a
+Core owns task/attempt state, process supervision, worktrees, MCP coordination and
+bounded telemetry/evaluation. Installed Rust harness runtimes own native launch
+arguments, configuration, admission, account observations and event parsing.
+Terminal and tracker plugins own workspace mappings and external issue transitions.
+Core links only the harness data contract and has no built-in provider fallback. Neither cmux nor GitHub is a
 core dependency; headless and current-terminal execution require neither.
 
 The cmux package implements generic Host V2; GitHub workflows use skills and
@@ -59,7 +61,9 @@ harness or its shell tools from starting other processes.
 - **A session host**, optional. Interactive work defaults to the current
   terminal; cmux is available through an explicitly enabled plugin. Headless
   execution needs no session host.
-- **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
+- **An installed harness runtime plugin** and its native CLI, installed and signed
+  in by you. Activate the reviewed package with a committed `harness-runtime`
+  grant; see `docs/harness-plugins.md`. Descriptors define available harnesses.
 - **Git**: every task gets its own branch and worktree.
 
 When selected, the cmux plugin creates repository groups and per-task workspaces.

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 pub(crate) fn fingerprints(repo: &Repo, harness: &str) -> Result<BTreeMap<String, String>> {
     let runtime = crate::harness_runtime::load(repo, harness)?;
-    let common = crate::harness_runtime::native_params(repo, runtime.descriptor())?;
-    let response=runtime.call("native_sources",serde_json::json!({"project":repo.root,"home":common.get("home"),"settings":{"view":"private_fingerprints","environment_names":std::env::vars_os().filter_map(|(name,_)|name.into_string().ok()).collect::<Vec<_>>()}}))?;
+    let home = crate::harness_runtime::native_home()?;
+    let response=runtime.call("native_sources",serde_json::json!({"project":repo.root,"home":home,"settings":{"view":"private_fingerprints","environment_names":std::env::vars_os().filter_map(|(name,_)|name.into_string().ok()).collect::<Vec<_>>()}}))?;
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Response {
