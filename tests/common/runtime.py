@@ -61,6 +61,9 @@ def decode(op,p):
                 SNAPSHOT['failed']=kind == 'failure'
                 SNAPSHOT['summary']=event.get('summary','')
                 SNAPSHOT['native']['terminal_seen']=True
+        elif kind == 'observation':
+            for field in ['usage','model','trajectory']:
+                if field in event: SNAPSHOT[field]=event[field]
         elif kind == 'write': SNAPSHOT['write_target_candidates'].append(event['path'])
         else: SNAPSHOT['unknown_events'] += 1
     return SNAPSHOT
@@ -141,7 +144,16 @@ def respond(op,p):
         return {'publication':'host_transaction_required','changes':[{
             'path':str(path),'expected_before_sha256':before,'text':'{"configured":true}\n'}]}
     if op == 'auth':
-        return {'status':'available','binding_harness':D['id'],'fingerprint':'1'*64,'identity_kind':'synthetic','effective_provider_address_verified':True}
+        fingerprint='1'*64
+        config=p.get('environment',{}).get('FIXTURE_CONFIG_DIR')
+        if config:
+            directory=pathlib.Path(config)
+            (directory / 'probed').write_text('called')
+            account=json.loads((directory / 'auth.json').read_text())
+            if account.get('status') != 'available':
+                return {'status':'unavailable','binding_harness':D['id'],'reason':'synthetic account unavailable'}
+            fingerprint=hashlib.sha256(account['identity'].encode()).hexdigest()
+        return {'status':'available','binding_harness':D['id'],'fingerprint':fingerprint,'identity_kind':'synthetic','effective_provider_address_verified':True}
     raise ValueError('unsupported operation')
 
 sequence = 0

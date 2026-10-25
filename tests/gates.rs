@@ -139,19 +139,16 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
         String::from_utf8_lossy(&output.stderr)
     );
     let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
-    assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
-    let trust: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(repo.state_path().join("home/.claude.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(trust["projects"].as_object().unwrap().len(), 1);
+    assert!(argv.contains("--auto\n"), "{argv}");
+    // This installed fixture declares no native trust capability.
+    assert!(!repo.state_path().join("home/.claude.json").exists());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
-    assert!(!stdout.contains("--permission-mode auto"), "{stdout}");
+    assert!(!stdout.contains("--auto"), "{stdout}");
     let preview = launch(&repo, &["--allow-widened-approvals", "--dry-run"]);
     assert!(preview.status.success());
     let details = String::from_utf8_lossy(&preview.stdout);
-    assert!(details.contains("--permission-mode auto"), "{details}");
+    assert!(details.contains("--auto"), "{details}");
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(
@@ -333,7 +330,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
         "config_snapshot": {"entries": [], "skipped_directories": []},
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-        "launch_command": {"program": "claude", "args": []},
+        "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
         "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         // prompt_digest is deliberately absent.
         "enforcement": {
@@ -592,7 +589,7 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
         "config_snapshot": {"entries": [], "skipped_directories": []},
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-        "launch_command": {"program": "claude", "args": []},
+        "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
         "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         "prompt_digest": "0",
         "enforcement": {

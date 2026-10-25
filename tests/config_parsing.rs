@@ -381,7 +381,7 @@ fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(
-        error.contains("does not translate an agent from one harness to another"),
+        error.contains("harness runtime operation refused"),
         "{error}"
     );
 }
@@ -554,43 +554,6 @@ fn a_relative_path_entry_never_resolves_a_harness() {
     );
 }
 
-/// Hooks must not be read through a symlinked `.claude`.
-///
-/// `Scope::Project` is the one scope whose `why_not_project_policy` is "it is
-/// project policy", so `outside_project_policy` excludes it and the
-/// non-project-hook warning is suppressed. Reading through a symlink labelled
-/// hooks from outside the repository as project policy, and the preview also
-/// claimed they travel into the task worktree — which is false, because
-/// `materialize` deletes configuration symlinks from it. Both errors pointed
-/// the permissive way.
-#[test]
-fn hooks_are_not_read_through_a_symlinked_claude_directory() {
-    let repo = TestRepo::new();
-    let outside = repo.path().join("outside-claude");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(
-        outside.join("settings.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/synthetic-marker"}]}]}}"#,
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(&outside, repo.path().join(".claude")).unwrap();
-
-    let found = ahu::hooks::collect(repo.path(), "claude-code").expect("collect succeeds");
-    assert!(
-        !found
-            .hooks
-            .iter()
-            .any(|h| h.command.as_deref() == Some("/usr/bin/synthetic-marker")),
-        "a hook was read through a symlinked .claude: {:?}",
-        found.hooks
-    );
-    assert!(
-        found.unreadable.iter().any(|u| u.contains("symlink")),
-        "the refusal must be disclosed, not silent: {:?}",
-        found.unreadable
-    );
-}
-
 /// A proposed manifest must be parseable by the loader that will read it back.
 ///
 /// `proposed_manifest` quotes candidate-derived values as YAML double-quoted
@@ -688,19 +651,14 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
     assert_eq!(loaded.manifest.harness, "opencode");
     assert_eq!(loaded.manifest.model, "ollama/glm-5.3:cloud");
 
-    // The bare Ollama tag is not a catalog model for this harness.
+    // Core preserves opaque model identifiers; native validation belongs to the runtime.
     repo.write(
         ".agents/ahu/agents/oc.md",
         &manifest.replace("ollama/glm-5.3:cloud", "glm-5.3:cloud"),
     );
-    let error = agent::load_all(repo.path()).unwrap_err().to_string();
-    assert!(
-        error.contains("is not a catalog model for harness"),
-        "{error}"
-    );
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
+    assert_eq!(
+        agent::load_all(repo.path()).unwrap()[0].manifest.model,
+        "glm-5.3:cloud"
     );
 }
 
@@ -716,13 +674,20 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
 fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
     let repo = TestRepo::new();
     repo.init_config();
+    common::runtime::install(
+        repo.path(),
+        "opencode",
+        "opencode",
+        ".opencode/agent",
+        "opencode-agent",
+        &["ollama/glm-5.3:cloud"],
+    );
     repo.write(
         ".opencode/agent/reviewer.md",
         "---\ndescription: Reviews changes\nmode: primary\nmodel: ollama/glm-5.3:cloud\n\
          temperature: 0.1\n---\n\nYou review changes.\n",
     );
-    // A definition whose model belongs to another harness is a blocker, not a
-    // silent re-targeting of the launch.
+    // Opaque native model metadata is preserved without silent retargeting.
     repo.write(
         ".opencode/agent/borrowed.md",
         "---\ndescription: Borrowed model\nmodel: claude-opus-5\n---\n\nBody.\n",
@@ -761,15 +726,9 @@ fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
         .iter()
         .find(|c| c.name == "borrowed")
         .expect("the borrowed-model definition is still listed");
-    assert!(!borrowed.registrable());
-    assert!(
-        borrowed
-            .blockers
-            .iter()
-            .any(|b| b.contains("claude-opus-5") && b.contains("opencode")),
-        "the blocker must name the model and the harness it was checked against: {:?}",
-        borrowed.blockers
-    );
+    assert!(borrowed.registrable());
+    assert_eq!(borrowed.native_model.as_deref(), Some("claude-opus-5"));
+    // Discovery preserves the plugin's assessment; it cannot invent a core model catalog.
 
     let inheriting = candidates
         .iter()

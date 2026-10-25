@@ -263,6 +263,8 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
             path.display()
         );
     }
+    crate::config::validate_harness_id(&harness, path)?;
+    crate::config::validate_model_id(&model, path)?;
     let status = match status.as_str() {
         "" | "stable" => Status::Stable,
         "draft" => Status::Draft,

@@ -44,3 +44,8 @@ toml = "0.9"
 
 [workspace]
 members = ["crates/ahu-host-api", "crates/ahu-harness-api"]
+
+# Installed executable packages are rehashed at trust boundaries. Keep those
+# integrity checks practical in local debug/test runs without caching acceptance.
+[profile.dev.package.sha2]
+opt-level = 3

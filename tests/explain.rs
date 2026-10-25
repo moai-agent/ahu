@@ -117,14 +117,17 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
         // The hard dependencies have to be stated, not implied.
         assert!(
             text.contains("cmux"),
-            "interactive cmux dependency must be named"
+            "optional cmux integration must be named"
         );
         assert!(
-            text.contains("A supported harness"),
+            text.contains("installed harness runtime plugin"),
             "the harness dependency must be named: {text}"
         );
         assert!(
-            text.contains("installed and signed in by you"),
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("installed and signed in by you"),
             "who installs it must be explicit: {text}"
         );
         assert!(text.contains("Harness installation and sign-in remain separate"));
@@ -161,12 +164,8 @@ fn the_markdown_render_is_a_real_markdown_document() {
         !text.contains("  !! "),
         "terminal warning gutters leaked in"
     );
-    // The catalog becomes a table.
-    assert!(
-        text.contains("| harness | ahu adapter | behavior checked on |"),
-        "{text}"
-    );
-    assert!(text.contains("| --- | --- | --- |"), "{text}");
+    assert!(text.contains("installed Rust plugins"));
+    assert!(!text.contains("| harness | ahu adapter | behavior checked on |"));
 }
 
 #[test]

@@ -181,7 +181,7 @@ impl Session {
                             Response::Failure(error)
                                 if error.protocol_version == PROTOCOL_VERSION && error.id == id =>
                             {
-                                return Err(failure("operation refused"));
+                                return Err(failure(&format!("operation refused ({operation:?})")));
                             }
                             _ => return Err(failure("response sequence or version mismatch")),
                         };

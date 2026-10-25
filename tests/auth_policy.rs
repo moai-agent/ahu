@@ -5,8 +5,9 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn antigravity_probe_disables_color_without_weakening_account_checks() {
+fn runtime_account_changes_are_checked_without_disclosing_identity() {
     let repo = TestRepo::new();
+    repo.install_runtime("antigravity");
     let bin = tempfile::tempdir().unwrap();
     let script = bin.path().join("agy");
     std::fs::write(
@@ -28,6 +29,7 @@ fi
     ))
     .unwrap();
     let run = |args: &[&str], identity: &str, kind: &str, inherited_color: Option<&str>| {
+        std::fs::write(bin.path().join("auth.json"), serde_json::json!({"status":if identity == "missing" || kind == "key" {"unavailable"} else {"available"},"identity":identity}).to_string()).unwrap();
         let mut command = common::ahu();
         command
             .current_dir(repo.path())
@@ -36,6 +38,7 @@ fi
             // The regression must not depend on the test runner already
             // suppressing color, as an unattended coordinator often does.
             .env_remove("NO_COLOR")
+            .env("FIXTURE_CONFIG_DIR", bin.path())
             .env("AHU_TEST_AGY_IDENTITY", identity)
             .env("AHU_TEST_AGY_KIND", kind);
         if let Some(value) = inherited_color {
@@ -97,7 +100,13 @@ fi
 #[test]
 fn auth_mutations_require_operator_before_probing_or_changing_state() {
     let repo = TestRepo::new();
+    repo.install_runtime("claude-code");
     let bin = tempfile::tempdir().unwrap();
+    std::fs::write(
+        bin.path().join("auth.json"),
+        r#"{"status":"available","identity":"fixture@example.invalid"}"#,
+    )
+    .unwrap();
     let sentinel = bin.path().join("probed");
     let script = bin.path().join("claude");
     std::fs::write(&script, "#!/bin/sh\nprintf called > \"$AHU_TEST_AUTH_SENTINEL\"\nprintf '%s\\n' '{\"loggedIn\":true,\"email\":\"fixture@example.invalid\",\"orgId\":\"fixture-org\",\"authMethod\":\"oauth\",\"apiProvider\":\"first-party\"}'\n").unwrap();
@@ -111,7 +120,8 @@ fn auth_mutations_require_operator_before_probing_or_changing_state() {
         c.current_dir(repo.path())
             .args(args)
             .env("PATH", &path)
-            .env("AHU_TEST_AUTH_SENTINEL", &sentinel);
+            .env("AHU_TEST_AUTH_SENTINEL", &sentinel)
+            .env("FIXTURE_CONFIG_DIR", bin.path());
         if let Some((key, value)) = context {
             c.env(key, value);
         }
@@ -182,7 +192,8 @@ fn auth_mutations_require_operator_before_probing_or_changing_state() {
             "new",
         ])
         .env("PATH", &path)
-        .env("AHU_TEST_AUTH_SENTINEL", &sentinel);
+        .env("AHU_TEST_AUTH_SENTINEL", &sentinel)
+        .env("FIXTURE_CONFIG_DIR", bin.path());
     for marker in [
         "AHU_WORKER_SESSION",
         "AHU_TASK_ID",
@@ -238,10 +249,16 @@ fn doctor_reports_account_changes_without_disclosing_identity_or_mutating_bindin
     ))
     .unwrap();
     let run = |args: &[&str], email: &str| {
+        std::fs::write(
+            scratch.path().join("auth.json"),
+            serde_json::json!({"status":"available","identity":email}).to_string(),
+        )
+        .unwrap();
         common::ahu()
             .current_dir(repo.path())
             .args(args)
             .env("PATH", &path)
+            .env("FIXTURE_CONFIG_DIR", scratch.path())
             .env(
                 "AHU_TEST_IDENTITY",
                 serde_json::json!({

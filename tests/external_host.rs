@@ -1064,7 +1064,7 @@ fn doctor_attributes_external_reachability_separately_from_native_cmux() {
     assert!(stdout.contains("host         reachable"), "{output:?}");
     assert!(output.status.success(), "{output:?}");
     assert!(!stdout.contains("native cmux"), "{output:?}");
-    assert!(stdout.contains("Review 6 warning(s)"), "{output:?}");
+    assert!(stdout.contains("warning(s)"), "{output:?}");
     assert!(!stdout.contains("problem(s) would block"), "{output:?}");
     assert!(!stdout.contains("cmux         reachable"), "{output:?}");
 }

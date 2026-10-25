@@ -363,7 +363,10 @@ fn a_repository_binary_alone_is_reported_as_no_harness_at_all() {
         "ahu must refuse rather than fall back to the repository's binary"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not installed on this machine"), "{stderr}");
+    assert!(
+        stderr.contains("declared native executable is unavailable outside repositories"),
+        "{stderr}"
+    );
 }
 
 /// A program name is a name, not a path.

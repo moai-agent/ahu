@@ -86,7 +86,7 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
     let cases: Vec<(&str, &std::path::Path, &[&str], &str, i32)> = vec![
         ("success", repo.path(), &["help"], "", 0),
         ("cancelled", repo.path(), &[], "@reviewer\n.cancel\n", 1),
-        ("usage", repo.path(), &["not-a-command"], "", 2),
+        ("missing runtime", repo.path(), &["not-a-command"], "", 5),
         (
             "unknown agent",
             repo.path(),
