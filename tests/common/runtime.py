@@ -79,12 +79,13 @@ def respond(op,p):
         if p['permissions'] == 'accept-edits': args += ['--accept-edits']
         prompt_arg = None
         if p['mode'] != 'direct':
+            args.append('--')
             prompt_arg = len(args)
             args.append('<prompt: see prompt.txt>')
         return {'program':D['program'],'args':args,'prompt_arg':prompt_arg,'native_eval_otlp':True}
     if op == 'admission': return admission(p)
     if op == 'native_sources':
-        if p.get('settings',{}).get('view') == 'private_fingerprints': return {}
+        if p.get('settings',{}).get('view') == 'private_fingerprints': return {'fingerprints':{}}
         if p.get('settings',{}).get('view') == 'hooks':
             return {'hooks':[],'settings':[],'mcp_servers':[],'declared_plugins':[],
                     'unreadable':[],'checked':[],'unscanned_harness':D['id']}

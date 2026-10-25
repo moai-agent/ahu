@@ -559,7 +559,9 @@ fn preview_output_fixture() {
         model: "gpt-6-astra".into(),
         basis: "named agent".into(),
         policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
+        runtime_binding_digest: ahu::harness_runtime::load(&discovered, "claude-code")
+            .unwrap()
+            .binding_digest(),
     };
     let prompt = "  synthetic prompt body  \nsecond line";
     let mut plan = ahu::launch::plan(&repo, Some(agent), pair, prompt).unwrap();
@@ -578,7 +580,7 @@ fn preview_output_fixture() {
     plan.pair.harness = hostile("harness");
     plan.pair.model = hostile("model");
     plan.pair.basis = hostile("basis");
-    plan.pair.catalog_version = hostile("catalog");
+    plan.pair.runtime_binding_digest = hostile("catalog");
     plan.title = hostile("title");
     plan.branch = hostile("branch");
     plan.worktree = root.join(hostile("worktree"));
@@ -859,7 +861,6 @@ fn record_a_launch(
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let agent = ahu::agent::find(&discovered.root, "chris").unwrap();
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are chris."), "earlier work").unwrap();
     let mut record = ahu::task::TaskRecord {
@@ -890,28 +891,23 @@ fn record_a_launch(
         // The repository configuration and the policy have not moved, so the
         // agent's own digests are the only thing doctor has to explain.
         policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
         config_snapshot: Default::default(),
         config_snapshot_digest: ahu::snapshot::collect(repo.path()).unwrap().digest(),
         hooks: Default::default(),
         hooks_digest: String::new(),
         materialize: Default::default(),
-        launch_command: adapter
-            .launch_command(&ahu::harness::LaunchRequest {
-                model: "claude-opus-5",
-                prompt: &delivered,
-                cwd: &discovered.root,
-                permissions: Default::default(),
-            })
-            .unwrap()
-            .redacted(),
+        launch_command: common::record_command(&ahu::harness::LaunchRequest {
+            model: "claude-opus-5",
+            prompt: &delivered,
+            cwd: &discovered.root,
+            permissions: Default::default(),
+        })
+        .redacted(),
         delivery,
         prompt_digest: ahu::util::digest_bytes(b"earlier work"),
         harness_executable: std::path::PathBuf::from("/usr/local/bin/claude"),
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: common::record_enforcement("claude-code"),
         session_host: None,
         session_ref: None,
         state: ahu::task::TaskState::Exited,

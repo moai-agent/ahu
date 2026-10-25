@@ -408,18 +408,13 @@ fn current_terminal_task_is_running_only_while_its_owner_lock_is_held() {
 fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let record_source = repo.path().to_path_buf();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: "secret prompt",
-            cwd: &record_source,
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
+    let command = common::record_command(&ahu::harness::LaunchRequest {
+        model: "claude-opus-5",
+        prompt: "secret prompt",
+        cwd: &record_source,
+        permissions: Default::default(),
+    });
+    let enforcement = common::record_enforcement("claude-code");
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: id.to_string(),
@@ -446,7 +441,6 @@ fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
             selection_basis: Some("test".to_string()),
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
