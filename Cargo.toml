@@ -21,6 +21,7 @@ path = "src/lib.rs"
 harness-plugin-pilot = []
 
 [dependencies]
+ahu-harness-api = { version = "0.1.0", path = "crates/ahu-harness-api" }
 ahu-host-api = { version = "0.1.0", path = "crates/ahu-host-api" }
 tempfile = "3"
 dotenvy = "0.15"
@@ -43,4 +44,4 @@ yaml_serde = "0.10"
 toml = "0.9"
 
 [workspace]
-members = ["crates/ahu-host-api"]
+members = ["crates/ahu-host-api", "crates/ahu-harness-api"]

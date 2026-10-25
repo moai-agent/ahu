@@ -72,6 +72,7 @@ pub struct Compatibility {
 pub enum Grant {
     InteractiveBackend,
     HarnessLaunch,
+    HarnessRuntime,
     Execute,
     ReadProjectContext,
 }
@@ -209,6 +210,7 @@ mod tests {
             vec![],
             vec![Grant::Execute],
             vec![Grant::HarnessLaunch],
+            vec![Grant::HarnessRuntime],
             vec![Grant::InteractiveBackend],
             vec![Grant::ReadProjectContext],
             vec![
@@ -232,6 +234,7 @@ mod tests {
                         .map(|grant| match grant {
                             Grant::Execute => "execute".into(),
                             Grant::HarnessLaunch => "harness-launch".into(),
+                            Grant::HarnessRuntime => "harness-runtime".into(),
                             Grant::InteractiveBackend => "interactive-backend".into(),
                             Grant::ReadProjectContext => "read-project-context".into(),
                         })
