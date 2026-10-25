@@ -39,7 +39,8 @@ for line in sys.stdin:
     response = {'protocol_version':1, 'id':sequence, 'result':{'count':sequence,'operation':request['operation']}}
     if 'native_executable' in params:
         assert set(params) == {'project','home','native_executable','environment'}
-        assert set(params['environment']) == {'PATH'}
+        assert 'PATH' in params['environment'] and 'HOME' not in params['environment']
+        assert not any(k.startswith(('AHU_', 'OTEL_')) for k in params['environment'])
         assert os.path.isabs(params['project']) and os.path.isabs(params['home'])
         if request['operation'] == 'probe':
             response['result'] = {'version':'6.2.0','compatibility':None,'reviewed_version':False,'enforcement':{}}
@@ -556,4 +557,31 @@ fn project_rankings_select_exact_runtime_identity_without_machine_fallback() {
         .insert("six".into(), vec!["exact".into()]);
     assert!(ahu::selection::resolve_automatic(&repo, &loaded).is_err());
     assert!(!fixture.marker.exists());
+}
+
+#[test]
+fn context_discovery_uses_working_policy_without_authorizing_execution() {
+    let fixture = Fixture::new("", |_| {});
+    let enabled = fs::read_to_string(&fixture.binding).unwrap();
+    fs::write(
+        &fixture.binding,
+        enabled.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    fixture.commit();
+    fs::write(&fixture.binding, &enabled).unwrap();
+    let repo = fixture.repo();
+    assert_eq!(
+        harness_runtime::discover_context(&repo).unwrap()[0].id,
+        "sixth"
+    );
+    assert!(harness_runtime::discover(&repo).unwrap().is_empty());
+    assert!(harness_runtime::load(&repo, "sixth").is_err());
+    assert!(!fixture.marker.exists());
+    fs::write(
+        &fixture.binding,
+        enabled.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    assert!(harness_runtime::discover_context(&repo).unwrap().is_empty());
 }

@@ -268,7 +268,7 @@ pub(crate) fn inventory_at(root: &Path, revision: &str) -> Result<Inventory> {
             && !binding.grants.contains(&plugin_binding::Grant::Execute)
             && !binding
                 .grants
-                .contains(&plugin_binding::Grant::HarnessLaunch)
+                .contains(&plugin_binding::Grant::HarnessRuntime)
         {
             blockers.push("execution-not-granted");
         }

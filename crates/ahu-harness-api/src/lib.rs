@@ -66,6 +66,9 @@ pub struct Descriptor {
     pub skill_paths: Vec<String>,
     #[serde(default)]
     pub native_source_paths: Vec<String>,
+    /// Explicit native configuration routing. Values are transient request inputs.
+    #[serde(default)]
+    pub environment_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +104,31 @@ fn text(value: &str) -> bool {
 fn unique<T: Ord>(values: &[T]) -> bool {
     values.len() <= 256 && values.iter().collect::<BTreeSet<_>>().len() == values.len()
 }
+/// Native routing keys cannot override core identity, tracing or process loading.
+pub fn environment_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && value.as_bytes()[0].is_ascii_uppercase()
+        && !value.starts_with("AHU_")
+        && !value.starts_with("OTEL_")
+        && !value.starts_with("LD_")
+        && !value.starts_with("DYLD_")
+        && !matches!(
+            value,
+            "HOME"
+                | "PATH"
+                | "ENV"
+                | "BASH_ENV"
+                | "SHELLOPTS"
+                | "PYTHONPATH"
+                | "PYTHONHOME"
+                | "NODE_OPTIONS"
+        )
+}
+
 impl Descriptor {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !identifier(&self.id)
@@ -113,6 +141,9 @@ impl Descriptor {
             || self.operations.is_empty()
             || !unique(&self.operations)
             || !unique(&self.modes)
+            || self.environment_keys.len() > 64
+            || !unique(&self.environment_keys)
+            || !self.environment_keys.iter().all(|key| environment_key(key))
         {
             return Err(ValidationError);
         }
@@ -188,4 +219,39 @@ pub struct Failure {
 pub enum Response {
     Success(Success),
     Failure(Failure),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_keys_are_explicit_bounded_and_cannot_override_host_identity() {
+        let mut descriptor: Descriptor = serde_json::from_value(serde_json::json!({
+            "id":"invented", "display_name":"Invented", "program":"invented-native",
+            "modes":["direct"], "operations":["probe"]
+        }))
+        .unwrap();
+        descriptor.environment_keys = vec!["INVENTED_CONFIG_DIR".into(), "XDG_CONFIG_HOME".into()];
+        descriptor.validate().unwrap();
+        for key in [
+            "HOME",
+            "PATH",
+            "AHU_TASK_ID",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BASH_ENV",
+            "bad-key",
+            "",
+            "1BAD",
+        ] {
+            descriptor.environment_keys = vec![key.into()];
+            assert!(descriptor.validate().is_err(), "{key}");
+        }
+        descriptor.environment_keys = vec!["REPEAT".into(), "REPEAT".into()];
+        assert!(descriptor.validate().is_err());
+        descriptor.environment_keys = (0..65).map(|n| format!("CONFIG_{n}")).collect();
+        assert!(descriptor.validate().is_err());
+    }
 }

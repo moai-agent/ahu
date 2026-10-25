@@ -29,6 +29,7 @@ pub fn validate_runtime_descriptors<'a>(
     // Native shortcuts are provider-owned, so they are intentionally absent here.
     const RESERVED: &[&str] = &[
         "agents",
+        "harness",
         "setup",
         "tasks",
         "doctor",

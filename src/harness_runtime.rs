@@ -30,9 +30,18 @@ pub struct Runtime {
 
 fn candidates(repo: &Repo) -> Result<Vec<(Binding, Declaration)>> {
     let inventory = project::inventory(&repo.root)?;
+    verify_candidates(
+        repo,
+        inventory.bindings.into_iter().map(|entry| entry.binding),
+    )
+}
+
+fn verify_candidates(
+    repo: &Repo,
+    bindings: impl IntoIterator<Item = Binding>,
+) -> Result<Vec<(Binding, Declaration)>> {
     let mut candidates = Vec::new();
-    for entry in inventory.bindings {
-        let binding = entry.binding;
+    for binding in bindings {
         if !binding.enabled || !binding.grants.contains(&Grant::HarnessRuntime) {
             continue;
         }
@@ -71,6 +80,33 @@ fn candidates(repo: &Repo) -> Result<Vec<(Binding, Declaration)>> {
 pub fn discover(repo: &Repo) -> Result<Vec<Descriptor>> {
     candidates(repo).map(|entries| entries.into_iter().map(|(_, d)| d.descriptor).collect())
         .map_err(|_| Error::new("cannot discover verified harness runtimes; check committed bindings and installations"))
+}
+
+/// Inert inventory for context locking before a binding activation is committed.
+/// This does not authorize execution; `load` always reads committed bindings.
+pub fn discover_context(repo: &Repo) -> Result<Vec<Descriptor>> {
+    let Some(directory) =
+        crate::util::resolve_existing_within(&repo.root, crate::plugin_binding::DIRECTORY)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut bindings = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if bindings.len() >= 32 || !entry.file_type()?.is_file() {
+            return Err(Error::new("invalid working plugin binding inventory"));
+        }
+        let name = entry.file_name();
+        let id = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".md"))
+            .ok_or_else(|| Error::new("invalid working plugin binding filename"))?;
+        let (binding, _) = crate::plugin_binding::load(&repo.root, id)?
+            .ok_or_else(|| Error::new("working plugin binding disappeared"))?;
+        bindings.push(binding);
+    }
+    verify_candidates(repo, bindings)
+        .map(|entries| entries.into_iter().map(|(_, d)| d.descriptor).collect())
 }
 
 /// Resolve an exact ID or declared alias, verify pins and freeze executable bytes.
@@ -153,7 +189,7 @@ impl Prepared {
 
 /// Explicit inputs for native inspection. This is an allowlist, not an ambient
 /// environment copy: native services receive a canonical project/home, selected
-/// executable and PATH only. Secret-bearing native configuration stays native.
+/// executable and declared routing keys. Values must not be persisted or logged.
 pub fn native_params(repo: &Repo, descriptor: &Descriptor) -> Result<serde_json::Value> {
     let executable =
         crate::selection::resolve_executable(&descriptor.program).ok_or_else(|| {
@@ -171,9 +207,40 @@ pub fn native_params(repo: &Repo, descriptor: &Descriptor) -> Result<serde_json:
         .map_err(|_| Error::new("invalid native PATH"))?
         .into_string()
         .map_err(|_| Error::new("native PATH must be UTF-8"))?;
+    descriptor
+        .validate()
+        .map_err(|_| Error::new("invalid native descriptor"))?;
+    let mut environment = std::collections::BTreeMap::from([("PATH".to_string(), path)]);
+    for key in [
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "WINDIR",
+    ]
+    .into_iter()
+    .chain(descriptor.environment_keys.iter().map(String::as_str))
+    {
+        if let Some(value) = std::env::var_os(key) {
+            let value = value
+                .into_string()
+                .map_err(|_| Error::new("native environment value must be UTF-8"))?;
+            if value.len() > 16 * 1024 || value.contains('\0') {
+                return Err(Error::new("native environment value exceeds bounds"));
+            }
+            environment.insert(key.to_string(), value);
+        }
+    }
+    if environment.values().map(String::len).sum::<usize>() > 128 * 1024 {
+        return Err(Error::new("native environment exceeds request budget"));
+    }
     Ok(serde_json::json!({
         "project": repo.root.canonicalize()?, "home": home,
-        "native_executable": executable, "environment": {"PATH":path},
+        "native_executable": executable, "environment": environment,
     }))
 }
 
