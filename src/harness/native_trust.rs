@@ -139,7 +139,7 @@ pub(crate) fn cleanup(dir: &Path, record: &TaskRecord) -> Result<()> {
     if runtime.binding_digest() != frozen.runtime_digest {
         return Err(refused());
     }
-    let common = crate::harness_runtime::native_params(&repo, runtime.descriptor())?;
+    let common = json!({"home":crate::harness_runtime::native_home()?,"environment":{}});
     if common.get("home").and_then(Value::as_str) != frozen.home.to_str() {
         return Err(refused());
     }
@@ -149,12 +149,12 @@ pub(crate) fn cleanup(dir: &Path, record: &TaskRecord) -> Result<()> {
     )?)
 }
 fn trust_params(dir: &Path, record: &TaskRecord, frozen: &Frozen, common: &Value) -> Result<Value> {
-    let _environment = common
+    let environment = common
         .get("environment")
         .and_then(Value::as_object)
         .ok_or_else(refused)?;
     Ok(
-        json!({"task_dir":dir,"worktree":record.worktree,"home":frozen.home,"permissions":record.identity.permissions,"mode":"interactive","overrides":std::env::vars_os().filter_map(|(key,_)|key.into_string().ok()).collect::<Vec<_>>()}),
+        json!({"task_dir":dir,"worktree":record.worktree,"home":frozen.home,"permissions":record.identity.permissions,"mode":"interactive","overrides":environment.keys().collect::<Vec<_>>()}),
     )
 }
 fn validate_result(value: Value) -> Result<()> {

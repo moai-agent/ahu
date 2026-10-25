@@ -172,7 +172,7 @@ not OS-level filesystem containment. Approval summaries and targets are kept
 in the task's owner-only state directory.
 
 For offline harness plugin discovery and preparation without activation, see
-[the setup workflow](harness-plugin-pilot.md#discover-and-prepare-a-local-package).
+[the setup workflow](harness-plugins.md#installation-and-activation).
 These operations do not execute package code or invoke a native provider.
 
 `ahu setup` uses installed harness descriptors and runtime-proposed changes.

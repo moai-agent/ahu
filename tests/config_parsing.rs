@@ -299,9 +299,10 @@ fn manifest_stem_and_name_must_match() {
 
 #[test]
 fn manifest_model_names_are_plugin_owned_and_preserved_exactly() {
-    let text="---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: provider/future-model\n---\nExact instructions.\n";
-    let (manifest,_) = agent::parse_manifest(text,std::path::Path::new("custom.md")).unwrap();
-    assert_eq!(manifest.harness,"sixth");assert_eq!(manifest.model,"provider/future-model");
+    let text = "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: provider/future-model\n---\nExact instructions.\n";
+    let (manifest, _) = agent::parse_manifest(text, std::path::Path::new("custom.md")).unwrap();
+    assert_eq!(manifest.harness, "sixth");
+    assert_eq!(manifest.model, "provider/future-model");
 }
 
 #[test]
@@ -387,8 +388,8 @@ fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
 
 #[test]
 fn manifest_validation_rejects_option_shaped_models_without_native_execution() {
-    let text="---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: --option\n---\nInstructions.\n";
-    assert!(agent::parse_manifest(text,std::path::Path::new("custom.md")).is_err());
+    let text = "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: --option\n---\nInstructions.\n";
+    assert!(agent::parse_manifest(text, std::path::Path::new("custom.md")).is_err());
 }
 
 #[test]
