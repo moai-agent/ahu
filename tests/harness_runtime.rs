@@ -39,7 +39,8 @@ for line in sys.stdin:
     response = {'protocol_version':1, 'id':sequence, 'result':{'count':sequence,'operation':request['operation']}}
     if 'native_executable' in params:
         assert set(params) == {'project','home','native_executable','environment'}
-        assert set(params['environment']) == {'PATH'}
+        assert 'PATH' in params['environment'] and 'HOME' not in params['environment']
+        assert not any(k.startswith(('AHU_', 'OTEL_')) for k in params['environment'])
         assert os.path.isabs(params['project']) and os.path.isabs(params['home'])
         if request['operation'] == 'probe':
             response['result'] = {'version':'6.2.0','compatibility':None,'reviewed_version':False,'enforcement':{}}
@@ -269,6 +270,7 @@ fn descriptor_rejects_missing_duplicate_reserved_and_unknown_fields() {
         ("id", json!("")),
         ("aliases", json!(["six", "six"])),
         ("aliases", json!(["setup"])),
+        ("aliases", json!(["harness"])),
         ("aliases", json!(["sixth"])),
         ("operations", json!(["shell"])),
         ("extra", json!(true)),
@@ -555,5 +557,77 @@ fn project_rankings_select_exact_runtime_identity_without_machine_fallback() {
         .model_rankings
         .insert("six".into(), vec!["exact".into()]);
     assert!(ahu::selection::resolve_automatic(&repo, &loaded).is_err());
+    assert!(!fixture.marker.exists());
+}
+
+#[test]
+fn context_discovery_uses_working_policy_without_authorizing_execution() {
+    let fixture = Fixture::new("", |_| {});
+    let enabled = fs::read_to_string(&fixture.binding).unwrap();
+    fs::write(
+        &fixture.binding,
+        enabled.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    fixture.commit();
+    fs::write(&fixture.binding, &enabled).unwrap();
+    let repo = fixture.repo();
+    assert_eq!(
+        harness_runtime::discover_context(&repo).unwrap()[0].id,
+        "sixth"
+    );
+    assert!(harness_runtime::discover(&repo).unwrap().is_empty());
+    assert!(harness_runtime::load(&repo, "sixth").is_err());
+    assert!(!fixture.marker.exists());
+    fs::write(
+        &fixture.binding,
+        enabled.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    assert!(harness_runtime::discover_context(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn native_routing_forwards_only_declared_values_and_bounded_baseline() {
+    const CASE: &str = "native_routing_forwards_only_declared_values_and_bounded_baseline";
+    if !common::is_child_case(CASE) {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let executable = directory.join("sixth-native");
+        fs::write(&executable, "#!/bin/sh\nexit 91\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = common::run_child_case(CASE, |command| {
+            command
+                .env_clear()
+                .env("AHU_TEST_CHILD_CASE", CASE)
+                .env("HOME", &directory)
+                .env("PATH", format!("{}:/usr/bin:/bin", directory.display()))
+                .env("LANG", "C")
+                .env("SIXTH_CONFIG_DIR", "synthetic-routing")
+                .env("UNDECLARED_SECRET", "synthetic-not-forwarded")
+                .env("AHU_PRIVATE_IDENTITY", "synthetic-not-forwarded")
+                .env("OTEL_SERVICE_NAME", "synthetic-not-forwarded");
+        });
+        common::assert_child_passed(CASE, &output);
+        return;
+    }
+    let fixture = Fixture::new("", |declaration| {
+        declaration["descriptor"]["environment_keys"] = json!(["SIXTH_CONFIG_DIR", "SIXTH_ABSENT"]);
+    });
+    let descriptor = fixture.load().descriptor().clone();
+    let params = harness_runtime::native_params(&fixture.repo(), &descriptor).unwrap();
+    let env = params["environment"].as_object().unwrap();
+    assert_eq!(env["SIXTH_CONFIG_DIR"], "synthetic-routing");
+    assert_eq!(env["LANG"], "C");
+    for key in [
+        "HOME",
+        "SIXTH_ABSENT",
+        "UNDECLARED_SECRET",
+        "AHU_PRIVATE_IDENTITY",
+        "OTEL_SERVICE_NAME",
+    ] {
+        assert!(!env.contains_key(key), "{key}");
+    }
+    assert!(env.contains_key("PATH"));
     assert!(!fixture.marker.exists());
 }

@@ -71,7 +71,6 @@ pub struct Compatibility {
 #[serde(rename_all = "kebab-case")]
 pub enum Grant {
     InteractiveBackend,
-    HarnessLaunch,
     HarnessRuntime,
     Execute,
     ReadProjectContext,
@@ -209,7 +208,6 @@ mod tests {
         for grants in [
             vec![],
             vec![Grant::Execute],
-            vec![Grant::HarnessLaunch],
             vec![Grant::HarnessRuntime],
             vec![Grant::InteractiveBackend],
             vec![Grant::ReadProjectContext],
@@ -233,7 +231,6 @@ mod tests {
                         .iter()
                         .map(|grant| match grant {
                             Grant::Execute => "execute".into(),
-                            Grant::HarnessLaunch => "harness-launch".into(),
                             Grant::HarnessRuntime => "harness-runtime".into(),
                             Grant::InteractiveBackend => "interactive-backend".into(),
                             Grant::ReadProjectContext => "read-project-context".into(),
@@ -256,7 +253,7 @@ mod tests {
                     .contains("duplicate plugin capability grant")
             );
         }
-        for unknown in ["all", "executes", "Execute"] {
+        for unknown in ["all", "executes", "Execute", "harness-launch"] {
             let mut document =
                 crate::okf::Document::new("ahu:plugin-binding", &binding(), "").unwrap();
             document.fields.get_mut("ahu").unwrap()["grants"] =

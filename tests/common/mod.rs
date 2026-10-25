@@ -111,23 +111,70 @@ impl TestRepo {
 
     /// A minimal, valid project configuration.
     pub fn init_config(&self) {
+        self.install_runtime("claude-code");
         self.write(
-            ".agents/ahu/config.toml",
-            &format!(
-                "schema_version = 1\n\
-                 harness_preferences = [\"claude-code\"]\n\
-                 model_selection = \"project-ranked\"\n\
-                 catalog_version = \"{}\"\n\
-                 \n[model_rankings]\n\
-                 \"claude-code\" = [\"claude-opus-5\", \"claude-sonnet-5\"]\n\
-",
-                ahu::catalog::CATALOG_VERSION
-            ),
+            ".agents/ahu/config.md",
+            &ahu::config::try_render(&ahu::config::ProjectConfig {
+                schema_version: ahu::config::SUPPORTED_SCHEMA_VERSION,
+                harness_preferences: vec!["claude-code".into()],
+                model_selection: "project-ranked".into(),
+                harness_version_pins: Default::default(),
+                model_rankings: [(
+                    "claude-code".into(),
+                    vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
+                )]
+                .into(),
+                knowledge: Default::default(),
+                headless: Default::default(),
+                telemetry: Default::default(),
+            })
+            .unwrap(),
         );
+    }
+
+    /// Synthetic plugin metadata supplies historical test identities; no native
+    /// provider implementations are linked or probed by the fixture.
+    pub fn install_runtime(&self, harness: &str) {
+        let (program, source_dir, format, models): (&str, &str, &str, &[&str]) = match harness {
+            "claude-code" => (
+                "claude",
+                ".claude/agents",
+                "claude-agent",
+                &["claude-opus-5", "claude-sonnet-5"],
+            ),
+            "codex" => ("codex", ".codex/agents", "codex-agent", &["gpt-6-astra"]),
+            "antigravity" => (
+                "agy",
+                ".gemini/agents",
+                "gemini-agent",
+                &["gemini-3.1-pro-high"],
+            ),
+            "opencode" => (
+                "opencode",
+                ".opencode/agents",
+                "opencode-agent",
+                &["synthetic/exact"],
+            ),
+            "kiro" => (
+                "kiro-cli",
+                ".kiro/agents",
+                "kiro-agent",
+                &["synthetic/exact"],
+            ),
+            "sixth" => (
+                "sixth-native",
+                ".sixth/agents",
+                "sixth-agent",
+                &["sixth/exact"],
+            ),
+            _ => panic!("declare synthetic runtime metadata for this test identity"),
+        };
+        runtime::install(self.path(), harness, program, source_dir, format, models);
     }
 
     /// A registered Claude Code agent backed by a native definition.
     pub fn add_agent(&self, name: &str, version: &str, model: &str) {
+        self.install_runtime("claude-code");
         self.write(
             &format!(".claude/agents/{name}.md"),
             &format!(
@@ -165,6 +212,7 @@ impl TestRepo {
     /// second manifest that names another one, with the instructions in the
     /// manifest body.
     pub fn add_agent_on(&self, name: &str, version: &str, harness: &str, model: &str) {
+        self.install_runtime(harness);
         self.write(
             &format!(".agents/ahu/agents/{name}.md"),
             &format!(
@@ -358,7 +406,14 @@ pub fn assert_child_passed(name: &str, output: &std::process::Output) {
 }
 
 /// The harness programs every adapter resolves by name.
-pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
+pub const HARNESS_PROGRAMS: &[&str] = &[
+    "claude",
+    "codex",
+    "agy",
+    "opencode",
+    "kiro-cli",
+    "sixth-native",
+];
 
 /// Run this test in a child process that has a machine of its own.
 ///
@@ -410,6 +465,8 @@ pub fn in_harness_fixture(test_name: &str) -> bool {
 }
 
 pub mod plugin;
+pub(crate) use ahu as core_api;
+pub mod runtime;
 
 /// Build the independent Rust example explicitly, then stage only its package.
 /// Installation itself must never invoke Cargo or use the source directory.
