@@ -548,9 +548,18 @@ pub fn runtime_plan(
     harness: &str,
     request: &ahu::harness::LaunchRequest<'_>,
 ) -> ahu::util::Result<ahu::launch::LaunchPlan> {
+    runtime_plan_with_policy(harness, request, serde_json::json!({}))
+}
+
+pub fn runtime_plan_with_policy(
+    harness: &str,
+    request: &ahu::harness::LaunchRequest<'_>,
+    policy: serde_json::Value,
+) -> ahu::util::Result<ahu::launch::LaunchPlan> {
     let repo = TestRepo::new();
     repo.init_config();
     repo.install_runtime(harness);
+    repo.write(".fixture/runtime.json", &policy.to_string());
     repo.write(".agents/ahu/agents/runtime-fixture.md", &format!(
         "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: runtime-fixture\nversion: 1.0.0\nharness: {harness}\nmodel: {}\npermissions: {}\n---\nSynthetic instructions.\n",
         serde_json::to_string(request.model).unwrap(), request.permissions.as_str()));
