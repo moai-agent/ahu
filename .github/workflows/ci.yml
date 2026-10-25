@@ -53,6 +53,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked
+      - name: Check skill ablation with the built CLI
+        run: |
+          AHU_TEST_BIN="${CARGO_TARGET_DIR:-target}/debug/ahu" python3 -B -m unittest discover \
+            -s scripts -p test_prepare_skill_ablation.py -k test_real_lock_refresh_records_only_control_skills
       - name: Prepare independent Rust plugin examples
         # Integration tests build these standalone crates offline. Their own
         # lockfiles can select dependencies absent from the core's lockfile.

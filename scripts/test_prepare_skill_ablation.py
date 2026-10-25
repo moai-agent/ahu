@@ -218,6 +218,22 @@ class SkillAblationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("AHU_TEST_BIN"), "set AHU_TEST_BIN to exercise real lock refresh")
     def test_real_lock_refresh_records_only_control_skills(self) -> None:
         self.ahu = Path(os.environ["AHU_TEST_BIN"]).resolve()
+        # The lightweight fake accepts "before", but the real CLI correctly
+        # rejects it as malformed OKF. Start from a valid committed baseline.
+        baseline_lock = self.repo / ".agents/ahu/lock.md"
+        baseline_lock.unlink()
+        home = self.root / "home"
+        state = self.root / "state"
+        home.mkdir()
+        state.mkdir()
+        self.env.update(HOME=str(home), XDG_STATE_HOME=str(state))
+        subprocess.run(
+            [str(self.ahu), "--repo", str(self.repo), "lock", "--update"],
+            env=self.env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        before = baseline_lock.read_text()
+        git(self.repo, "add", "-f", ".agents/ahu/lock.md")
+        git(self.repo, "commit", "-m", "Valid baseline context lock")
         destination = self.root / "control"
         result = self.prepare(destination, "--skill", "alpha")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -225,7 +241,7 @@ class SkillAblationTests(unittest.TestCase):
         self.assertIn(".agents/skills/beta/SKILL.md", lock)
         self.assertNotIn(".agents/skills/alpha/SKILL.md", lock)
         self.assertEqual(git(destination, "status", "--porcelain"), "")
-        self.assertEqual((self.repo / ".agents/ahu/lock.md").read_text(), "before\n")
+        self.assertEqual(baseline_lock.read_text(), before)
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
 
     def test_dirty_source_is_refused_before_worktree_creation(self) -> None:
