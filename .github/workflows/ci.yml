@@ -61,7 +61,7 @@ jobs:
         # Integration tests build these standalone crates offline. Their own
         # lockfiles can select dependencies absent from the core's lockfile.
         run: |
-          for package in examples/plugins/text-stats plugins/harness-codex plugins/harness-claude-code plugins/harness-antigravity plugins/harness-opencode; do
+          for package in examples/plugins/text-stats plugins/harness-codex plugins/harness-claude-code plugins/harness-antigravity plugins/harness-opencode plugins/harness-kiro plugins/harness-runtime plugins/harness-native plugins/harness-events; do
             manifest="$package/Cargo.toml"
             cargo fetch --locked --manifest-path "$manifest"
             cargo fmt --manifest-path "$manifest" --check
@@ -70,10 +70,10 @@ jobs:
           done
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Check experimental harness plugin lifecycle
+      - name: Check installed harness runtime lifecycle
         run: |
-          cargo clippy --all-targets --locked --features harness-plugin-pilot -- -D warnings
-          cargo test --locked --features harness-plugin-pilot --test harness_plugin --test setup_harness_plugins
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked --test harness_runtime --test setup_harness_plugins
       - name: Check optional session plugin absence
         run: |
           cargo clippy --no-default-features --all-targets --locked -- -D warnings

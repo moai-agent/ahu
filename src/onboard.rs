@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use crate::agent::{self, SourceFormat};
 use crate::bail;
-use crate::catalog;
 use crate::config::AGENTS_RELATIVE_DIR;
 use crate::util::{Error, Result, display_safe, is_safe_name, resolve_within};
 
@@ -18,6 +17,7 @@ use crate::util::{Error, Result, display_safe, is_safe_name, resolve_within};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub name: String,
+    pub harness: String,
     /// Repository-root-relative path to the native definition.
     pub path: String,
     pub format: SourceFormat,
@@ -39,128 +39,59 @@ impl Candidate {
     }
 }
 
-/// Inspect the repository without running anything in it.
-///
-/// This reads files only. It does not execute repository scripts, hooks, or a
-/// harness session: detecting a definition is not authorization to run code.
+/// Ask explicitly enabled harness plugins for native definitions. This executes
+/// reviewed plugin code but does not start an agent or register a definition.
 pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
-    let registered: Vec<String> = agent::load_all(repo_root)
-        .map(|agents| agents.into_iter().map(|a| a.manifest.name).collect())
-        .unwrap_or_default();
+    let repo = crate::git::discover(repo_root)?;
+    let registered: Vec<String> = agent::load_all(repo_root)?
+        .into_iter()
+        .map(|a| a.manifest.name)
+        .collect();
     let mut candidates = Vec::new();
-
-    // Definitions ahu can read well enough to propose a manifest for: one
-    // Markdown file per agent, named by the file, with YAML frontmatter whose
-    // `model` and `description` are the only fields ahu interprets. A format
-    // belongs here when its declared model is an identifier the catalog can be
-    // asked about; everything else is listed below with a blocker instead.
-    for (dir, format) in [
-        (".claude/agents", SourceFormat::ClaudeAgent),
-        (".opencode/agent", SourceFormat::OpenCodeAgent),
-    ] {
-        let Ok(entries) = std::fs::read_dir(repo_root.join(dir)) else {
-            continue;
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
-            .collect();
-        paths.sort();
-        // Every one of these formats names a harness; `unwrap_or` keeps the
-        // lookup total without inventing a second source of truth for it.
-        let harness = format.native_harness().unwrap_or("claude-code");
-        for path in paths {
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let relative = format!("{dir}/{name}.md");
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let (native_model, preserved_fields, description) = frontmatter_summary(&text);
-            let mut blockers = Vec::new();
-            if !is_safe_name(&name) {
-                blockers.push(format!(
-                    "{name:?} is not usable as an ahu selector, branch segment, and session title"
-                ));
-            }
-            // OpenCode spells an inherited model as no `model` key at all,
-            // where Claude Code writes `inherit`; both land as "ahu needs an
-            // explicit --model", which is the same conversation either way.
-            if let Some(model) = native_model.as_deref()
-                && model != "inherit"
-                && catalog::model(harness, model).is_none()
-            {
-                blockers.push(format!(
-                    "the definition declares model {model:?}, which is not a {harness} model in compatibility catalog {}",
-                    catalog::CATALOG_VERSION
-                ));
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NativeCandidate {
+        name: String,
+        path: String,
+        format: String,
+        native_model: Option<String>,
+        blockers: Vec<String>,
+        preserved_fields: Vec<String>,
+        description: String,
+    }
+    for descriptor in crate::harness_runtime::discover(&repo)? {
+        let runtime = crate::harness_runtime::load(&repo, &descriptor.id)?;
+        let found: Vec<NativeCandidate> = serde_json::from_value(runtime.call(
+            "native_sources",
+            serde_json::json!({"action":"discover","project_dir":repo_root}),
+        )?)
+        .map_err(|_| Error::new("invalid native definition inventory from harness plugin"))?;
+        if found.len() > 256 {
+            bail!("native definition inventory exceeds its bound");
+        }
+        for item in found {
+            let format = SourceFormat::parse(&item.format)
+                .ok_or_else(|| Error::new("invalid native source format"))?;
+            // A plugin cannot make registration read outside the project.
+            resolve_within(repo_root, &item.path, false)?;
+            let mut blockers = item.blockers;
+            if !is_safe_name(&item.name) {
+                blockers.push("invalid agent selector".into());
             }
             candidates.push(Candidate {
-                already_registered: registered.contains(&name),
-                name,
-                path: relative,
+                already_registered: registered.contains(&item.name),
+                harness: descriptor.id.clone(),
+                name: item.name,
+                path: item.path,
                 format,
-                native_model,
+                native_model: item.native_model,
                 blockers,
-                preserved_fields,
-                description,
+                preserved_fields: item.preserved_fields,
+                description: item.description,
             });
         }
     }
-
-    // Additional native definitions are listed with registration blockers.
-    // This discovery path does not parse their metadata or offer registration.
-    for (dir, pattern, format) in [
-        (".codex/agents", "toml", SourceFormat::CodexAgent),
-        (".agents/agents", "md", SourceFormat::AntigravityAgent),
-    ] {
-        let root = repo_root.join(dir);
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        paths.sort();
-        for path in paths {
-            let (name, relative) = if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let inner = path.join("agent.md");
-                if !inner.is_file() {
-                    continue;
-                }
-                (name.clone(), format!("{dir}/{name}/agent.md"))
-            } else {
-                if path.extension().and_then(|s| s.to_str()) != Some(pattern) {
-                    continue;
-                }
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                (name.clone(), format!("{dir}/{name}.{pattern}"))
-            };
-            let harness = format.native_harness().unwrap_or("unknown");
-            candidates.push(Candidate {
-                already_registered: registered.contains(&name),
-                name,
-                path: relative,
-                format,
-                native_model: None,
-                blockers: vec![format!(
-                    "native onboarding for harness {harness:?} does not support registering this definition; use an explicit manifest with a supported instruction source"
-                )],
-                preserved_fields: Vec::new(),
-                description: String::new(),
-            });
-        }
-    }
-
+    candidates.sort_by(|a, b| (&a.harness, &a.path).cmp(&(&b.harness, &b.path)));
     Ok(candidates)
 }
 
@@ -234,7 +165,7 @@ pub fn proposed_manifest(candidate: &Candidate, model: &str, version: &str) -> S
          Instructions live in the native definition at `{}`, referenced in place and never edited.\n",
         yaml_string(&candidate.name),
         description,
-        yaml_string(candidate.format.native_harness().unwrap_or("claude-code")),
+        yaml_string(&candidate.harness),
         yaml_string(model),
         yaml_string(version),
         yaml_string(candidate.format.as_str()),
@@ -327,43 +258,6 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn frontmatter_summary(text: &str) -> (Option<String>, Vec<String>, String) {
-    let Some(rest) = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---\r\n"))
-    else {
-        return (None, Vec::new(), String::new());
-    };
-    let mut model = None;
-    let mut description = String::new();
-    let mut fields = Vec::new();
-    for line in rest.lines() {
-        if line.trim_end() == "---" {
-            break;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let key = key.trim().to_string();
-        if key.is_empty() {
-            continue;
-        }
-        let cleaned = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        match key.as_str() {
-            "model" => model = Some(cleaned),
-            "description" => description = cleaned,
-            _ => {}
-        }
-        fields.push(key);
-    }
-    (model, fields, description)
-}
-
-/// Render a preview for a terminal.
 pub fn render(candidates: &[Candidate], repo_root: &Path) -> String {
     let mut out = String::new();
     out.push_str(&format!("Onboarding preview for {}\n", repo_root.display()));
@@ -425,7 +319,8 @@ mod tests {
         Candidate {
             name: name.to_string(),
             path: format!(".claude/agents/{name}.md"),
-            format: SourceFormat::ClaudeAgent,
+            format: SourceFormat::parse("sixth-agent").unwrap(),
+            harness: "sixth".into(),
             native_model: Some("claude-opus-5".into()),
             already_registered: false,
             blockers: Vec::new(),
@@ -435,50 +330,21 @@ mod tests {
     }
 
     #[test]
-    fn preview_finds_supported_and_blocked_native_definitions_without_writing() {
+    fn preview_has_no_builtin_native_directory_discovery() {
         let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join(".claude/agents");
-        let opencode = root.path().join(".opencode/agent");
-        let codex = root.path().join(".codex/agents");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::create_dir_all(&opencode).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::create_dir_all(root.path().join(".claude/agents")).unwrap();
         std::fs::write(
-            claude.join("reviewer.md"),
-            "---\nmodel: claude-opus-5\ndescription: Review safely\ncolor: blue\n---\nReview instructions\n",
+            root.path().join(".claude/agents/native.md"),
+            "Native instructions",
         )
         .unwrap();
-        std::fs::write(
-            opencode.join("unknown-model.md"),
-            "---\nmodel: unavailable-model\n---\n",
-        )
-        .unwrap();
-        std::fs::write(
-            codex.join("native.toml"),
-            "description = 'leave in place'\n",
-        )
-        .unwrap();
-
-        let candidates = preview(root.path()).unwrap();
-        assert_eq!(candidates.len(), 3);
-        let reviewer = candidates
-            .iter()
-            .find(|item| item.name == "reviewer")
-            .unwrap();
-        assert!(reviewer.registrable());
-        assert_eq!(reviewer.description, "Review safely");
-        assert_eq!(reviewer.preserved_fields, ["model", "description", "color"]);
-        let unsupported = candidates
-            .iter()
-            .find(|item| item.name == "unknown-model")
-            .unwrap();
-        assert!(!unsupported.registrable());
-        assert!(unsupported.blockers[0].contains("not a opencode model"));
-        let native_only = candidates
-            .iter()
-            .find(|item| item.name == "native")
-            .unwrap();
-        assert!(!native_only.registrable());
+        assert!(preview(root.path()).unwrap().is_empty());
         assert!(!root.path().join(AGENTS_RELATIVE_DIR).exists());
     }
 
@@ -494,12 +360,6 @@ mod tests {
             crate::agent::parse_manifest(&std::fs::read_to_string(&path).unwrap(), &path).is_ok()
         );
         assert!(register(root.path(), &reviewer, "claude-opus-5", "1.0.0").is_err());
-        assert!(
-            preview(root.path())
-                .unwrap()
-                .iter()
-                .any(|item| item.name == "reviewer" && item.already_registered)
-        );
         assert!(unregister(root.path(), "../outside").is_err());
         unregister(root.path(), "reviewer").unwrap();
         assert!(!path.exists());
@@ -515,19 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_summary_and_preview_render_handle_empty_and_populated_cases() {
-        assert_eq!(
-            frontmatter_summary("not frontmatter"),
-            (None, Vec::new(), String::new())
-        );
-        assert_eq!(
-            frontmatter_summary("---\r\nmodel: 'model-x'\ndescription: \"safe text\"\n---\r\n"),
-            (
-                Some("model-x".into()),
-                vec!["model".into(), "description".into()],
-                "safe text".into()
-            )
-        );
+    fn preview_render_handles_empty_and_populated_cases() {
         let root = tempfile::tempdir().unwrap();
         assert!(render(&[], root.path()).contains("No native agent definitions were found"));
         let blocked = Candidate {

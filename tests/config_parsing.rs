@@ -2,7 +2,7 @@
 
 mod common;
 
-use ahu::{agent, catalog, config, selection, util};
+use ahu::{agent, config, selection, util};
 use common::TestRepo;
 
 #[test]
@@ -55,8 +55,8 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     repo.write(
         ".agents/ahu/config.toml",
         &text.replace(
-            "catalog_version =",
-            "# byte-level policy change\ncatalog_version =",
+            "schema_version =",
+            "# byte-level policy change\nschema_version =",
         ),
     );
     let after = config::load(repo.path()).unwrap().unwrap();
@@ -90,30 +90,30 @@ fn unknown_schema_version_is_refused() {
 }
 
 #[test]
-fn a_pinned_catalog_this_build_does_not_ship_blocks_selection() {
+fn obsolete_catalog_policy_is_refused_in_latest_configuration() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
+    let text = repo.read(config::LEGACY_CONFIG_PATH);
     repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace(catalog::CATALOG_VERSION, "1999-01-01"),
+        config::LEGACY_CONFIG_PATH,
+        &format!("catalog_version = \"old\"\n{text}"),
     );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("1999-01-01"), "{error}");
-    assert!(error.contains("will not substitute"), "{error}");
+    assert!(config::load(repo.path()).is_err());
 }
 
 #[test]
-fn unknown_harness_or_model_in_the_ranking_is_refused() {
+fn rankings_accept_plugin_owned_model_identifiers_without_substitution() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
-    repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace("\"claude-opus-5\"", "\"gpt-hypothetical\""),
+    let text = repo
+        .read(config::LEGACY_CONFIG_PATH)
+        .replace("claude-opus-5", "custom/exact-v9");
+    repo.write(config::LEGACY_CONFIG_PATH, &text);
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    assert_eq!(
+        loaded.config.model_rankings["claude-code"][0],
+        "custom/exact-v9"
     );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("gpt-hypothetical"), "{error}");
 }
 
 #[test]
@@ -139,7 +139,6 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
         schema_version: 1,
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
-        catalog_version: catalog::CATALOG_VERSION.to_string(),
         harness_version_pins: Default::default(),
         model_rankings: [("claude-code".to_string(), vec!["claude-opus-5".to_string()])]
             .into_iter()
@@ -178,7 +177,6 @@ fn rendered_config_round_trips() {
         schema_version: 1,
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
-        catalog_version: catalog::CATALOG_VERSION.to_string(),
         harness_version_pins: [("claude-code".to_string(), "2.1.283".to_string())]
             .into_iter()
             .collect(),
@@ -208,50 +206,39 @@ fn rendered_config_round_trips() {
 }
 
 #[test]
-fn headless_opencode_native_state_trust_is_explicit_and_round_trips() {
+fn provider_owned_native_settings_are_explicit_bounded_and_round_trip() {
     let repo = TestRepo::new();
     repo.init_config();
-    let mut config = config::load(repo.path()).unwrap().unwrap().config;
-    config.headless.trust_opencode_native_state = true;
-    let rendered = config::try_render(&config).unwrap();
-    assert!(rendered.contains("trust_opencode_native_state: true"));
-    repo.remove(config::LEGACY_CONFIG_PATH);
-    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
-    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, config);
-
-    config.headless.trust_opencode_native_state = false;
-    assert!(
-        !config::try_render(&config)
-            .unwrap()
-            .contains("trust_opencode_native_state")
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    policy.headless.native_settings.insert(
+        "sixth".into(),
+        serde_json::json!({"trust_native_state":true}),
     );
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, policy);
+    policy
+        .headless
+        .native_settings
+        .insert("sixth".into(), serde_json::json!("wrong type"));
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
+    assert!(config::load(repo.path()).is_err());
 }
 
 #[test]
 fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     let repo = TestRepo::new();
-    repo.write(
-        config::LEGACY_CONFIG_PATH,
-        &format!(
-            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    assert!(loaded.config.harness_version_pins.is_empty());
-
-    repo.write(
-        config::LEGACY_CONFIG_PATH,
-        &format!(
-            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n[harness_version_pins]\n\"claude-code\" = \"2.1\"\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
+    repo.init_config();
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    assert!(policy.harness_version_pins.is_empty());
+    policy
+        .harness_version_pins
+        .insert("claude-code".into(), "2.1".into());
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
     let error = config::load(repo.path()).unwrap_err().to_string();
     assert!(error.contains("exact semantic version"), "{error}");
 }
-
-// --- agent manifests ---
 
 #[test]
 fn a_registered_agent_resolves_its_native_definition() {
@@ -448,35 +435,30 @@ fn automatic_selection_follows_the_project_order_deterministically() {
     let repo = TestRepo::new();
     repo.init_config();
     let loaded = config::load(repo.path()).unwrap().unwrap();
-    let pair = selection::resolve_automatic(&loaded).expect("resolves");
+    let pair = selection::resolve_automatic(&ahu::git::discover(repo.path()).unwrap(), &loaded)
+        .expect("resolves");
     assert_eq!(pair.harness, "claude-code");
     assert_eq!(pair.model, "claude-opus-5");
     assert_eq!(pair.policy_digest, loaded.digest);
     assert!(pair.basis.contains("harness_preferences"), "{}", pair.basis);
     // Repeating the resolution gives the same answer.
-    assert_eq!(selection::resolve_automatic(&loaded).unwrap(), pair);
+    assert_eq!(
+        selection::resolve_automatic(&ahu::git::discover(repo.path()).unwrap(), &loaded).unwrap(),
+        pair
+    );
 }
 
 #[test]
-fn a_project_order_naming_only_unsupported_harnesses_reports_a_policy_problem() {
+fn a_project_without_ranked_models_reports_a_policy_problem() {
     let repo = TestRepo::new();
-    repo.write(
-        ".agents/ahu/config.toml",
-        &format!(
-            "schema_version = 1\n\
-             harness_preferences = [\"codex\"]\n\
-             model_selection = \"project-ranked\"\n\
-             catalog_version = \"{}\"\n\
-             \n[knowledge]\n\
-             bundles = []\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
+    repo.init_config();
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    policy.model_rankings.clear();
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
     let loaded = config::load(repo.path()).unwrap().unwrap();
-    let error = selection::resolve_automatic(&loaded)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("project policy question"), "{error}");
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    assert!(selection::resolve_automatic(&discovered, &loaded).is_err());
 }
 
 #[test]
@@ -713,45 +695,18 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
 /// project decision, made by editing `catalog_version`, not a side effect of
 /// installing a newer ahu.
 #[test]
-fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-10-19");
-
-    let error = catalog::require_version("2026-09-27")
-        .expect_err("a superseded pin must not be silently accepted")
-        .to_string();
-    assert!(error.contains("2026-09-27"), "{error}");
-    assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
-    assert!(error.contains("will not substitute"), "{error}");
-    assert!(
-        error.contains("catalog_version"),
-        "the message must name the field to edit: {error}"
-    );
-
-    // Through a real project configuration, too.
+fn installed_provider_requirement_is_separate_from_policy_parsing() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
-    repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace(catalog::CATALOG_VERSION, "2026-09-12"),
-    );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("2026-09-12"), "{error}");
-
-    // The catalog this build ships does carry the OpenCode pair.
-    assert!(catalog::require_version(catalog::CATALOG_VERSION).is_ok());
-    assert!(catalog::harness("opencode").is_some());
-    assert_eq!(
-        catalog::models_for("opencode")
-            .iter()
-            .map(|m| m.model)
-            .collect::<Vec<_>>(),
-        vec!["ollama/glm-5.3:cloud"]
-    );
+    let text = repo
+        .read(config::LEGACY_CONFIG_PATH)
+        .replace("claude-code", "sixth");
+    repo.write(config::LEGACY_CONFIG_PATH, &text);
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    assert!(selection::resolve_automatic(&discovered, &loaded).is_err());
 }
 
-/// A registered OpenCode agent loads, keeps its harness, and is refused a model
-/// belonging to someone else.
 #[test]
 fn an_opencode_agent_keeps_its_own_harness_and_model() {
     let repo = TestRepo::new();

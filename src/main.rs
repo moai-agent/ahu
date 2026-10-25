@@ -172,25 +172,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 )
             })
         }
-        Command::Claude => {
+        Command::Harness { selector } => {
             let repo = commands::repo_from_cwd()?;
-            commands::claude(&repo)
-        }
-        Command::Codex => {
-            let repo = commands::repo_from_cwd()?;
-            commands::codex(&repo)
-        }
-        Command::Kiro => {
-            let repo = commands::repo_from_cwd()?;
-            commands::kiro(&repo)
-        }
-        Command::OpenCode => {
-            let repo = commands::repo_from_cwd()?;
-            commands::opencode(&repo)
-        }
-        Command::Antigravity => {
-            let repo = commands::repo_from_cwd()?;
-            commands::antigravity(&repo)
+            commands::coordinating_session(&repo, &selector)
         }
         Command::Launch {
             agent,
@@ -508,11 +492,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Auth { .. }
                 | Command::Telemetry { .. }
                 | Command::OtelReport { .. }
-                | Command::Claude
-                | Command::Codex
-                | Command::Kiro
-                | Command::OpenCode
-                | Command::Antigravity
+                | Command::Harness { .. }
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
                 | Command::EvalReport { .. }

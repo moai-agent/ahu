@@ -1,81 +1,105 @@
 # Rust harness plugins
 
-ahu is moving native harness integration into independently versioned Rust
-executables. Core remains responsible for agent identity, MCP coordination,
-worktree and task state, process supervision, and evidence attribution. A plugin
-selects native behavior; it does not become the authority for task completion.
+ahu delegates native harness integration to installed Rust executables. Core owns
+agent identity, task and worktree state, process supervision, MCP coordination,
+context locking, and acceptance of eval evidence. Plugins own native command
+arguments, version/model interpretation, configuration, admission, account
+observations, trust receipts and event normalization. A plugin never declares a
+task successful on its own.
 
-## Prepared packages
+## Packages
 
-| Harness ID | Native CLI | Package | Initial native version |
+| Harness ID | Native CLI | Package | Current implementation version evidence |
 | --- | --- | --- | --- |
-| `codex` | `codex` | [Codex planner](../plugins/harness-codex/README.md) | 0.163.0 |
-| `claude-code` | `claude` | [Claude Code planner](../plugins/harness-claude-code/README.md) | 2.1.310 |
-| `antigravity` | `agy` | [Antigravity planner](../plugins/harness-antigravity/README.md) | 1.4.7 |
-| `opencode` | `opencode` | [OpenCode planner](../plugins/harness-opencode/README.md) | 2.0.32 |
+| `codex` | `codex` | [Codex](../plugins/harness-codex/README.md) | 0.163.0 |
+| `claude-code` | `claude` | [Claude Code](../plugins/harness-claude-code/README.md) | 2.1.310 |
+| `antigravity` | `agy` | [Antigravity](../plugins/harness-antigravity/README.md) | 1.4.7 |
+| `opencode` | `opencode` | [OpenCode](../plugins/harness-opencode/README.md) | 2.0.32 |
+| `kiro` | `kiro-cli` | [Kiro](../plugins/harness-kiro/README.md) | 2.29.0 |
 
-Each package has its own Cargo manifest, lockfile, semantic version and executable,
-with no dependency on ahu implementation crates. Build and stage a native binary
-before installation. Neither setup nor installation compiles or executes package
-code. These packages are source preparations, not published distributions.
+Each package has an independent semantic version, manifest, lockfile and binary.
+Source builds use adjacent Rust implementation libraries. Core links only the
+shared data contract, never the native implementations. Customer execution needs
+no Python interpreter. These source packages are not a published distribution;
+version evidence does not establish live account access or all-mode certification.
 
-The optional `harness-plugin-pilot` build routes registered task command planning
-through installed packages with no built-in fallback. Ordinary builds retain
-native adapters. Direct native shortcuts, native configuration, trust, event
-parsing and enforcement reporting are not yet extracted. Installing a planner
-alone does not make an arbitrary new harness usable.
+## Installation and activation
 
-## Version ownership
+Build the selected package from this checkout using an external build directory:
 
-Protocol 2 passes the observed native semantic version and requested task timeout
-to the selected planner. The package decides which native versions it accepts and
-owns the command arguments. Its manifest declares the native executable name and
-`tested_versions` for offline inspection. That list is package metadata, not a
-claim that all live integration checks have passed.
+```sh
+CARGO_TARGET_DIR=/absolute/build/ahu-plugins cargo build --locked --release --manifest-path plugins/harness-codex/Cargo.toml
+```
 
-A native argument or accepted-version change can be delivered by rebuilding and
-versioning the package, updating its reviewed content pins, installing it and
-committing activation. No core recompile is needed when the existing protocol and
-remaining core native integrations are compatible. A new event format, configuration
-format or runtime topology may still require core changes until extraction is
-complete. Existing task bindings are frozen; do not update an active task's
-planner and expect its identity to change silently.
+Stage its manifest, Cargo metadata, README, license and security notice in a
+separate package directory. Put the built `ahu-plugin-codex` binary at
+`bin/ahu-plugin-codex`, matching the runtime declaration. Do not put credentials,
+native configuration, execution traces or build caches in the staged package.
+Installation verifies and copies content; it never builds or executes the plugin.
 
-Unknown native versions are refused. Plugins never automatically download, update,
-fall back to another version or substitute a harness. See each package's README for the
-supported execution modes. In particular, OpenCode's interactive `mini` mode does
-not support unattended auto permissions; the plugin refuses that combination.
-Headless planning supports unattended work mode only.
+From the project in which the plugin will be used:
 
-## Installation and authority
+```sh
+ahu setup --list-harness-plugins
+ahu setup --harness-plugin /absolute/staged/harness-codex
+```
 
-Follow the [setup and activation workflow](harness-plugin-pilot.md#discover-and-prepare-a-local-package)
-with an explicitly staged package path. Discovery is metadata-only. Preparation
-creates a binding that is turned off with no grants; activation requires reviewed committed
-pins and the `harness-launch` grant. No customer Python interpreter is required.
+Discovery reads explicit `AHU_PLUGIN_PATH` directories and retained installations
+without executing plugins or native CLIs. Preparation creates a disabled,
+content-pinned local binding. Review and commit its binding and context lock.
+Then install explicitly:
 
-The planner receives model, mode, permissions, native version, timeout and optional
-resume identity. It receives no prompt, account credentials or project path.
-Core validates a bounded response and inserts the prompt after planning. A cleared
-environment and private execution directory reduce accidental exposure; they are
-not a sandbox. Installed code runs with the user's OS privileges. Review package
-source and provenance before granting execution.
+```sh
+ahu plugins install harness-codex
+ahu plugins installed
+ahu plugins enable harness-codex
+```
 
-## Remaining extraction gates
+Add `harness-runtime` to the binding's grants, refresh with `ahu lock --update`,
+and review and commit the activation. Keep the staged package unchanged until
+installation completes. Setup does not silently authorize a runtime. Run normal
+`ahu setup` after activation to select exact models and review native MCP/skill
+setup proposals. Native CLIs and their authentication are installed separately.
 
-Before removing built-in adapters or making this the default integration path:
+Harnesses are optional. Without a harness plugin, core commands remain available;
+launching that harness reports the missing installed capability. A binding may
+use a package ID independent of its descriptor's harness ID. Conflicting harness
+IDs, aliases and aliases colliding with core commands are refused.
 
-- Move native configuration, MCP setup, trust and approval mappings into packages.
-- Move native event decoding, usage interpretation and resume compatibility into
-  a bounded contract, keeping observed process/task state in core.
-- Replace compiled harness discovery and direct shortcut selection with installed
-  capability discovery, including useful behavior when no harness is installed.
-- Verify headless and interactive modes independently with actual MCP calls,
-  task-attributed local telemetry, evals, resume, cancellation and cleanup. Record
-  native version and model; synthetic planner tests are not live certification.
-- Verify package-only upgrades on the same core binary, and publish platform
-  artifacts with installation instructions and independent package CI.
+## Native behavior and upgrades
 
-The [protocol and Codex pilot observations](harness-plugin-pilot.md) distinguish
-verified behavior from the remaining work. Harness and session-host plugins are
-separate: headless execution does not require cmux or an issue tracker.
+`ahu harness ID` starts a direct coordinator session. Installed aliases provide
+shortcuts such as `ahu codex`, `ahu claude` and `ahu agy`. Headless agent execution
+requires no terminal-host or tracker plugin. cmux and GitHub are separate optional
+integrations.
+
+The selected plugin receives the exact model, mode, permissions, native version,
+timeout and optional resume identity. Core inserts task prompts only after
+validating the returned command. Interactive and headless modes have different
+native controls; for example, OpenCode mini refuses unattended auto permissions.
+Native settings may still deny tools even with automatic approval requested.
+
+A provider update is delivered by versioning its package and reviewing new content
+pins. No core recompile is required while the runtime protocol remains compatible.
+Existing tasks freeze package/binding identity; an upgrade cannot silently rebind
+resume or cleanup. Finish and remove old tasks before activating replacements.
+Unknown versions and unsupported operations fail explicitly, without another
+provider or built-in fallback.
+
+## Security and evidence
+
+Runtime permission is broader than launch planning: native inspection may read
+configuration and execute bounded native probes, setup proposes writes, and trust
+operations reconcile exact task receipts. Installed code runs with the user's OS
+privileges. Protocol limits and worktrees are not a sandbox. Review package source
+and provenance before granting runtime access.
+
+One external normalizer handles an attempt's native events. Core retains process
+outcome and completion checks. Missing usage, unobserved helpers and unsupported
+measurements stay unknown. Native credits are not tokens or USD. Raw events and
+final answer snapshots must not be published or logged by the runtime transport.
+
+The [runtime contract](harness-runtime-contract.md) specifies the bounded protocol
+and required integration checks. Validate native version/model, interactive and
+headless modes, actual MCP calls, local OTel, evals, resume, cancellation and cleanup
+separately. Synthetic protocol tests are not live harness certification.

@@ -518,7 +518,7 @@ mod tests {
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
         std::fs::create_dir_all(root.join(config::CONFIG_DIR)).unwrap();
-        std::fs::write(root.join(PATHS[0]), format!("schema_version = 1\nharness_preferences = ['codex']\nmodel_selection = 'project-ranked'\ncatalog_version = '{}'\n[model_rankings]\ncodex = ['gpt-6-astra']\n", crate::catalog::CATALOG_VERSION)).unwrap();
+        std::fs::write(root.join(PATHS[0]), "schema_version = 1\nharness_preferences = ['codex']\nmodel_selection = 'project-ranked'\n[model_rankings]\ncodex = ['gpt-6-astra']\n").unwrap();
         let snapshot = crate::snapshot::collect(root).unwrap();
         let lock = context_lock::LockFile::from_snapshot(&snapshot);
         std::fs::write(root.join(PATHS[1]), toml::to_string(&lock).unwrap()).unwrap();

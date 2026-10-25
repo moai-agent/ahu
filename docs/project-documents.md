@@ -20,7 +20,7 @@ The declarative-source inventory is broader than these two migrated files:
 | `ahu-plugin.md` | `ahu` package declaration, already OKF `ahu:plugin`; its existing flat schema stays compatible |
 | `evals/**` case and suite Markdown | `ahu` evaluation definitions, already `ahu:eval-case` / `ahu:eval-suite`; no implicit schema conversion |
 | `.agents/skills/*/SKILL.md`, `docs/knowledge/*.md` | Skill and knowledge Markdown with their existing frontmatter conventions; migration never rewrites instructions |
-| `src/catalog.rs` | Compiled compatibility catalog; `ahu.catalog_version` selects its revision, with no independent TOML source |
+| Installed harness descriptors | Provider-owned identities, models, modes, native version evidence and context paths; committed plugin bindings select the installed content |
 | Evaluation reference, freeze and manifest JSON | Experiment inputs and provenance, outside project launch policy and lock migration |
 | Native harness settings, MCP registrations, native agents and hooks | Harness-owned TOML, JSON, JSONC, Markdown or scripts, retained at native paths |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, workflow YAML | Cargo manifests, Rust version, dependency checks and CI settings; not `ahu` project policy |

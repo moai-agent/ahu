@@ -550,13 +550,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            format!(
-                "schema_version = 1\n\
-                 harness_preferences = [\"claude-code\"]\n\
-                 model_selection = \"project-ranked\"\n\
-                 catalog_version = \"{}\"\n",
-                crate::catalog::CATALOG_VERSION
-            ),
+            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\n",
         )
         .unwrap();
     }
@@ -613,7 +607,6 @@ mod tests {
                 "selection_basis": null
             },
             "policy_digest": "0".repeat(64),
-            "catalog_version": crate::catalog::CATALOG_VERSION,
             "config_snapshot": {"entries": [], "skipped_directories": []},
             "config_snapshot_digest": "snapshot-digest",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},

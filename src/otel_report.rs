@@ -219,9 +219,9 @@ mod tests {
     #[test]
     fn cost_is_source_bound_and_never_converted_or_summed() {
         for (harness, source, expected) in [
-            ("opencode", "opencode_step_finish_sum", true),
-            ("claude-code", "claude_code_result_total", true),
-            ("kiro", "opencode_step_finish_sum", false),
+            ("opencode", "native_step_sum_usd", true),
+            ("claude-code", "native_cumulative_usd", true),
+            ("kiro", "native_step_sum_usd", false),
             ("codex", "unknown", false),
         ] {
             let mut r = Report::new(vec![selected(harness, "headless")], "candidate").unwrap();
@@ -655,11 +655,7 @@ impl Report {
             .filter(|s| matches!(*s, "partial" | "unavailable" | "complete_observed_stream"))
             .map(str::to_owned);
         row.cost_source = string(&a, "ahu.cost.source")
-            .filter(|s| {
-                (*s == "opencode_step_finish_sum" && self.selected[index].harness == "opencode")
-                    || (*s == "claude_code_result_total"
-                        && self.selected[index].harness == "claude-code")
-            })
+            .filter(|s| matches!(*s, "native_cumulative_usd" | "native_step_sum_usd"))
             .map(str::to_owned);
         for metric in METRICS {
             if *metric == "ahu.cost.harness_reported_usd"

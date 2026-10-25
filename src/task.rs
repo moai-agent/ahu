@@ -158,7 +158,6 @@ pub struct TaskRecord {
     pub base_commit: Option<String>,
     pub identity: LaunchIdentity,
     pub policy_digest: String,
-    pub catalog_version: String,
     pub config_snapshot: ConfigSnapshot,
     pub config_snapshot_digest: String,
     /// Hooks that were in effect at launch, at every scope ahu could read.

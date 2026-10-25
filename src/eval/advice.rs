@@ -189,19 +189,12 @@ fn read_records(repo: &crate::git::Repo, path: &Path) -> Result<String> {
 pub(super) fn supported_cost_source(source: &str) -> bool {
     matches!(
         source,
-        "claude_code_result_total" | "opencode_step_finish_sum"
+        "native_cumulative_usd" | "native_step_sum_usd"
     )
 }
 
 fn cost_source(record: &Record) -> Option<&str> {
-    match (
-        record.harness.as_str(),
-        record.reported_cost_source.as_deref(),
-    ) {
-        ("claude-code", Some("claude_code_result_total")) => Some("claude_code_result_total"),
-        ("opencode", Some("opencode_step_finish_sum")) => Some("opencode_step_finish_sum"),
-        _ => None,
-    }
+    record.reported_cost_source.as_deref().filter(|source| supported_cost_source(source))
 }
 
 fn complete_identity(identity: &provenance::Identity, observations: u64) -> bool {
@@ -583,7 +576,7 @@ mod tests {
                     "answer_status":"scored","answer_score":if pass {1.0} else {0.0},"answer_passed":pass,
                     "harness_provenance":p,"observed_at_unix_seconds":1000,
                     "run_id":"fixture-run","task_id":format!("{}-{i}",c.name.trim_start_matches('@')),"attempt":1,"attempts":1,
-                    "reported_cost_source":"opencode_step_finish_sum",
+                    "reported_cost_source":"native_step_sum_usd",
                     "reported_tokens":{"ahu.cost.harness_reported_usd":{"kind":"observed_float","value":if pass {0.1} else {0.0}},"ahu.tokens.input":0},
                     "fingerprint_completeness":"complete","input_fingerprint":c.identity,
                     "target_repo_head":"b".repeat(40),"ahu_build_digest":"c".repeat(64),"skill_digest":"d".repeat(64),
@@ -863,7 +856,7 @@ mod tests {
             let p = r.harness_provenance.as_mut().unwrap();
             p.requested_provider.values = BTreeMap::from([("claude-code".into(), 1)]);
             p.reported_provider.values = p.requested_provider.values.clone();
-            r.reported_cost_source = Some("claude_code_result_total".into());
+            r.reported_cost_source = Some("native_cumulative_usd".into());
         }
         let result = recommend(&request, &records, &candidates, 1030);
         assert!(has_reason(&result, "mixed_cost_sources"));
@@ -1052,8 +1045,8 @@ mod tests {
         let fields = super::super::base_fields("fixture-run", &trial, "candidate", None);
         assert!(fields["observed_at_unix_seconds"].as_u64().unwrap() > 0);
         for source in [
-            "opencode_step_finish_sum",
-            "claude_code_result_total",
+            "native_step_sum_usd",
+            "native_cumulative_usd",
             "private-marker",
         ] {
             let mut fields = serde_json::Map::new();

@@ -587,11 +587,12 @@ pub fn configure_child(
         )
         .env("OTEL_SERVICE_NAME", "ahu-agent")
         .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
-    if eval_mode && harness == "kiro" {
-        // Kiro V3 emits native OTLP JSON traces/metrics even when told to use
-        // protobuf and disable metrics. The eval receiver projects ahu's
-        // protobuf spans only. Keep its endpoint in AHU_EVAL_OTEL_ENDPOINT
-        // for ahu/MCP, without opting Kiro into incompatible native exports.
+}
+
+/// Apply provider-declared native export compatibility after generic attribution.
+/// This affects native exporters only; ahu and MCP keep their local eval endpoint.
+pub(crate) fn configure_native_export(command: &mut std::process::Command, native_eval_otlp: bool) {
+    if eval_endpoint_override().is_some() && !native_eval_otlp {
         command
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
             .env("OTEL_TRACES_EXPORTER", "none");

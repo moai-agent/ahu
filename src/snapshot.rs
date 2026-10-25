@@ -15,34 +15,59 @@ use serde::{Deserialize, Serialize};
 use crate::bail;
 use crate::util::{Error, Result, digest_bytes, digest_file};
 
-/// Directory names whose contents are agent configuration wherever they appear.
-const CONFIG_DIR_NAMES: &[&str] = &[
-    ".agents",
-    ".claude",
-    ".codex",
-    ".agent",
-    ".opencode",
-    ".gemini",
-    ".kiro",
-];
-
-/// File names that are agent configuration wherever they appear.
-const CONFIG_FILE_NAMES: &[&str] = &[
-    "CLAUDE.md",
-    "CLAUDE.local.md",
-    "GEMINI.md",
-    "GEMINI.local.md",
-    "AGENTS.md",
-    "AGENTS.override.md",
-    ".kiroignore",
-    ".mcp.json",
-    // OpenCode project configuration. It may name `plugin` modules OpenCode
-    // installs and runs at startup, so it is executable configuration under the
-    // same trust boundary as any other inherited config: carried, digested and
-    // disclosed, never rewritten or disabled.
-    "opencode.json",
-    "opencode.jsonc",
-];
+/// Core coordination context is always recognized. Native paths come from
+/// verified installed descriptors and never from a provider-name switch.
+#[derive(Default)]
+struct ContextPaths {
+    directories: Vec<String>,
+    files: Vec<String>,
+}
+impl ContextPaths {
+    fn load(root: &Path) -> Result<Self> {
+        let mut paths = Self {
+            directories: vec![".agents".into()],
+            files: vec!["AGENTS.md".into(), "AGENTS.override.md".into()],
+        };
+        if root.join(crate::plugin_binding::DIRECTORY).exists() {
+            let repo = crate::git::discover(root)?;
+            for descriptor in crate::harness_runtime::discover(&repo)? {
+                for path in descriptor.context_paths {
+                    let plain = path.trim_end_matches('/');
+                    if !crate::plugin_binding::plain_relative(plain) {
+                        bail!("harness plugin declares an invalid context path");
+                    }
+                    if path.ends_with('/') {
+                        paths.directories.push(plain.into());
+                    } else {
+                        paths.files.push(path);
+                    }
+                }
+            }
+        }
+        paths.directories.sort();
+        paths.directories.dedup();
+        paths.files.sort();
+        paths.files.dedup();
+        Ok(paths)
+    }
+    fn recognizes(&self, relative: &Path) -> bool {
+        if relative == Path::new(crate::context_lock::LOCK_PATH) {
+            return false;
+        }
+        self.directories.iter().any(|directory| {
+            let directory = Path::new(directory);
+            relative.starts_with(directory)
+                || (directory.components().count() == 1
+                    && relative
+                        .components()
+                        .any(|part| part.as_os_str() == directory.as_os_str()))
+        }) || self.files.iter().any(|file| {
+            let file = Path::new(file);
+            relative == file
+                || (file.components().count() == 1 && relative.file_name() == file.file_name())
+        })
+    }
+}
 
 /// Directories never descended into while looking for configuration.
 ///
@@ -157,34 +182,12 @@ impl ConfigSnapshot {
     }
 }
 
-fn is_config_path(relative: &Path) -> bool {
-    // Generated lock must not fingerprint itself. Legacy task snapshot bytes
-    // remain identical; neither format is an inherited source input.
-    if relative == Path::new(crate::context_lock::LOCK_PATH) {
-        return false;
-    }
-    for component in relative.components() {
-        if let Component::Normal(name) = component {
-            let name = name.to_string_lossy();
-            if CONFIG_DIR_NAMES.iter().any(|d| *d == name) {
-                return true;
-            }
-        }
-    }
-    relative
-        .file_name()
-        .map(|name| {
-            let name = name.to_string_lossy();
-            CONFIG_FILE_NAMES.iter().any(|f| *f == name)
-        })
-        .unwrap_or(false)
-}
-
 /// Walk `root` and collect every agent-configuration file.
 pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
     let source = crate::storage::CheckoutStorage::new(root).configuration();
     let mut snapshot = ConfigSnapshot::default();
-    walk(source.root(), source.root(), 0, &mut snapshot)?;
+    let context = ContextPaths::load(source.root())?;
+    walk(source.root(), source.root(), 0, &mut snapshot, &context)?;
     snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
     snapshot.skipped_directories.sort();
     snapshot.skipped_directories.dedup();
@@ -195,7 +198,13 @@ pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
     Ok(snapshot)
 }
 
-fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) -> Result<()> {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    snapshot: &mut ConfigSnapshot,
+    context: &ContextPaths,
+) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -229,12 +238,12 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
             // past the depth cap invisible in the inventory while the checkout
             // still carried them into the task worktree.
             if SKIP_DIR_NAMES.iter().any(|d| *d == name) || depth + 1 > MAX_DEPTH {
-                record_unscanned(&path, relative, snapshot);
+                record_unscanned(&path, relative, snapshot, context);
                 continue;
             }
-            walk(root, &path, depth + 1, snapshot)?;
+            walk(root, &path, depth + 1, snapshot, context)?;
         } else if meta.is_file() {
-            if !is_config_path(relative) {
+            if !context.recognizes(relative) {
                 continue;
             }
             snapshot.entries.push(SnapshotEntry {
@@ -243,7 +252,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
                 bytes: meta.len(),
                 executable: is_executable(&meta),
             });
-        } else if meta.file_type().is_symlink() && is_config_path(relative) {
+        } else if meta.file_type().is_symlink() && context.recognizes(relative) {
             // A configuration symlink is never followed. It is recorded so it
             // can be disclosed and, in a task worktree, removed.
             snapshot.symlinks.push(to_relative_string(relative));
@@ -259,7 +268,12 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
 /// directory, so it costs nothing on a large checkout and still catches the
 /// obvious plant: a `CLAUDE.md` at the top of `vendor/`, which Claude Code
 /// loads on demand when it works on files in that subtree.
-fn record_unscanned(dir: &Path, relative: &Path, snapshot: &mut ConfigSnapshot) {
+fn record_unscanned(
+    dir: &Path,
+    relative: &Path,
+    snapshot: &mut ConfigSnapshot,
+    context: &ContextPaths,
+) {
     let shown = to_relative_string(relative);
     if shown.is_empty() {
         return;
@@ -273,7 +287,7 @@ fn record_unscanned(dir: &Path, relative: &Path, snapshot: &mut ConfigSnapshot) 
         return;
     }
     snapshot.skipped_directories.push(shown.clone());
-    for candidate in CONFIG_FILE_NAMES {
+    for candidate in &context.files {
         if let Ok(meta) = std::fs::symlink_metadata(dir.join(candidate))
             && meta.is_file()
         {
@@ -282,7 +296,7 @@ fn record_unscanned(dir: &Path, relative: &Path, snapshot: &mut ConfigSnapshot) 
                 .push(format!("{shown}/{candidate}"));
         }
     }
-    for candidate in CONFIG_DIR_NAMES {
+    for candidate in &context.directories {
         if let Ok(meta) = std::fs::symlink_metadata(dir.join(candidate))
             && meta.is_dir()
         {
@@ -671,12 +685,12 @@ mod classification_tests {
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().join("parent");
         let worktree = root.path().join("worktree");
-        std::fs::create_dir_all(parent.join(".claude")).unwrap();
+        std::fs::create_dir_all(parent.join(".agents")).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(parent.join(".claude/settings.local.json"), contents).unwrap();
+        std::fs::write(parent.join(".agents/settings.local.json"), contents).unwrap();
         let snapshot = collect(&parent).unwrap();
         let report = materialize(&parent, &snapshot, &worktree).unwrap();
-        assert_eq!(report.written, vec![".claude/settings.local.json"]);
+        assert_eq!(report.written, vec![".agents/settings.local.json"]);
         (root, snapshot, report)
     }
 
@@ -689,7 +703,7 @@ mod classification_tests {
             &root.join("worktree"),
             snapshot,
             report,
-            &[".claude/settings.local.json".to_string()],
+            &[".agents/settings.local.json".to_string()],
         )
     }
 
@@ -697,7 +711,7 @@ mod classification_tests {
     fn an_untouched_copy_is_the_only_thing_accounted_for() {
         let (root, snapshot, report) = copied("{}\n");
         let split = classify(root.path(), &snapshot, &report);
-        assert_eq!(split.unchanged_copies, vec![".claude/settings.local.json"]);
+        assert_eq!(split.unchanged_copies, vec![".agents/settings.local.json"]);
         assert!(split.changed.is_empty());
 
         // An untracked path the record never mentions stays a change.
@@ -709,7 +723,7 @@ mod classification_tests {
         );
         assert_eq!(
             split.unchanged_copies,
-            vec![".claude/settings.local.json"],
+            vec![".agents/settings.local.json"],
             "known copies are included even when Git hides them"
         );
         assert_eq!(split.changed, vec!["notes.md"]);
@@ -718,12 +732,12 @@ mod classification_tests {
     #[test]
     fn edited_chmoded_relinked_and_unwritten_copies_are_changes() {
         let (root, snapshot, report) = copied("{}\n");
-        let copy = root.path().join("worktree/.claude/settings.local.json");
+        let copy = root.path().join("worktree/.agents/settings.local.json");
 
         std::fs::write(&copy, "{\"allow\":[]}\n").unwrap();
         assert_eq!(
             classify(root.path(), &snapshot, &report).changed,
-            vec![".claude/settings.local.json"],
+            vec![".agents/settings.local.json"],
             "an edited copy is the task's work"
         );
         std::fs::write(&copy, "{}\n").unwrap();
@@ -735,7 +749,7 @@ mod classification_tests {
             std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode | 0o111)).unwrap();
             assert_eq!(
                 classify(root.path(), &snapshot, &report).changed,
-                vec![".claude/settings.local.json"],
+                vec![".agents/settings.local.json"],
                 "a copy that became executable is the task's work"
             );
             std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -745,20 +759,20 @@ mod classification_tests {
         let unwritten = MaterializeReport::default();
         assert_eq!(
             classify(root.path(), &snapshot, &unwritten).changed,
-            vec![".claude/settings.local.json"]
+            vec![".agents/settings.local.json"]
         );
 
         #[cfg(unix)]
         {
             std::fs::remove_file(&copy).unwrap();
             std::os::unix::fs::symlink(
-                root.path().join("parent/.claude/settings.local.json"),
+                root.path().join("parent/.agents/settings.local.json"),
                 &copy,
             )
             .unwrap();
             assert_eq!(
                 classify(root.path(), &snapshot, &report).changed,
-                vec![".claude/settings.local.json"],
+                vec![".agents/settings.local.json"],
                 "a symlink is never read through, so it is never an accounted copy"
             );
         }
@@ -768,14 +782,14 @@ mod classification_tests {
     fn discarding_removes_only_verified_copies_and_never_the_parent() {
         let (root, snapshot, _report) = copied("{}\n");
         let worktree = root.path().join("worktree");
-        let copy = worktree.join(".claude/settings.local.json");
+        let copy = worktree.join(".agents/settings.local.json");
 
         // A copy that changed after the gate ran is kept, and said so.
         std::fs::write(&copy, "{\"allow\":[]}\n").unwrap();
         let refused = discard_unchanged_copies(
             &worktree,
             &snapshot,
-            &[".claude/settings.local.json".to_string()],
+            &[".agents/settings.local.json".to_string()],
         )
         .unwrap_err()
         .to_string();
@@ -795,13 +809,13 @@ mod classification_tests {
         discard_unchanged_copies(
             &worktree,
             &snapshot,
-            &[".claude/settings.local.json".to_string()],
+            &[".agents/settings.local.json".to_string()],
         )
         .unwrap();
         assert!(!copy.exists(), "the verified copy was kept");
         assert!(
             root.path()
-                .join("parent/.claude/settings.local.json")
+                .join("parent/.agents/settings.local.json")
                 .is_file(),
             "discarding a copy reached into the parent checkout"
         );

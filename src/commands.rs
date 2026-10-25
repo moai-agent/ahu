@@ -39,88 +39,19 @@ pub fn repo_from_cwd() -> Result<Repo> {
 /// top-ranked Codex model, with approval prompts and the sandbox bypassed.
 /// Repository discovery registers executable exclusions before resolving the
 /// harness, just as for agents.
-pub fn codex(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "codex",
-        "Codex",
-        &["--dangerously-bypass-approvals-and-sandbox"],
-    )
-}
-
-/// Open Claude Code on the project's top-ranked Claude Code model with
-/// permission checks bypassed.
-pub fn claude(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "claude",
-        "Claude",
-        &["--dangerously-skip-permissions"],
-    )
-}
-
-/// Open Kiro V3 with the project's ranked model and explicit automatic tool approvals.
-pub fn kiro(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "kiro-cli", "Kiro CLI", &["--trust-all-tools"])
-}
-
-/// Open OpenCode on the project's top-ranked OpenCode model with `--auto`, which
-/// auto-approves every permission OpenCode does not explicitly deny.
-///
-/// `--auto` is OpenCode's only permission-widening flag, so it is how this
-/// shortcut matches the other three. Permissions set to `deny` in OpenCode's own
-/// configuration still apply; ahu passes no `--pure`, so the user's plugins load.
-pub fn opencode(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "opencode", "OpenCode", &["--auto"])
-}
-
-/// Open the Antigravity CLI on the project's top-ranked Antigravity model, in
-/// its unattended (YOLO) permission mode.
-pub fn antigravity(repo: &Repo) -> Result<i32> {
-    coordinating_session(
-        repo,
-        "agy",
-        "Antigravity CLI",
-        &["--dangerously-skip-permissions"],
-    )
-}
-
-/// Open a coordinating session: the project's top-ranked model for the harness,
-/// plus the shortcut's own approval-bypass flags, in the invoking terminal.
-///
-/// `bypass` is the approval widening the shortcut owns. The model comes from the
-/// project's `model_rankings`, through the same mapping the headless adapters use
-/// for the model option, so a coordinator and an agent on one harness cannot end
-/// up passing different flags for the same thing. A harness with no ranked model
-/// launches without a model option rather than on one ahu invented.
-fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]) -> Result<i32> {
-    let harness = match program {
-        "claude" => "claude-code",
-        "agy" => "antigravity",
-        "kiro-cli" => "kiro",
-        other => other,
-    };
+pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
+    let runtime = crate::harness_runtime::load(repo, selector)?;
+    let descriptor = runtime.descriptor();
+    let harness = descriptor.id.as_str();
+    let program = descriptor.program.as_str();
+    let label = descriptor.display_name.as_str();
     let loaded = config::load(&repo.root)?;
     let ranked = loaded
         .as_ref()
         .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
-    // Telemetry and session metadata still need a value for a harness with no
-    // ranked model; the argument list gets no model option in that case.
-    let model = ranked.clone().unwrap_or_else(|| "unconfigured".to_string());
-    let mut args: Vec<String> = match &ranked {
-        Some(ranked) => harness::model_args(harness, ranked)?,
-        None => Vec::new(),
-    };
-    if harness == "kiro" {
-        args.splice(0..0, ["chat".into(), "--v3".into()]);
-    }
-    args.extend(bypass.iter().map(|flag| flag.to_string()));
-    let model_note = ranked.is_none().then(|| {
-        format!(
-            "no model is ranked for {harness} in this project's configuration, so ahu passes no \
-             model option and {label} opens on whichever model it is configured with."
-        )
-    });
+    let model = ranked.ok_or_else(|| Error::new("direct harness sessions require an exact project-ranked model; run ahu setup"))?;
+    let plan = harness::direct_command(repo, harness, &model)?;
+    let args = plan.args;
     if let Some(loaded) = &loaded {
         crate::telemetry::initialize(&loaded.config.telemetry)?;
     }
@@ -130,28 +61,10 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
-    selection::check_interactive_cli(
-        std::path::Path::new(&executable),
-        harness,
-        &mut args,
-        &repo.root,
-    )?;
-    if let Some(ranked) = &ranked {
-        selection::check_launch_compatibility(
-            std::path::Path::new(&executable),
-            harness,
-            ranked,
-            crate::agent::Permissions::Prompt,
-            &repo.root,
-        )?;
-    }
     crate::state::ensure_checkout_state(&repo.root)?;
     let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
-    }
-    if let Some(note) = &model_note {
-        eprintln!("ahu: {}", display_safe(note));
     }
     if placement.opened_workspace {
         return Ok(0);

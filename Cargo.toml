@@ -18,7 +18,6 @@ path = "src/lib.rs"
 
 [features]
 # Local architecture experiment; not a published harness compatibility claim.
-harness-plugin-pilot = []
 
 [dependencies]
 ahu-harness-api = { version = "0.1.0", path = "crates/ahu-harness-api" }

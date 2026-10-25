@@ -339,7 +339,7 @@ The interactive preview has `schema_version: 1` and these fields:
 | `agent` | Name, version, description, resolved source path, and full identity digest. |
 | `title`, `summary` | Plain sidebar display text, explicit or derived from the assignment. |
 | `harness`, `model`, `selection_basis` | The exact selected pair and why it was selected. |
-| `policy_digest`, `catalog_version` | The configuration and compatibility catalog used. |
+| `policy_digest` | The exact project configuration used; the launch command also freezes installed runtime binding identity. |
 | `permissions` | The manifest's approval mode. |
 | `argv` | Command and arguments, with the delivered prompt redacted. |
 | `prompt_digest`, `prompt_bytes` | SHA-256 and UTF-8 byte length of the original task prompt. |

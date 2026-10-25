@@ -322,7 +322,9 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
         args.push(PROMPT.into());
         Some(i)
     };
-    Ok(json!({"program":program,"args":args,"prompt_arg":prompt_arg}))
+    Ok(
+        json!({"program":program,"args":args,"prompt_arg":prompt_arg,"native_eval_otlp":harness != "kiro"}),
+    )
 }
 
 #[cfg(test)]

@@ -403,9 +403,10 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         entrypoint.validate()?;
         validate_executable(&open_relative(&directory, &entrypoint.path)?)?;
     }
-    if let Some(value) = manifest.metadata.get("harness_launch") {
-        let spec: crate::harness_plugin::Declaration = serde_json::from_value(value.clone())?;
-        spec.validate()?;
+    if let Some(value) = manifest.metadata.get("harness_runtime") {
+        let spec: ahu_harness_api::Declaration = serde_json::from_value(value.clone())?;
+        spec.validate()
+            .map_err(|_| Error::new("invalid harness runtime declaration"))?;
         validate_executable(&open_relative(&directory, &spec.path)?)?;
     }
     let activation_blocker = if manifest.executable.is_some() {
@@ -414,9 +415,9 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         Some(
             "This package has a generic entrypoint but no session host; use ahu plugins invoke ID --input-file PATH|- or the plugin_exec host API.",
         )
-    } else if manifest.metadata.contains_key("harness_launch") {
+    } else if manifest.metadata.contains_key("harness_runtime") {
         Some(
-            "This package is an experimental harness launch planner, not a session host or one-shot action.",
+            "This package provides an installed harness runtime; it is not a session host or one-shot action.",
         )
     } else {
         Some(LOADING_BLOCKER)

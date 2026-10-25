@@ -94,19 +94,8 @@ Commands:
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor [--verbose] [--work-mode]
                         Check readiness for native or explicit work-mode launches
-  agy                   Open the Antigravity CLI here on this project's
-                        top-ranked Antigravity model, in YOLO mode
-                        (--dangerously-skip-permissions)
-  claude                Open Claude here on this project's top-ranked
-                        Claude Code model, with permission checks bypassed
-                        (--dangerously-skip-permissions)
-  codex                 Open Codex here on this project's top-ranked Codex
-                        model, with approval prompts and the sandbox bypassed
-                        (--dangerously-bypass-approvals-and-sandbox)
-  opencode              Open OpenCode here on this project's top-ranked OpenCode
-                        model, auto-approving every permission it does not deny
-                        (--auto; ahu passes no --pure)
-  kiro                  Open Kiro V3 here with the ranked model and --trust-all-tools
+  harness ID            Open a direct session using an installed harness plugin.
+                        Installed aliases may also be used as commands.
   run-task              Internal: run a prepared task (used by the session host)
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
@@ -288,8 +277,7 @@ Commands:
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
-  agy|claude|codex|opencode|kiro
-                        Open a coordinating harness session
+  harness ID            Open an installed harness (or use its declared alias)
 
 Use `ahu help COMMAND` or `ahu COMMAND --help` for focused help.
 Use `ahu help all` for the full command and option reference.
@@ -311,7 +299,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         return Ok(HELP_ALL.to_string());
     }
     let help = match topic {
-        "setup" => "Usage: ahu setup [--list-harness-plugins]\n       ahu setup --harness-plugin /absolute/staged/package\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching. Harness plugin discovery is metadata-only. --harness-plugin prepares a disabled local content-pinned binding without executing, building, downloading, installing or enabling it. Review and commit the binding and context lock, explicitly install, then review grants and enable in a second commit. The optional harness-plugin-pilot feature requires an installed planner for registered launches; native configuration and event handling remain in core.\n".to_string(),
+        "setup" => "Usage: ahu setup [--list-harness-plugins]\n       ahu setup --harness-plugin /absolute/staged/package\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching. Harness plugin discovery is metadata-only. --harness-plugin prepares a disabled local content-pinned binding without executing, building, downloading, installing or enabling it. Review and commit the binding and context lock, explicitly install, then review grants and enable in a second commit. Harness launches and native configuration/event handling require an installed, enabled runtime plugin with the harness-runtime grant.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
@@ -339,7 +327,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
-        "agents" | "eval" | "knowledge" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        "agents" | "eval" | "knowledge" | "mcp" | "harness" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
     };
     Ok(help)
@@ -373,11 +361,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "telemetry" => "ahu telemetry — link private records and report local measurements",
         "explain" => "ahu explain — show the architecture overview",
         "onboard" => "ahu onboard — preview native agent definitions",
-        "agy" => "ahu agy — open Antigravity",
-        "claude" => "ahu claude — open Claude Code",
-        "codex" => "ahu codex — open Codex",
-        "opencode" => "ahu opencode — open OpenCode",
-        "kiro" => "ahu kiro — open Kiro CLI V3 (--trust-all-tools)",
+        "harness" => "ahu harness ID — open an installed harness plugin's direct session",
         "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
         "run-task" => "ahu run-task — internal task worker",
@@ -537,11 +521,9 @@ pub enum Command {
         verbose: bool,
         work_mode: bool,
     },
-    Codex,
-    Claude,
-    OpenCode,
-    Kiro,
-    Antigravity,
+    Harness {
+        selector: String,
+    },
     RunTask {
         task_dir: PathBuf,
     },
@@ -857,14 +839,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             } else {
                 let harness = harness
                     .ok_or_else(|| crate::util::Error::new("auth command requires --harness ID"))?;
-                if !matches!(
-                    harness.as_str(),
-                    "codex" | "claude-code" | "antigravity" | "opencode" | "kiro" | "ollama"
-                ) {
-                    bail!(
-                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, kiro, or ollama"
-                    );
-                }
+                crate::config::validate_harness_id(&harness, std::path::Path::new("auth"))?;
                 harness
             };
             if action == "select" && profile.is_none() {
@@ -898,25 +873,15 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             }
             Ok(Command::Doctor { verbose, work_mode })
         }
-        "claude" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Claude)
-        }
-        "codex" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Codex)
-        }
-        "opencode" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::OpenCode)
-        }
-        "kiro" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Kiro)
-        }
-        "agy" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Antigravity)
+        "harness" => {
+            let selector = args
+                .get(1)
+                .ok_or_else(|| crate::util::Error::new("expected ahu harness ID"))?;
+            expect_no_more(&args[2..])?;
+            crate::config::validate_harness_id(selector, std::path::Path::new("command"))?;
+            Ok(Command::Harness {
+                selector: selector.clone(),
+            })
         }
         "task" => {
             let task_id = args
@@ -1000,6 +965,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "launch" => bail!(
             "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
         ),
+        other if args.len() == 1 && crate::util::is_safe_name(other) => Ok(Command::Harness {
+            selector: other.into(),
+        }),
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
 }

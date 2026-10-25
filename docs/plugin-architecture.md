@@ -101,8 +101,12 @@ checks separately from fixtures and publication verification. Do not claim a
 provider works because an independent fixture passed. Keep private bindings,
 tracker content and raw telemetry out of public source and release artifacts.
 
-## Harness extraction experiment
+## Harness runtimes
 
-The [Codex launch-planner pilot](harness-plugin-pilot.md) tests a dedicated
-executable boundary behind an experimental build feature. It is not a complete
-harness extraction or a change to the supported default installation.
+[Installed Rust harness plugins](harness-plugins.md) supply native provider behavior
+through a bounded executable protocol. The [runtime contract](harness-runtime-contract.md)
+separates native inspection, setup proposals, launch planning and event normalization
+from core task, process and MCP authority. Discovery is inert, activation requires
+an explicit runtime grant, and task identities freeze the selected package binding.
+Core has no provider fallback. Native version support can change through a package
+update while core and its data contract remain unchanged.
