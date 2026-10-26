@@ -585,7 +585,7 @@ fn a_joined_helper_is_complete_work() {
         "native summaries stay outside normalized evidence"
     );
     assert_eq!(helpers[0].total_tokens, Some(10_629));
-    assert!(helpers[0].output_file.is_none());
+    assert!(helpers[0].output_file.is_some());
 
     let completeness = observations.completeness(&profile_of(&bounded()));
     assert!(completeness.complete, "{completeness:?}");

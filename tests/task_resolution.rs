@@ -34,6 +34,7 @@ fn sibling(repo: &TestRepo) -> TestRepo {
     TestRepo {
         dir,
         state: tempfile::tempdir().unwrap(),
+        native_runtime: repo.native_runtime,
     }
 }
 

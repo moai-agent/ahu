@@ -476,7 +476,7 @@ fn admit(harness: &str, params: &Value) -> Result<Value> {
         system_codex: p.system_codex,
         codex_managed_preferences: p.codex_managed_preferences,
     };
-    if p.mode != Mode::Headless && matches!(harness, "opencode" | "kiro") {
+    if !p.work_mode && matches!(harness, "opencode" | "kiro") {
         let listing = models(harness, &probe)?;
         if !listing["models"]
             .as_array()

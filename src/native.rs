@@ -95,6 +95,27 @@ impl Profile {
     pub fn helpers_permitted(&self) -> bool {
         self.policy == BOUNDED
     }
+
+    /// Whether the two profiles share the same native helper policy, ignoring
+    /// version-specific invocation isolation controls.
+    pub fn helper_policy_matches(&self, other: &Self) -> bool {
+        self.policy == other.policy
+            && self.helper_model == other.helper_model
+            && self.helper_tools == other.helper_tools
+            && self.max_concurrent == other.max_concurrent
+            && self.max_depth == other.max_depth
+            && self.gaps == other.gaps
+            && self.env == other.env
+            && self.env_remove == other.env_remove
+            && self
+                .enforced
+                .iter()
+                .filter(|c| !c.id.starts_with("native.isolation."))
+                .eq(other
+                    .enforced
+                    .iter()
+                    .filter(|c| !c.id.starts_with("native.isolation.")))
+    }
 }
 
 /// Invocation features admitted by the selected runtime for this exact request.

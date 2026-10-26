@@ -14,7 +14,7 @@ use tempfile::TempDir;
 pub struct TestRepo {
     pub dir: TempDir,
     pub state: TempDir,
-    native_runtime: bool,
+    pub native_runtime: bool,
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {

@@ -531,7 +531,7 @@ max_depth, enforced, gaps). Provider mismatch refuses. Disabled/bounded helper
 constraints remain enforced. Codex's agents.enabled=false and version-specific
 invocation-isolation flags are included in the frozen profile. This pure
 operation does not establish native configuration admission or live conformance.
-Interactive/direct admission requires an exact live native model-list match
+Guarded admission requires an exact live native model-list match
 for OpenCode and Kiro before accepting the requested invocation.
 
 `recover` accepts exactly `harness`, `native_version`, `native_executable`,

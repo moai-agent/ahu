@@ -20,13 +20,18 @@ fn profile(repo: &ahu::git::Repo, harness: &str, version: &str) -> Option<ahu::n
         },
     )
     .ok()
+    .filter(|p| {
+        p.enforced
+            .iter()
+            .any(|c| c.id.starts_with("native.isolation."))
+    })
 }
 
 use ahu::headless::{Options, Spec, batch_command};
 
 #[test]
 fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
-    let root = common::TestRepo::new();
+    let root = common::TestRepo::new_native();
     root.init_config();
     root.add_agent_on("fixture", "1.0.0", "codex", "synthetic-model");
     root.commit("synthetic runtime bindings");
@@ -59,20 +64,15 @@ fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
                 spec.session = session;
                 spec.native_controls.clear();
                 assert!(batch_command("codex", &request, &spec).is_err());
-                spec.native_controls
-                    .push(control_profile.control_ids().first().unwrap().clone());
+                spec.native_controls = control_profile.control_ids();
+                spec.native_profile = Some(control_profile.clone());
                 let result = batch_command("codex", &request, &spec);
                 if permissions == Permissions::AcceptEdits && spec.session.is_some() {
                     assert!(result.is_err());
                     continue;
                 }
                 let command = result.unwrap();
-                assert!(
-                    command
-                        .args
-                        .windows(control_profile.args.len())
-                        .any(|args| args == control_profile.args)
-                );
+                assert!(contains_ordered(&command.args, &control_profile.args));
                 assert!(
                     !command
                         .args
@@ -89,7 +89,7 @@ fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
 
 #[test]
 fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native_config() {
-    let root = common::TestRepo::new();
+    let root = common::TestRepo::new_native();
     root.init_config();
     root.add_agent_on("fixture", "1.0.0", "codex", "synthetic-model");
     root.commit("synthetic runtime bindings");
@@ -130,13 +130,9 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
                 .push(other.control_ids().first().unwrap().clone());
             assert!(batch_command(harness, &request, &spec).is_err());
             spec.native_controls = control_profile.control_ids();
+            spec.native_profile = Some(control_profile.clone());
             let command = batch_command(harness, &request, &spec).unwrap();
-            assert!(
-                command
-                    .args
-                    .windows(control_profile.args.len())
-                    .any(|args| args == control_profile.args)
-            );
+            assert!(contains_ordered(&command.args, &control_profile.args));
             assert!(
                 command
                     .args
@@ -171,4 +167,11 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
     ] {
         assert!(profile(&repo, harness, version).is_none());
     }
+}
+
+fn contains_ordered(actual: &[String], expected: &[String]) -> bool {
+    let mut actual = actual.iter();
+    expected
+        .iter()
+        .all(|item| actual.any(|candidate| candidate == item))
 }

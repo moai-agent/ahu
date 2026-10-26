@@ -237,7 +237,7 @@ fn refresh_resume_profile(
     if spec
         .native_profile
         .as_ref()
-        .is_some_and(|previous| previous != &profile)
+        .is_some_and(|previous| !previous.helper_policy_matches(&profile))
     {
         bail!(
             "native helper policy changed across harness versions; previous attempt preserved, submit a new assignment"
@@ -1925,6 +1925,26 @@ fn observe_attempt(
     outcome.map(|status| if status == "succeeded" { 0 } else { 5 })
 }
 
+/// Cancellation acknowledged before native spawn is a terminal cancellation,
+/// not a supervisor failure. No process or native completion is invented.
+fn cancel_before_spawn(dir: &Path, attempt: &Path, spec: &Spec) -> Result<&'static str> {
+    durable_json(
+        &attempt.join("result.json"),
+        &json!({
+            "schema_version":2,"backend":"headless",
+            "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),
+            "attempt":spec.attempt,"outcome":"cancelled",
+            "finished_at":task::now_rfc3339(),
+            "process":{"exit_code":null,"signal":null},
+            "harness":{"terminal":false,"failed":false,"blockers":[]},
+            "blockers":["cancelled before native worker spawn"],
+            "acceptance":"not assessed","worktree_preserved":true
+        }),
+    )?;
+    task::set_state(dir, task::TaskState::Cancelled)?;
+    Ok("cancelled")
+}
+
 fn run_attempt(
     dir: &Path,
     attempt: &Path,
@@ -1933,6 +1953,9 @@ fn run_attempt(
     telemetry_span: &mut crate::telemetry::SpanGuard,
 ) -> Result<&'static str> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
+    if dir.join("cancel.json").exists() {
+        return cancel_before_spawn(dir, attempt, spec);
+    }
     let (record, rebuilt, executable) = crate::launch::verify_task(dir, Some(spec))?;
     if record.delivery.layout_version != 3 {
         bail!("primary-owned execution requires delivery layout 3; submit a new assignment");
@@ -2093,7 +2116,7 @@ fn run_attempt(
     let spawn_admission = Lock::acquire(&store(&repo)?.join("launch.lock"))?;
     validate_parent_attempt(&repo, spec)?;
     if dir.join("cancel.json").exists() {
-        bail!("task was cancelled before worker spawn");
+        return cancel_before_spawn(dir, attempt, spec);
     }
     durable_json(
         &attempt.join("spawn-intent.json"),
@@ -2362,6 +2385,8 @@ fn run_attempt(
         if (!completeness.complete
             && (bounded
                 || !events.native.helpers().is_empty()
+                || !completeness.violations.is_empty()
+                || !completeness.unobserved.is_empty()
                 || events.native.stream_incomplete
                 || completeness.unknown_events > 0))
             || (bounded && failed_helper)

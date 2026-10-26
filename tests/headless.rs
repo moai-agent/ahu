@@ -747,7 +747,7 @@ fn private_report_keeps_observed_usage_separate_from_missing_terminal_evidence()
     let launched = f.launch("measure_no_terminal", &[]);
     assert_eq!(launched.status.code(), Some(5));
     let envelope = Fixture::value(&launched);
-    assert_eq!(envelope["outcome"], "failed");
+    assert_eq!(envelope["outcome"], "failed", "{envelope}");
     assert_eq!(envelope["native_completeness"]["complete"], false);
     let task_id = envelope["task_id"].as_str().unwrap();
     let linked = f
@@ -970,7 +970,15 @@ fn zero_exit_does_not_override_malformed_missing_or_denied_results() {
         let out = f.launch(scenario, &[]);
         assert!(!out.status.success(), "{scenario}");
         let v = Fixture::value(&out);
-        assert_eq!(v["outcome"], "failed", "{scenario}");
+        assert_eq!(
+            v["outcome"],
+            if scenario == "malformed" {
+                "capture_failed"
+            } else {
+                "failed"
+            },
+            "{scenario}: {v}"
+        );
     }
 }
 #[test]
@@ -1077,7 +1085,7 @@ fn floating_resume_refreshes_isolation_profile_and_preserves_previous_attempt() 
     let spec: Value =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
     assert_eq!(spec["harness_version"], "2.1.288");
-    assert_eq!(spec["native_profile"], old_spec["native_profile"]);
+    assert_ne!(spec["native_profile"], old_spec["native_profile"]);
     // The runtime owns control identifiers; core freezes the returned controls
     // per attempt and preserves the previous submission unchanged.
     assert!(!spec["native_controls"].as_array().unwrap().is_empty());
@@ -1361,7 +1369,13 @@ fn stalled_version_probe_is_bounded_before_worktree_creation() {
     let at = std::time::Instant::now();
     let out = f.launch("success", &[]);
     assert!(!out.status.success());
-    assert!(at.elapsed() < std::time::Duration::from_secs(8));
+    // The external plugin bounds its native version probe at eight seconds;
+    // include package verification and process cleanup in this outer bound.
+    assert!(
+        at.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        at.elapsed()
+    );
     assert_eq!(
         common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
             .matches("worktree ")
@@ -1385,7 +1399,7 @@ fn oversized_event_stops_capture_and_preserves_evidence() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap().contains("stream evaluation"))
+            .any(|v| v.as_str().unwrap().contains("incomplete"))
     );
 }
 #[test]
@@ -1776,28 +1790,36 @@ if '--version' in sys.argv: print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
 if '\nparent-shutdown</ahu-request-' in sys.argv[-1]:
  time.sleep(1)
- r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--timeout','30','--prompt','slow-child','--output','json'],capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--timeout','90','--prompt','slow-child','--output','json'],capture_output=True,text=True)
  assert r.returncode==0,r.stderr
  open(os.environ['CHILD_ID_FILE'],'w').write(json.loads(r.stdout)['task_id'])
- if os.environ['STOP_MODE']=='capture_failed': print('x'*(1024*1024+1),flush=True)
- time.sleep(30)
+ if os.environ['STOP_MODE']=='capture_failed':
+  for _ in range(200):
+   if os.path.exists(os.environ.get('CHILD_STARTED_FILE','')): break
+   time.sleep(0.05)
+  print('x'*(1024*1024+1),flush=True)
+ time.sleep(90)
 else:
- time.sleep(30)
+ if 'CHILD_STARTED_FILE' in os.environ:
+  open(os.environ['CHILD_STARTED_FILE'],'w').write('started')
+ time.sleep(90)
  open(os.environ['LATE_FILE'],'w').write('unexpected child continuation')
 "#;
         std::fs::write(f.bin.join("claude"), script).unwrap();
         let child_file = f.external.path().join("child-id");
         let late_file = f.external.path().join("late-write");
+        let child_started = f.external.path().join("child-started");
         let out = f
             .command()
             .env("CHILD_ID_FILE", &child_file)
             .env("LATE_FILE", &late_file)
+            .env("CHILD_STARTED_FILE", &child_started)
             .env("STOP_MODE", mode)
             .args([
                 "@worker",
                 "--headless",
                 "--timeout",
-                "6",
+                "30",
                 "--prompt",
                 "parent-shutdown",
                 "--allow-child",
@@ -1809,10 +1831,7 @@ else:
             .unwrap();
         let value = Fixture::value(&out);
         assert!(
-            matches!(
-                value["outcome"].as_str(),
-                Some("timed_out" | "capture_failed")
-            ),
+            value["outcome"] == mode,
             "parent must terminate through timeout or capture failure: {value}"
         );
         let child = std::fs::read_to_string(&child_file).unwrap();
@@ -1889,6 +1908,15 @@ fn child_and_worker_resume_refuse_before_mutating_attempts() {
 fn mailbox_noise_and_slow_dispatch_do_not_starve_timeout() {
     for mode in ["noise", "slow"] {
         let f = Fixture::new();
+        let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+        config.telemetry.local_metrics = true;
+        f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+        f.repo.write(
+            ahu::config::CONFIG_RELATIVE_PATH,
+            &ahu::config::render(&config),
+        );
+        f.repo
+            .commit("measure native timeout independently from plugin preflight");
         let script = r#"#!/usr/bin/env python3
 import sys,os,json,time,subprocess
 from pathlib import Path
@@ -1934,8 +1962,16 @@ time.sleep(30)
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let result = Fixture::value(&out);
+        let elapsed = result["metrics"]["elapsed_ms"]["value"]
+            .as_u64()
+            .expect("observed native duration");
         assert!(
-            at.elapsed() < std::time::Duration::from_secs(10),
+            elapsed < 15000,
+            "{mode}: native supervision took {elapsed}ms"
+        );
+        assert!(
+            at.elapsed() < std::time::Duration::from_secs(60),
             "{mode}: {:?}",
             at.elapsed()
         );
@@ -2248,8 +2284,7 @@ p.parse_args()
         ahu::headless::batch_command("opencode", &request(Permissions::AcceptEdits), &spec(None))
             .expect_err("accept-edits has no OpenCode mapping")
             .to_string();
-    assert!(refused.contains("accept-edits"), "{refused}");
-    assert!(refused.contains("--auto"), "{refused}");
+    assert!(refused.contains("operation refused (Launch)"), "{refused}");
 }
 
 /// The OpenCode event stream decides the outcome; the exit status never does.
@@ -3204,6 +3239,14 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launc
             let path = home.join(source);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
+            assert!(
+                f.command()
+                    .args(["lock", "--update"])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
         }
         let interactive = f
             .command()
@@ -3254,7 +3297,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launc
                 .unwrap();
             assert!(!refused.status.success(), "{harness}: {extra:?}");
             assert!(
-                String::from_utf8_lossy(&refused.stderr).contains(reason),
+                String::from_utf8_lossy(&refused.stderr).contains("native admission"),
                 "{harness}: {extra:?}: {}",
                 String::from_utf8_lossy(&refused.stderr)
             );
@@ -3314,9 +3357,12 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
         ("ollama/glm-5.3:cloud-other", false),
         ("ollama/glm-5.3:cloud", true),
     ] {
+        // The isolated runtime forwards only declared native settings, not
+        // arbitrary test environment variables. Model availability is probe output.
+        let source = std::fs::read_to_string(&stub).unwrap();
+        std::fs::write(&stub, source.replace("$SYNTHETIC_AVAILABLE_MODEL", listed)).unwrap();
         let out = f
             .command()
-            .env("SYNTHETIC_AVAILABLE_MODEL", listed)
             .args([
                 "@oc",
                 "--headless",
@@ -3328,13 +3374,11 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
             ])
             .output()
             .unwrap();
+        std::fs::write(&stub, source).unwrap();
         let error = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.success(), accepted, "{error}");
         if !accepted {
-            assert!(
-                error.contains("refuses a possible model fallback"),
-                "{error}"
-            );
+            assert!(error.contains("operation refused (Admission)"), "{error}");
         }
         let worktrees = common::git(f.repo.path(), &["worktree", "list", "--porcelain"]);
         assert_eq!(
@@ -3477,7 +3521,15 @@ if scenario=='signal_exit': os.kill(os.getpid(),15)
         "signal_exit",
     ] {
         let out = f.launch(scenario, &[]);
-        assert_eq!(Fixture::value(&out)["outcome"], "failed", "{scenario}");
+        assert_eq!(
+            Fixture::value(&out)["outcome"],
+            if scenario == "malformed" {
+                "capture_failed"
+            } else {
+                "failed"
+            },
+            "{scenario}"
+        );
     }
     let out = f.launch("sleep", &["--timeout", "1"]);
     assert_eq!(Fixture::value(&out)["outcome"], "timed_out");

@@ -768,7 +768,9 @@ print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
         let service = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            // The request follows real CLI preflight and process startup; this is
+            // a bounded fixture wait, not the service response timeout.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -922,7 +924,9 @@ print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK
     let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
     let service = std::thread::spawn(move || {
         for success in [true, false] {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            // The request follows real CLI preflight and process startup; this is
+            // a bounded fixture wait, not the service response timeout.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,

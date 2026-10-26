@@ -2,6 +2,11 @@ use ahu_harness_native::call;
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::{fs, path::PathBuf};
+const KIRO_AVAILABLE: &str = r#"
+if [ "$1" = whoami ]; then printf '%s\n' '{"accountType":"SocialGitHub"}'; exit 0; fi
+if [ "$3" = --list-models ]; then printf '%s\n' '{"models":[{"model_id":"claude-sonnet-4.5"}]}'; exit 0; fi
+exit 99
+"#;
 struct Fixture {
     _tmp: tempfile::TempDir,
     root: PathBuf,
@@ -221,7 +226,7 @@ fn opencode_identity_is_explicitly_routed_or_unsupported() {
 }
 #[test]
 fn admission_distinguishes_unknown_hooks_work_mode_and_guarded_controls() {
-    let f = Fixture::new("exit 99");
+    let f = Fixture::new(KIRO_AVAILABLE);
     let mut p = f.admission();
     let clean = call("kiro", "admission", &p).unwrap();
     assert_eq!(clean["allowed"], true);
@@ -429,7 +434,7 @@ fn ollama_cloud_route_uses_explicit_loopback_identity_with_no_raw_output() {
 }
 #[test]
 fn kiro_declarative_agents_are_accepted_but_executable_unknown_fields_refuse() {
-    let f = Fixture::new("exit 99");
+    let f = Fixture::new(KIRO_AVAILABLE);
     fs::create_dir_all(f.root.join(".kiro/agents")).unwrap();
     let path = f.root.join(".kiro/agents/reviewer.json");
     fs::write(
@@ -650,7 +655,7 @@ exit 7
 
 #[test]
 fn kiro_unknown_headless_version_does_not_gain_admission() {
-    let f = Fixture::new("exit 1");
+    let f = Fixture::new(KIRO_AVAILABLE);
     let mut params = f.admission();
     params["version"] = json!("kiro-cli 2.34.0");
     let result = call("kiro", "admission", &params).unwrap();

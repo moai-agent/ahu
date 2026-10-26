@@ -30,7 +30,7 @@ impl Capture {
         // A durable attempt result can precede the supervisor's final exporter
         // flush. Wait for receipt rather than equating result-file readiness
         // with telemetry delivery.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let count = self
                 .exports
@@ -161,7 +161,7 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AttributeV
 
 #[test]
 fn plugin_invocation_exports_payload_free_release_attributed_span() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_native();
     repo.init_config();
     let staging = tempfile::tempdir().unwrap();
     let package = common::stage_text_stats(&staging.path().canonicalize().unwrap(), None);
@@ -280,7 +280,7 @@ fn string_attribute(attributes: &[KeyValue], key: &str) -> Option<String> {
 #[test]
 fn release_and_accounting_survive_otlp_export_and_resume_environment_drift() {
     use std::os::unix::fs::PermissionsExt;
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_native();
     repo.init_config();
     repo.add_agent_on("worker", "1.0.0", "claude-code", "claude-opus-5");
     repo.commit("OTLP fixture");
@@ -329,6 +329,12 @@ if os.environ.get('DUPLICATE_RESULT')=='1': print(json.dumps(result),flush=True)
             .env_remove("CLAUDE_CONFIG_DIR");
         command
     };
+    let locked = command().args(["lock", "--update"]).output().unwrap();
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
     let first = command()
         .env(
             "OTEL_RESOURCE_ATTRIBUTES",
@@ -447,6 +453,12 @@ if os.environ.get('DUPLICATE_RESULT')=='1': print(json.dumps(result),flush=True)
     // and a repeated current completion must not increase the observed credits.
     repo.add_agent_on("worker", "1.0.0", "kiro", "claude-sonnet-4.5");
     repo.commit("Kiro OTLP fixture");
+    let locked = command().args(["lock", "--update"]).output().unwrap();
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
     let kiro = bin.join("kiro-cli");
     std::fs::write(&kiro, r#"#!/usr/bin/env python3
 import sys,json
@@ -499,15 +511,15 @@ emit('runFinished',{'sessionId':'sess_fixture','status':'success','stopReason':'
     assert_eq!(runs.len(), 1);
     let attributes = &runs[0].attributes;
     assert_eq!(
-        attribute(attributes, "ahu.kiro.credits.observed"),
+        attribute(attributes, "ahu.metering.credits.observed"),
         Some(&AttributeValue::DoubleValue(0.25))
     );
     assert_eq!(
-        string_attribute(attributes, "ahu.kiro.credits.unit").as_deref(),
+        string_attribute(attributes, "ahu.metering.credits.unit").as_deref(),
         Some("credit")
     );
     assert_eq!(
-        string_attribute(attributes, "ahu.kiro.credits.coverage").as_deref(),
+        string_attribute(attributes, "ahu.metering.credits.coverage").as_deref(),
         Some("partial")
     );
     assert_eq!(
@@ -515,7 +527,7 @@ emit('runFinished',{'sessionId':'sess_fixture','status':'success','stopReason':'
         Some("unavailable")
     );
     assert_eq!(
-        attribute(attributes, "ahu.kiro.duplicate_completions"),
+        attribute(attributes, "ahu.metering.duplicate_completions"),
         Some(&AttributeValue::IntValue(1))
     );
     assert!(attribute(attributes, "ahu.cost.harness_reported_usd").is_none());
@@ -525,7 +537,7 @@ emit('runFinished',{'sessionId':'sess_fixture','status':'success','stopReason':'
 #[test]
 fn broker_root_dispatch_and_causal_tracing_propagation() {
     use std::os::unix::fs::PermissionsExt;
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_native();
     repo.init_config();
     repo.add_agent_on("root-worker", "1.0.0", "claude-code", "claude-opus-5");
     repo.add_agent_on("child-worker", "1.0.0", "claude-code", "claude-opus-5");
@@ -588,6 +600,12 @@ print(json.dumps(result),flush=True)
         command
     };
 
+    let locked = command().args(["lock", "--update"]).output().unwrap();
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
     let output = command()
         .env(
             "OTEL_RESOURCE_ATTRIBUTES",

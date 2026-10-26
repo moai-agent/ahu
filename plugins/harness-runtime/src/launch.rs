@@ -119,8 +119,9 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
                 if r.session.is_none() {
                     add(&["--color", "never"]);
                 }
-                if !r.work_mode && ["0.157.1", "0.160.0"].contains(&r.native_version.as_str()) {
-                    let id = format!("codex-{}-effective-guarded-hooks-v1", r.native_version);
+                if !r.work_mode && ["0.157.1", "0.160.0"].contains(&version) {
+                    let id =
+                        format!("native.isolation.codex-{version}-effective-guarded-hooks-v1=flag");
                     if !r.native_controls.contains(&id) {
                         return Err(());
                     }
@@ -163,10 +164,10 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
                     "none",
                 ]);
                 if !r.work_mode {
-                    let id = format!("claude-{}-nonmanaged-hooks-disabled-v1", r.native_version);
-                    if ["2.1.283", "2.1.288", "2.1.289", "2.1.302"]
-                        .contains(&r.native_version.as_str())
-                    {
+                    let id = format!(
+                        "native.isolation.claude-{version}-nonmanaged-hooks-disabled-v1=flag"
+                    );
+                    if ["2.1.283", "2.1.288", "2.1.289", "2.1.302"].contains(&version) {
                         if !r.native_controls.contains(&id) {
                             return Err(());
                         }
@@ -381,6 +382,29 @@ mod tests {
             let v2 = v.contains("v2.");
             assert_eq!(args.contains(&json!("--standalone")), v2);
             assert_eq!(args.contains(&json!("--dir")), !v2);
+        }
+    }
+    #[test]
+    fn decorated_versions_require_the_frozen_native_control() {
+        for (harness, version, control) in [
+            (
+                "codex",
+                "codex-cli v0.160.0",
+                "native.isolation.codex-0.160.0-effective-guarded-hooks-v1=flag",
+            ),
+            (
+                "claude-code",
+                "2.1.288 (Claude Code)",
+                "native.isolation.claude-2.1.288-nonmanaged-hooks-disabled-v1=flag",
+            ),
+        ] {
+            let mut request = params("headless", version, "exact-model");
+            request["work_mode"] = json!(false);
+            assert!(plan(harness, request.clone()).is_err());
+            request["native_controls"] = json!([control]);
+            assert!(plan(harness, request.clone()).is_ok());
+            request["native_controls"] = json!(["unrelated-control"]);
+            assert!(plan(harness, request).is_err());
         }
     }
     #[test]
