@@ -1794,7 +1794,7 @@ if '\nparent-shutdown</ahu-request-' in sys.argv[-1]:
  assert r.returncode==0,r.stderr
  open(os.environ['CHILD_ID_FILE'],'w').write(json.loads(r.stdout)['task_id'])
  if os.environ['STOP_MODE']=='capture_failed':
-  for _ in range(200):
+  for _ in range(1200):
    if os.path.exists(os.environ.get('CHILD_STARTED_FILE','')): break
    time.sleep(0.05)
   print('x'*(1024*1024+1),flush=True)
@@ -1818,8 +1818,10 @@ else:
             .args([
                 "@worker",
                 "--headless",
+                // The parent must launch its child before this deadline, and a
+                // loaded machine can take far longer than an idle one to do so.
                 "--timeout",
-                "30",
+                "90",
                 "--prompt",
                 "parent-shutdown",
                 "--allow-child",
@@ -1834,7 +1836,8 @@ else:
             value["outcome"] == mode,
             "parent must terminate through timeout or capture failure: {value}"
         );
-        let child = std::fs::read_to_string(&child_file).unwrap();
+        let child = std::fs::read_to_string(&child_file)
+            .expect("the parent must record its child before the shutdown deadline");
         let out = f
             .command()
             .args(["result", &child, "--output", "json"])

@@ -411,7 +411,14 @@ fn readiness_with_probe(
     };
     let identity = match probe_identity(harness, &repo.root) {
         Ok(identity) => identity,
-        Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
+        Err(error) => {
+            let mut value = readiness_error(harness, model, "unavailable", "unavailable");
+            // Only a closed vocabulary is ever added; provider text never is.
+            if let Some(cause) = crate::harness_runtime::HealthCause::of(&error) {
+                value["cause"] = json!(cause.as_str());
+            }
+            return value;
+        }
     };
     let binding_harness = identity.harness.as_str();
     let Some(bindings) = bindings.filter(|bindings| !bindings.profiles.is_empty()) else {

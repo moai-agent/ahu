@@ -41,6 +41,12 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
+
+    /// Attach a typed cause that callers can recover with `downcast_ref`.
+    pub fn with_cause(mut self, cause: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.cause = Some(Box::new(cause));
+        self
+    }
 }
 
 impl fmt::Display for Error {

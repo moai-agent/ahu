@@ -14,6 +14,33 @@ pub use transport::Session;
 mod generic;
 mod transport;
 
+/// Closed, actionable causes a harness plugin can report for a health failure.
+/// Recover one from an error with `HealthCause::of`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthCause {
+    NeedsNativeTrust,
+    NotSignedIn,
+}
+impl HealthCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsNativeTrust => "needs_native_trust",
+            Self::NotSignedIn => "not_signed_in",
+        }
+    }
+    pub fn of(error: &Error) -> Option<Self> {
+        std::error::Error::source(error)?
+            .downcast_ref::<Self>()
+            .copied()
+    }
+}
+impl std::fmt::Display for HealthCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl std::error::Error for HealthCause {}
+
 struct Prepared {
     repo: Repo,
     binding: Binding,

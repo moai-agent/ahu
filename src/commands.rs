@@ -430,11 +430,23 @@ fn auth_readiness_summary(status: &serde_json::Value) -> (&'static str, bool, bo
             false,
             true,
         ),
-        _ => (
-            "account readiness unavailable; launch checks still apply",
-            false,
-            true,
-        ),
+        _ => match status.get("cause").and_then(serde_json::Value::as_str) {
+            Some("needs_native_trust") => (
+                "account readiness unavailable: the native CLI awaits its folder-trust decision here; open it in this checkout once",
+                false,
+                true,
+            ),
+            Some("not_signed_in") => (
+                "account readiness unavailable: the native CLI is not signed in",
+                false,
+                true,
+            ),
+            _ => (
+                "account readiness unavailable; launch checks still apply",
+                false,
+                true,
+            ),
+        },
     }
 }
 
@@ -636,6 +648,22 @@ pub fn doctor_with_options(
         console.say(&format!(
             "harness      {} {status}\n",
             display_safe(harness)
+        ))?;
+    }
+    // Installed runtimes no agent uses are still part of the picture, notably
+    // generic MCP-only harnesses that have no agent of their own.
+    for descriptor in registry
+        .iter()
+        .filter(|descriptor| !project_harnesses.contains(&descriptor.id))
+    {
+        let kind = if descriptor.capabilities.iter().any(|c| c == "mcp-only") {
+            " (MCP-only, driven by core)"
+        } else {
+            ""
+        };
+        console.say(&format!(
+            "harness      {} installed{kind}; no registered agent uses it\n",
+            display_safe(&descriptor.id)
         ))?;
     }
 

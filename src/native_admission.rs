@@ -195,6 +195,25 @@ pub fn render(status: &Status) -> String {
     text
 }
 
+/// Admission validly declined this launch. Say so, with the plugin's bounded
+/// reasons, instead of reporting it as missing or malformed evidence.
+fn refusal(harness: &str, status: &Status) -> Error {
+    let reasons: Vec<String> = status
+        .headless
+        .reasons
+        .iter()
+        .take(3)
+        .map(|reason| display_safe(&reason.chars().take(200).collect::<String>()))
+        .collect();
+    let reasons = if reasons.is_empty() {
+        "no reason reported".to_owned()
+    } else {
+        reasons.join("; ")
+    };
+    Error::new(format!(
+        "native admission refused this {harness} launch: {reasons}. Run `ahu doctor` for the evidence; explicit --work-mode bypasses admission and reports the gaps"
+    ))
+}
 fn invalid() -> Error {
     Error::new("native admission is unavailable or returned invalid evidence")
 }
@@ -264,12 +283,13 @@ fn validate(value: Value, harness: &str, require_allowed: bool) -> Result<Status
             .contains(&response.guarded_checks.as_str())
         || (!response.helper_profile.is_null() && !response.helper_profile.is_object())
         || (!response.invocation_profile.is_null() && !response.invocation_profile.is_object())
-        || (require_allowed
-            && (!response.allowed
-                || !status.headless.allowed
-                || response.guarded_checks != "inspected"))
     {
         return Err(invalid());
+    }
+    if require_allowed
+        && (!response.allowed || !status.headless.allowed || response.guarded_checks != "inspected")
+    {
+        return Err(refusal(harness, &status));
     }
     for component in &status.components {
         if component.evidence.len() > 1024
@@ -316,7 +336,10 @@ pub fn validate_launch(
         || result.get("decision") != Some(&json!("admitted"))
         || result.get("guarded_checks") != Some(&json!("inspected"))
     {
-        return Err(invalid());
+        // A well-formed refusal gets its reasons; anything else stays invalid.
+        return Err(validate(result, harness, true)
+            .err()
+            .unwrap_or_else(invalid));
     }
     // Interactive disclosure may report headless refusal without denying an
     // independently validated interactive invocation.
@@ -371,5 +394,22 @@ mod tests {
         let value = json!({"allowed":true,"decision":"admitted","guarded_checks":"inspected","conformance":"untested","evidence":status,"helper_profile":null,"invocation_profile":null});
         assert!(validate(value.clone(), "other", false).is_err());
         assert!(validate(value, "invented", true).is_err());
+    }
+
+    #[test]
+    fn a_wellformed_refusal_names_its_reasons_instead_of_invalid_evidence() {
+        let status = unknown("invented");
+        let value = json!({"allowed":false,"decision":"refused","guarded_checks":"inspected","conformance":"untested","evidence":status,"helper_profile":null,"invocation_profile":null});
+        let message = validate(value, "invented", true).unwrap_err().to_string();
+        assert!(
+            message.contains("refused this invented launch"),
+            "{message}"
+        );
+        assert!(
+            message.contains("native admission unavailable"),
+            "{message}"
+        );
+        assert!(message.contains("--work-mode"), "{message}");
+        assert!(!message.contains("invalid evidence"), "{message}");
     }
 }
