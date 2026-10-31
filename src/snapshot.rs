@@ -72,20 +72,19 @@ impl ContextPaths {
         {
             return false;
         }
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            // Only the repository's own ignore rules count; a per-user global
-            // excludes file must not change a lock that is committed and shared.
-            .args(["-c", "core.excludesFile=/dev/null"])
-            .args(["check-ignore", "-q", "--"])
-            // A trailing slash names a directory even before it exists.
-            .arg(format!("{}/", relative.display()))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+        // The crate's own runner resolves Git outside every repository and drops
+        // the ambient environment, including per-user global excludes.
+        crate::git::run(
+            root,
+            &[
+                "check-ignore",
+                "-q",
+                "--",
+                // A trailing slash names a directory even before it exists.
+                &format!("{}/", relative.display()),
+            ],
+        )
+        .is_ok_and(|output| output.status.success())
     }
     fn recognizes(&self, relative: &Path) -> bool {
         if relative == Path::new(crate::context_lock::LOCK_PATH)
