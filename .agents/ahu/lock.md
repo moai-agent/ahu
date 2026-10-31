@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 2c37dc8949460fb8d76b42555f71573c64204e05c4bff76ea71650284743dd3d
+  digest: b6f37a8a8185b3e025ec0718d6b6160f1b8bcccc10520072c70ba33ad76e362b
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -99,23 +99,23 @@ ahu:
     executable: false
     path: .agents/ahu/config.md
   - bytes: 553
-    digest: 34259dd99fc5b650adb553d1465e0fdf96b8ed759970da0057a20085d2796ca6
+    digest: 01633f956a9dde33c149b9502f3fa2aef97467bb017b491319bd68f94a59e68e
     executable: false
     path: .agents/ahu/plugins/harness-antigravity.md
   - bytes: 553
-    digest: 74eb3c059f1831489479a0de38ebce2b37fb780c1ed26eb4532976948bdcb3ee
+    digest: 28c1c7dac8a0da125fda39b5ade60a29d82d00e92f84029f4f8ebe987785d914
     executable: false
     path: .agents/ahu/plugins/harness-claude-code.md
   - bytes: 541
-    digest: b15ba14681f1a6d7de4ecf568cee662f9d9117c6c9d5bc7749ef4d9d254bf95c
+    digest: 24d8030c5728de6a9fc19675074bef3a9e070647695b20ec44ee810fe0b891e0
     executable: false
     path: .agents/ahu/plugins/harness-codex.md
   - bytes: 539
-    digest: 88ce72bd50f2bfb3fa0ef05a0bd7c4a802d4c7d1a266e5f66e81841d6144aa88
+    digest: 73e1a893f7a119ac32f6b34a58dc32eb77462917a5409232797d475dc1e93714
     executable: false
     path: .agents/ahu/plugins/harness-kiro.md
   - bytes: 547
-    digest: dbfb4fc6d7f23307acef93476e4d240f612283b61f8b713015c3bd02f5f41645
+    digest: 44cf307bd95d80e29067c595e0c3fdf4885ea699eb99982fc34abde976e48eeb
     executable: false
     path: .agents/ahu/plugins/harness-opencode.md
   - bytes: 117
