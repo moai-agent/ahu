@@ -1432,12 +1432,13 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         // Interactive task sessions are out of scope: the coordinator is the
         // entry point and delegated tasks run headless. Only a preview of the
         // launch remains available while the interactive code is retired.
+        let launch = parse_launch(&filtered, stdin_available)?;
         if !requested_dry_run {
             bail!(kind: crate::util::ErrorKind::Usage,
                 "interactive task sessions are no longer supported; delegated tasks run headless. Add --headless (or --work-mode), or talk to a coordinator (ahu claude, ahu codex, ahu agy) and let it delegate"
             );
         }
-        return parse_launch(&filtered, stdin_available);
+        return Ok(launch);
     }
     // Let the existing parser enforce prompt exclusivity and all shared flags.
     if !requested_dry_run {

@@ -5,6 +5,13 @@
 reference. The [MCP protocol details](mcp-protocol.md) describe tool contracts
 and transport. Run `ahu explain` for the built-in architecture overview.
 
+> **Scope change.** Interactive task sessions are retired. The coordinator
+> (`ahu claude`, `ahu codex`, `ahu agy`, or a desktop app connected to
+> `ahu mcp serve`) is the entry point, and delegated tasks run headless. A launch
+> without `--headless` or `--work-mode` is refused; `--dry-run` previews remain.
+> Sections below that describe interactive launches, the interactive launcher and
+> terminal session hosts describe behavior that is being removed in stages.
+
 ## Repository and task selection
 
 `ahu --repo /path/to/project <command>` selects the checkout before parsing the

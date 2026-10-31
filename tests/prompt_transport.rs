@@ -94,14 +94,19 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
     std::fs::write(&path, &prompt).unwrap();
     let cases = [
         (
-            vec!["@reviewer", "--prompt-file", path.to_str().unwrap()],
+            vec![
+                "@reviewer",
+                "--prompt-file",
+                path.to_str().unwrap(),
+                "--dry-run",
+            ],
             "unused stdin",
         ),
         (
-            vec!["@reviewer", "--prompt", prompt.as_str()],
+            vec!["@reviewer", "--prompt", prompt.as_str(), "--dry-run"],
             "unused stdin",
         ),
-        (vec!["@reviewer"], prompt.as_str()),
+        (vec!["@reviewer", "--dry-run"], prompt.as_str()),
     ];
     for (args, stdin) in cases {
         let Command::Launch { prompt: source, .. } = parse_with_stdin(args, true).unwrap() else {

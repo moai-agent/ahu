@@ -46,6 +46,7 @@ fn metadata_options_preserve_values_and_reject_duplicates() {
     let (args, color) = ahu::cli::extract_color(
         [
             "@sable",
+            "--dry-run",
             "--prompt",
             "assignment",
             "--title",
