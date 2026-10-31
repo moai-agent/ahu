@@ -75,7 +75,9 @@ fn repo_with_widened_agent(permissions: &str) -> TestRepo {
 fn launch_refuses_to_widen_approvals_without_an_explicit_opt_in() {
     for permissions in ["auto", "accept-edits"] {
         let repo = repo_with_widened_agent(permissions);
-        let output = launch(&repo, &[]);
+        // Interactive task sessions are retired, so the gate is exercised on the
+        // launch preview, which still enforces it.
+        let output = launch(&repo, &["--dry-run"]);
 
         assert!(
             !output.status.success(),
@@ -126,25 +128,10 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
     );
 }
 
-/// With the opt-in, the launch proceeds. A provider-free build starts the
-/// configured harness in the current terminal; the optional cmux build fails
-/// only because its explicitly selected executable is unavailable.
+/// With the opt-in, the launch preview proceeds.
 #[test]
 fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     let repo = repo_with_widened_agent("auto");
-    let output = launch(&repo, &["--allow-widened-approvals"]);
-    assert!(
-        output.status.success(),
-        "terminal default must proceed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
-    assert!(argv.contains("--auto\n"), "{argv}");
-    // This installed fixture declares no native trust capability.
-    assert!(!repo.state_path().join("home/.claude.json").exists());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("permissions = auto"), "{stdout}");
-    assert!(!stdout.contains("--auto"), "{stdout}");
     let preview = launch(&repo, &["--allow-widened-approvals", "--dry-run"]);
     assert!(preview.status.success());
     let details = String::from_utf8_lossy(&preview.stdout);
@@ -152,14 +139,21 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(
-        ahu::cli::parse(["@deploy", "--prompt-file", "p", "--allow-widened-approvals",]).unwrap(),
+        ahu::cli::parse([
+            "@deploy",
+            "--prompt-file",
+            "p",
+            "--dry-run",
+            "--allow-widened-approvals",
+        ])
+        .unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: true,
             ..
         }
     ));
     assert!(matches!(
-        ahu::cli::parse(["@deploy", "--prompt-file", "p"]).unwrap(),
+        ahu::cli::parse(["@deploy", "--prompt-file", "p", "--dry-run"]).unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: false,
             ..

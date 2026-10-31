@@ -1429,6 +1429,14 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         if options != crate::headless::Options::default() {
             bail!("batch options require --headless");
         }
+        // Interactive task sessions are out of scope: the coordinator is the
+        // entry point and delegated tasks run headless. Only a preview of the
+        // launch remains available while the interactive code is retired.
+        if !requested_dry_run {
+            bail!(kind: crate::util::ErrorKind::Usage,
+                "interactive task sessions are no longer supported; delegated tasks run headless. Add --headless (or --work-mode), or talk to a coordinator (ahu claude, ahu codex, ahu agy) and let it delegate"
+            );
+        }
         return parse_launch(&filtered, stdin_available);
     }
     // Let the existing parser enforce prompt exclusivity and all shared flags.
@@ -2877,8 +2885,8 @@ mod direct_agent_tests {
     #[test]
     fn direct_agent_syntax_accepts_positional_prompt() {
         for args in [
-            vec!["@dev-glm", "fix", "the", "parser"],
-            vec!["@dev-glm", "--prompt", "fix the parser"],
+            vec!["@dev-glm", "fix", "the", "parser", "--dry-run"],
+            vec!["@dev-glm", "--prompt", "fix the parser", "--dry-run"],
         ] {
             let Command::Launch {
                 agent,
@@ -2902,17 +2910,39 @@ mod direct_agent_tests {
                 agent: Some("dev-glm".into()),
             }
         );
+        // A piped prompt would start an interactive task session, which is
+        // retired; only the preview remains.
+        assert!(
+            parse_with_stdin(["@dev-glm"], true)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer supported")
+        );
         assert_eq!(
-            parse_with_stdin(["@dev-glm"], true).unwrap(),
+            parse_with_stdin(["@dev-glm", "--dry-run"], true).unwrap(),
             Command::Launch {
                 agent: "dev-glm".into(),
                 prompt: PromptSource::Stdin,
                 display: crate::launch::DisplayMetadata::default(),
                 output_json: false,
-                dry_run: false,
+                dry_run: true,
                 allow_widened_approvals: false,
             }
         );
+    }
+
+    #[test]
+    fn interactive_task_launches_are_refused_but_previews_and_headless_remain() {
+        let refused = parse(["@dev-glm", "--prompt", "fix it"]).unwrap_err();
+        assert!(
+            refused.to_string().contains("no longer supported"),
+            "{refused}"
+        );
+        assert!(parse(["@dev-glm", "--prompt", "fix it", "--dry-run"]).is_ok());
+        assert!(matches!(
+            parse(["@dev-glm", "--prompt", "fix it", "--headless"]).unwrap(),
+            Command::HeadlessLaunch { .. }
+        ));
     }
 
     #[test]
