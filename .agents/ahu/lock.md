@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: c5670a3d082391c4246c64ba380e5fb70aaeb2952d8c5e3bdaa7317065d998a5
+  digest: a0f3b3506008633caaa211c2dca30ff620fdc4293988ffef79da6ed388eb251f
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -98,12 +98,12 @@ ahu:
     digest: b4898ea8c56ba185f9b99731fcecca90effaf4088612cb7f42cf09f0f24f98b1
     executable: false
     path: .agents/ahu/config.md
-  - bytes: 522
-    digest: 01935c8260af9d7328e0681c016372371f92c811335d72db1e9f085f454d3482
+  - bytes: 538
+    digest: 60577b1425f1db6b804dac9eaccba2a71c773ed8195886e596a9918e9a6f98bb
     executable: false
     path: .agents/ahu/plugins/harness-antigravity.md
-  - bytes: 522
-    digest: 24a43f8ce4914888f029f004fd4e81a7329da496abb313add228db6d5b37a167
+  - bytes: 538
+    digest: c0025bf6c453f209b91925daebf140b02273dc5a341cb0862c4922997653c807
     executable: false
     path: .agents/ahu/plugins/harness-claude-code.md
   - bytes: 117
@@ -138,6 +138,10 @@ ahu:
     digest: 129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609
     executable: false
     path: .agents/skills/discover-requirements/SKILL.md
+  - bytes: 117
+    digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
+    executable: false
+    path: .mcp.json
   - bytes: 7702
     digest: b2614b5a5d9d7792f0a964f303e5e7ca94ba951362b110ec8f9a559263fa2b4c
     executable: false
