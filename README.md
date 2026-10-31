@@ -1,8 +1,10 @@
 # ahu
 
-Launch repository-defined coding agents in fresh Git worktrees, interactively
-in the current terminal or an optional session-host plugin, or unattended in headless mode. Agent manifests pin the harness and
-model; ahu previews the configuration, delivers instructions, and records the launch.
+Launch repository-defined coding agents in fresh Git worktrees, unattended in
+headless mode, from a coordinator session in the harness you already use. Agent
+manifests pin the harness and model; ahu previews the configuration, delivers
+instructions, and records the launch. Interactive task sessions are not supported:
+talk to the coordinator and let it delegate.
 
 ## Install
 

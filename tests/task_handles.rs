@@ -111,7 +111,14 @@ fn names_are_bounded_and_cannot_be_paths_or_options() {
         assert!(handles::name(&handles::generated_name(title)).is_ok());
     }
     for args in [
-        vec!["@worker", "--name", "@short", "--prompt", "work"],
+        vec![
+            "@worker",
+            "--name",
+            "@short",
+            "--prompt",
+            "work",
+            "--dry-run",
+        ],
         vec![
             "@worker",
             "--headless",
