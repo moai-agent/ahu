@@ -1,5 +1,19 @@
 # Rust harness plugins
 
+## Vocabulary
+
+A **harness** is the vendor's CLI (Claude Code, Codex, Antigravity, OpenCode,
+Kiro): it runs the agent loop and owns the conversation. A **harness plugin** is
+ahu's installed Rust wrapper around one harness; it manages and health-checks
+that harness in the context of ahu and exposes native behavior that is not
+available over MCP. A **native agent** is an agent built for one harness and run
+only in it. ahu refuses to run a native agent in another harness or with a model
+that has not been admitted for it.
+
+Any harness that supports MCP can use ahu's agents, tasks and skills through
+`ahu mcp serve` without a plugin. A plugin adds launch, setup, health, admission
+and event observation for that harness.
+
 ahu delegates native harness integration to installed Rust executables. Core owns
 agent identity, task and worktree state, process supervision, MCP coordination,
 context locking, and acceptance of eval evidence. Plugins own native command
@@ -31,7 +45,13 @@ Build the selected package from this checkout using an external build directory:
 CARGO_TARGET_DIR=/absolute/build/ahu-plugins cargo build --locked --release --manifest-path plugins/harness-codex/Cargo.toml
 ```
 
-Stage its manifest, Cargo metadata, README, license and security notice in a
+`scripts/install-harness-plugins.sh [harness ...]` performs the build, staging and
+pinning below for the listed harnesses (default: all five), and with `INSTALL=1`
+also installs and enables them and refreshes the lock. It leaves the bindings and
+lock uncommitted for review. Bump a package's version whenever its content changes;
+a binding must name the exact version it pins.
+
+The manual steps follow. Stage its manifest, Cargo metadata, README, license and security notice in a
 separate package directory. Put the built `ahu-plugin-codex` binary at
 `bin/ahu-plugin-codex`, matching the runtime declaration. Do not put credentials,
 native configuration, execution traces or build caches in the staged package.
@@ -65,6 +85,15 @@ Harnesses are optional. Without a harness plugin, core commands remain available
 launching that harness reports the missing installed capability. A binding may
 use a package ID independent of the harness ID in its descriptor. Conflicting harness
 IDs, aliases and aliases colliding with core commands are refused.
+
+## Health diagnostics
+
+A plugin failure carries one fixed code, never free text. Besides `failed`,
+`invalid_input`, `unsupported` and `outcome_unknown`, two actionable causes are
+reported: `needs_native_trust` (the harness is waiting for its own folder-trust
+decision in this checkout; open it there interactively, because ahu never approves
+native trust) and `not_signed_in`. `ahu auth status` and launch refusals show the
+matching instruction.
 
 ## Native behavior and upgrades
 
