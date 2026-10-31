@@ -27,7 +27,9 @@ for h in "$@"; do
   if [ -f "$binding" ]; then
     # Re-pin an existing binding to the freshly staged content.
     digest=$("$ahu" plugins digest "$dest" | grep -oE '[0-9a-f]{64}' | tail -1)
-    sed -i.bak -E "s/^(    (revision|sha256): ).*/\1$digest/" "$binding"
+    version=$(sed -n '3s/^version = "\(.*\)"$/\1/p' "$src/Cargo.toml")
+    sed -i.bak -E -e "s/^(    (revision|sha256): ).*/\1$digest/" \
+      -e "s/^  version: .*/  version: $version/" "$binding"
     rm -f "$binding.bak"
   else
     AHU_PLUGIN_PATH=$path "$ahu" setup --harness-plugin "$dest"
