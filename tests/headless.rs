@@ -6,14 +6,45 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+/// Each fixture launches real supervisors, plugins and nested children, and the
+/// suite takes a quarter of an hour when libtest runs them all at once. Under that
+/// load, deadline-driven tests (shutdown, nested child launch) fail while passing
+/// alone. Cap how many fixtures are live at once instead of requiring a
+/// `--test-threads` flag from every caller.
+const LIVE_FIXTURES: usize = 4;
+static GATE: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+struct Permit;
+impl Permit {
+    fn acquire() -> Self {
+        let (live, wake) = &GATE;
+        let mut live = live.lock().unwrap_or_else(|e| e.into_inner());
+        while *live >= LIVE_FIXTURES {
+            live = wake.wait(live).unwrap_or_else(|e| e.into_inner());
+        }
+        *live += 1;
+        Self
+    }
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let (live, wake) = &GATE;
+        *live.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        wake.notify_one();
+    }
+}
+
 struct Fixture {
     repo: TestRepo,
     external: TempDir,
     bin: PathBuf,
+    // Last, so it is released only after the repository and temp dirs are gone.
+    _permit: Permit,
 }
 impl Fixture {
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
+        let permit = Permit::acquire();
         let repo = TestRepo::new_native();
         repo.init_config();
         repo.add_agent_on("worker", "1.0.0", "claude-code", "claude-opus-5");
@@ -120,6 +151,7 @@ if scenario=='nonzero': sys.exit(7)
             repo,
             external,
             bin,
+            _permit: permit,
         }
     }
     fn command(&self) -> Command {
