@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 5872e7e1dd100c582f5ae1a422e52c154dfd790240bb7e8bc7949b6ef5296b85
+  digest: c5670a3d082391c4246c64ba380e5fb70aaeb2952d8c5e3bdaa7317065d998a5
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -98,6 +98,14 @@ ahu:
     digest: b4898ea8c56ba185f9b99731fcecca90effaf4088612cb7f42cf09f0f24f98b1
     executable: false
     path: .agents/ahu/config.md
+  - bytes: 522
+    digest: 01935c8260af9d7328e0681c016372371f92c811335d72db1e9f085f454d3482
+    executable: false
+    path: .agents/ahu/plugins/harness-antigravity.md
+  - bytes: 522
+    digest: 24a43f8ce4914888f029f004fd4e81a7329da496abb313add228db6d5b37a167
+    executable: false
+    path: .agents/ahu/plugins/harness-claude-code.md
   - bytes: 117
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
@@ -187,10 +195,7 @@ ahu:
     executable: false
     path: evals/skill-selection/fixture/AGENTS.md
   schema_version: 1
-  skipped_directories:
-  - .ahu
-  - .worktrees
-  - target
+  skipped_directories: []
   symlinks: []
   unscanned_config: []
 okf_version: '0.2'
