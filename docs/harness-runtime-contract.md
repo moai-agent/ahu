@@ -43,6 +43,10 @@ and ID and contains exactly one of `result` or a fixed, non-sensitive `error`.
 Reject duplicate/unknown envelope fields, mismatched IDs, frames exceeding the byte limit,
 partial output and unsolicited frames. No raw frame is written to telemetry.
 
+A declaration without `path` is a generic harness: core itself answers `probe` and
+`launch` for direct sessions and no package code runs. See
+[harness plugins](harness-plugins.md).
+
 Operations are explicitly enumerated: `probe`, `models`, `launch`, `admission`,
 `setup`, `native_sources`, `auth`, `budget`, `trust_prepare`, `trust_cleanup`,
 `decode_start`, `decode_event`, `decode_finish`, and `recover`. Unsupported

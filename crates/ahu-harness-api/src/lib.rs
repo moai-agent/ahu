@@ -78,6 +78,9 @@ pub struct Descriptor {
 #[serde(deny_unknown_fields)]
 pub struct Declaration {
     pub protocol_version: u32,
+    /// Packaged executable. Empty declares a generic harness: core answers the
+    /// two operations below itself and no plugin code exists or runs.
+    #[serde(default)]
     pub path: String,
     pub timeout_ms: u64,
     pub descriptor: Descriptor,
@@ -186,7 +189,30 @@ impl Descriptor {
     }
 }
 impl Declaration {
+    /// A harness without a plugin, integrated only over MCP. Core supports a
+    /// direct interactive session and a version probe for it, nothing else.
+    pub fn is_generic(&self) -> bool {
+        self.path.is_empty()
+    }
+    fn generic_shape(&self) -> bool {
+        self.descriptor.modes == [Mode::Direct]
+            && self
+                .descriptor
+                .operations
+                .iter()
+                .all(|op| matches!(op, Operation::Probe | Operation::Launch))
+            && self.descriptor.capabilities == ["mcp-only"]
+    }
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.is_generic() {
+            if self.protocol_version != PROTOCOL_VERSION
+                || !(100..=30_000).contains(&self.timeout_ms)
+                || !self.generic_shape()
+            {
+                return Err(ValidationError);
+            }
+            return self.descriptor.validate();
+        }
         if self.protocol_version != PROTOCOL_VERSION
             || !(100..=30_000).contains(&self.timeout_ms)
             || self.path.len() > 1024
@@ -251,6 +277,35 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generic_declaration() -> Declaration {
+        serde_json::from_value(serde_json::json!({
+            "protocol_version": 1,
+            "timeout_ms": 5000,
+            "descriptor": {
+                "id": "sixth", "display_name": "Sixth", "program": "sixth",
+                "modes": ["direct"], "operations": ["probe", "launch"],
+                "capabilities": ["mcp-only"]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_generic_declaration_has_no_executable_and_a_narrow_shape() {
+        let declaration = generic_declaration();
+        assert!(declaration.is_generic());
+        assert!(declaration.validate().is_ok());
+        for mutate in [
+            |d: &mut Declaration| d.descriptor.modes = vec![Mode::Headless],
+            |d: &mut Declaration| d.descriptor.operations.push(Operation::Auth),
+            |d: &mut Declaration| d.descriptor.capabilities.clear(),
+        ] {
+            let mut invalid = generic_declaration();
+            mutate(&mut invalid);
+            assert!(invalid.validate().is_err());
+        }
+    }
 
     #[test]
     fn private_paths_are_bounded_relative_and_inside_declared_context() {

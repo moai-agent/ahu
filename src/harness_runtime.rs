@@ -11,6 +11,7 @@ use std::time::Duration;
 
 pub use ahu_harness_api::{Declaration, Descriptor, Mode, Operation};
 pub use transport::Session;
+mod generic;
 mod transport;
 
 struct Prepared {
@@ -67,7 +68,9 @@ fn verify_candidates(
             .validate()
             .map_err(|_| Error::new("invalid harness runtime declaration"))?;
         // Discovery checks executable metadata without running or snapshotting it.
-        local::package_executable(&package_root, &declaration.path)?;
+        if !declaration.is_generic() {
+            local::package_executable(&package_root, &declaration.path)?;
+        }
         candidates.push((binding, declaration));
     }
     crate::catalog::validate_runtime_descriptors(candidates.iter().map(|(_, d)| &d.descriptor))?;
@@ -122,12 +125,20 @@ pub fn load(repo: &Repo, harness: &str) -> Result<Runtime> {
                 "no enabled installed harness runtime for this identity; no built-in fallback",
             )
         })?;
-    let (snapshot, executable, timeout) = crate::plugin_exec::prepare_executable(
-        repo,
-        &binding,
-        &declaration.path,
-        declaration.timeout_ms,
-    )?;
+    let (snapshot, executable, timeout) = if declaration.is_generic() {
+        (
+            tempfile::tempdir()?,
+            PathBuf::new(),
+            Duration::from_millis(declaration.timeout_ms),
+        )
+    } else {
+        crate::plugin_exec::prepare_executable(
+            repo,
+            &binding,
+            &declaration.path,
+            declaration.timeout_ms,
+        )?
+    };
     let digest = crate::util::digest_bytes(&serde_json::to_vec(&(&binding, &declaration))?);
     Ok(Runtime {
         prepared: Arc::new(Prepared {
@@ -143,6 +154,10 @@ pub fn load(repo: &Repo, harness: &str) -> Result<Runtime> {
 }
 
 impl Runtime {
+    /// True for an MCP-only harness that core drives without any plugin code.
+    pub fn is_generic(&self) -> bool {
+        self.prepared.declaration.is_generic()
+    }
     pub fn descriptor(&self) -> &Descriptor {
         &self.prepared.declaration.descriptor
     }
@@ -154,6 +169,15 @@ impl Runtime {
     pub fn call(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         // Refuse invalid/unsupported operations before spawning any plugin code.
         self.prepared.operation(operation)?;
+        if self.prepared.declaration.is_generic() {
+            self.prepared.verify_current()?;
+            return generic::call(
+                &self.prepared.declaration.descriptor,
+                self.prepared.timeout,
+                operation,
+                &params,
+            );
+        }
         let mut session = self.open_stream()?;
         let result = session.call(operation, params)?;
         session.finish()?;
@@ -161,6 +185,9 @@ impl Runtime {
     }
     /// Persistent protocol peer for one decoder/attempt. Never reconnects or retries.
     pub fn open_stream(&self) -> Result<Session> {
+        if self.prepared.declaration.is_generic() {
+            return Err(Error::new("a generic harness has no runtime stream"));
+        }
         self.prepared.verify_current()?;
         Session::open(Arc::clone(&self.prepared))
     }

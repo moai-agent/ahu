@@ -28,7 +28,9 @@ fn declaration(package: &PluginStatus) -> Result<Option<Metadata>> {
             .as_deref()
             .and_then(Path::parent)
             .ok_or_else(|| Error::new("runtime package requires a manifest location"))?;
-        local::package_executable(root, &declaration.path)?;
+        if !declaration.is_generic() {
+            local::package_executable(root, &declaration.path)?;
+        }
         crate::catalog::validate_runtime_descriptors([&declaration.descriptor])?;
         return Ok(Some(Metadata {
             harness: declaration.descriptor.id,

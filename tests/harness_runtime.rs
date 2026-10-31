@@ -637,3 +637,26 @@ fn native_routing_forwards_only_declared_values_and_bounded_baseline() {
     assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
     assert!(!fixture.marker.exists());
 }
+
+#[test]
+fn generic_mcp_only_harness_is_driven_by_core_without_executing_package_code() {
+    let fixture = Fixture::new("", |declaration| {
+        declaration.as_object_mut().unwrap().remove("path");
+        let descriptor = &mut declaration["descriptor"];
+        descriptor["aliases"] = json!([]);
+        descriptor["models"] = json!([]);
+        descriptor["modes"] = json!(["direct"]);
+        descriptor["operations"] = json!(["probe", "launch"]);
+        descriptor["capabilities"] = json!(["mcp-only"]);
+    });
+    let runtime = fixture.load();
+    assert!(runtime.is_generic());
+    let plan = runtime.call("launch", json!({"mode": "direct"})).unwrap();
+    assert_eq!(plan["program"], "sixth-native");
+    assert_eq!(plan["args"], json!([]));
+    assert!(runtime.call("launch", json!({"mode": "headless"})).is_err());
+    // Declared operations only; a plugin-only operation is refused before any call.
+    assert!(runtime.call("models", json!({})).is_err());
+    assert!(runtime.open_stream().is_err());
+    assert!(!fixture.marker.exists(), "package code must never run");
+}

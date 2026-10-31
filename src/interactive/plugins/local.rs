@@ -407,7 +407,9 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         let spec: ahu_harness_api::Declaration = serde_json::from_value(value.clone())?;
         spec.validate()
             .map_err(|_| Error::new("invalid harness runtime declaration"))?;
-        validate_executable(&open_relative(&directory, &spec.path)?)?;
+        if !spec.is_generic() {
+            validate_executable(&open_relative(&directory, &spec.path)?)?;
+        }
     }
     let activation_blocker = if manifest.executable.is_some() {
         None

@@ -47,9 +47,16 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
     let ranked = loaded
         .as_ref()
         .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
-    let model = ranked.ok_or_else(|| {
-        Error::new("direct harness sessions require an exact project-ranked model; run ahu setup")
-    })?;
+    // A generic MCP-only harness has no model or admission concept to enforce.
+    let model = match ranked {
+        Some(model) => model,
+        None if runtime.is_generic() => "unmanaged".to_owned(),
+        None => {
+            return Err(Error::new(
+                "direct harness sessions require an exact project-ranked model; run ahu setup",
+            ));
+        }
+    };
     let version = selection::probe_runtime(repo, &runtime)?;
     crate::catalog::check_version(
         &version,
@@ -72,15 +79,17 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
-    crate::native_admission::validate_launch(
-        &repo.root,
-        harness,
-        &model,
-        crate::agent::Permissions::Auto,
-        "direct",
-        &version,
-        Path::new(&executable),
-    )?;
+    if !runtime.is_generic() {
+        crate::native_admission::validate_launch(
+            &repo.root,
+            harness,
+            &model,
+            crate::agent::Permissions::Auto,
+            "direct",
+            &version,
+            Path::new(&executable),
+        )?;
+    }
     crate::state::ensure_checkout_state(&repo.root)?;
     let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &plan)?;
     for note in placement.notes {

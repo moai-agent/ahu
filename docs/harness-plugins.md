@@ -86,6 +86,19 @@ launching that harness reports the missing installed capability. A binding may
 use a package ID independent of the harness ID in its descriptor. Conflicting harness
 IDs, aliases and aliases colliding with core commands are refused.
 
+## Harnesses without a plugin
+
+A package may declare `harness_runtime` with no `path`, modes `[direct]`,
+operations within `[probe, launch]` and the capability `mcp-only`. It contains no
+executable. Core answers `probe` (runs the declared program once with `--version`)
+and `launch` (a direct coordinator session, no arguments, no prompt). Models,
+admission, setup, health checks and event decoding need a real plugin, so such a
+harness has no model enforcement and its probe reports no reviewed compatibility.
+Register `ahu mcp serve` in the harness's own MCP configuration to use ahu's
+agents, tasks and skills. [`examples/mcp-only-harness`](../examples/mcp-only-harness/README.md)
+is a copyable package; it is bound, installed and granted like any other harness
+package, so it stays content-pinned and reviewed.
+
 ## Health diagnostics
 
 A plugin failure carries one fixed code, never free text. Besides `failed`,
