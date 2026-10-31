@@ -12,9 +12,28 @@ pub(crate) fn configure(command: &mut Command, home: &Path, environment: &crate:
     command
         .env_clear()
         .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .envs(environment)
-        .env("NO_COLOR", "1");
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    // Native CLIs such as Claude Code key credential-store lookups (the macOS
+    // keychain account) on USER; without it they report a signed-in account as
+    // logged out. The name comes from the account database, never ambient env.
+    if let Some(name) = login_name() {
+        command.env("USER", &name).env("LOGNAME", name);
+    }
+    command.envs(environment).env("NO_COLOR", "1");
+}
+fn login_name() -> Option<String> {
+    // SAFETY: getpwuid returns null or a pointer to static storage; it is read
+    // and copied immediately, before any other call can invalidate it.
+    unsafe {
+        let entry = libc::getpwuid(libc::geteuid());
+        if entry.is_null() || (*entry).pw_name.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*entry).pw_name)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
 }
 pub(crate) fn signal_group(id: u32, signal: i32) {
     if let Ok(id) = i32::try_from(id) {
