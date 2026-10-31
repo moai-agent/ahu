@@ -55,7 +55,6 @@ pub fn validate_runtime_descriptors<'a>(
         "resume",
         "cleanup",
         "remove",
-        "focus",
         "message",
         "launch",
         "version",

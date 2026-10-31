@@ -872,58 +872,6 @@ fn an_unreadable_record_whose_worktree_is_gone_says_so() {
     );
 }
 
-/// `ahu focus` must not report a task as nonexistent when its record is merely
-/// unreadable.
-#[test]
-fn focus_distinguishes_an_unreadable_task_from_a_missing_one() {
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.commit("fixture");
-    let dir = tasks_dir(&repo);
-    write_schema_1(&dir, "006aa50000000000f1");
-
-    let discovered = ahu::git::discover(repo.path()).unwrap();
-
-    // The task exists; ahu just cannot read its record.
-    let (_, text) = scripted(&repo, |console| {
-        ahu::commands::focus(console, &discovered, "006aa50000000000f1")
-    });
-    assert!(
-        text.contains("exists but ahu cannot read its record"),
-        "{text}"
-    );
-    assert!(text.contains("schema version (1)"), "{text}");
-    assert!(text.contains("Run `ahu tasks`"), "{text}");
-    assert!(
-        !text.contains("no task matching"),
-        "an unreadable task is not a missing one: {text}"
-    );
-
-    // A genuinely absent id still says so — and mentions that other records
-    // could not be read, so "not found" is not mistaken for "nothing here".
-    let (_, text) = scripted(&repo, |console| {
-        ahu::commands::focus(console, &discovered, "006aa5000000000099")
-    });
-    assert!(text.contains("no readable task matching"), "{text}");
-    assert!(text.contains("could not be read either"), "{text}");
-}
-
-/// With no unreadable records at all, `focus` keeps its original message.
-#[test]
-fn focus_on_a_clean_repository_still_reports_a_missing_task_plainly() {
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.commit("fixture");
-    tasks_dir(&repo);
-
-    let discovered = ahu::git::discover(repo.path()).unwrap();
-    let (_, text) = scripted(&repo, |console| {
-        ahu::commands::focus(console, &discovered, "006aa5000000000099")
-    });
-    assert!(text.contains("no task matching"), "{text}");
-    assert!(!text.contains("could not be read"), "{text}");
-}
-
 /// `task::list` is the layer the bug lived in: assert its contract directly.
 #[test]
 fn list_carries_what_it_could_not_read() {

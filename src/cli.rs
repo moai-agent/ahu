@@ -68,7 +68,6 @@ Commands:
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
-  focus <task-id>       Focus a task through its recorded session-host plugin
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
                         Append an operator message; subsequent flags are literal text
@@ -264,7 +263,7 @@ Commands:
   approve|reject ID     Resolve a task's pending MCP approval request
   resume ID --prompt-file PATH
   cleanup|remove ID     Clean headless captures or remove a terminal task
-  focus|message ID ...  Focus a task or send it a message
+  message ID ...        Send a task a message
   eval run|report       Run and compare local agent evaluations
   migrate               Preview/apply the explicit shared-policy format migration
   knowledge lint        Check configured OKF bundles
@@ -320,7 +319,6 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
-        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task to the front through its recorded session-host plugin.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
@@ -470,9 +468,6 @@ pub enum Command {
     Task {
         task_id: String,
         output_json: bool,
-    },
-    Focus {
-        task_id: String,
     },
     Remove {
         task_id: String,
@@ -893,14 +888,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 task_id,
                 output_json,
             })
-        }
-        "focus" => {
-            let task_id = args
-                .get(1)
-                .cloned()
-                .ok_or_else(|| crate::util::Error::new("`ahu focus` needs a task id."))?;
-            expect_no_more(&args[2..])?;
-            Ok(Command::Focus { task_id })
         }
         "remove" => {
             let task_id = args
@@ -2768,7 +2755,6 @@ mod focused_help_tests {
             "approve",
             "reject",
             "resume",
-            "focus",
             "remove",
             "message",
             "auth",

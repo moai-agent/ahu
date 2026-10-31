@@ -1403,7 +1403,7 @@ enum Located {
     Listing(PathBuf, task::TaskRecord),
     Pointer(crate::task_index::Entry, PathBuf, task::TaskRecord),
     Unreadable(task::UnreadableTask),
-    NoMatch { unreadable_in_repo: usize },
+    NoMatch,
 }
 
 /// Load the record behind a task index entry, refusing stale or hostile
@@ -1534,7 +1534,6 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
     if let Some(blocked) = listing.unreadable.iter().find(|u| u.task_id == id) {
         return Ok(Located::Unreadable(blocked.clone()));
     }
-    let unreadable_in_repo = listing.unreadable.len();
     let records: Vec<_> = listing
         .records
         .into_iter()
@@ -1594,7 +1593,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
         let (dir, record) = load_indexed_task(entry)?;
         return Ok(Located::Pointer(entry.clone(), dir, record));
     }
-    Ok(Located::NoMatch { unreadable_in_repo })
+    Ok(Located::NoMatch)
 }
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
@@ -1643,7 +1642,7 @@ pub(crate) fn resolve_inspection(repo: &Repo, id: &str) -> Result<(PathBuf, task
     match resolve_task(repo, id)? {
         Located::Listing(dir, record) | Located::Pointer(_, dir, record) => Ok((dir, record)),
         Located::Unreadable(blocked) => Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
+        Located::NoMatch => {
             bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
         }
     }
@@ -1871,7 +1870,7 @@ pub fn message_cmd(
     let (dir, record) = match resolve_task(repo, task_id)? {
         Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
         Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
+        Located::NoMatch => {
             bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
         }
     };
@@ -2051,53 +2050,6 @@ fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
     )))
 }
 
-/// `ahu focus <task-id>`
-pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let record = match resolve_task(repo, task_id)? {
-        Located::Listing(_, record) | Located::Pointer(_, _, record) => record,
-        Located::Unreadable(blocked) => {
-            // "no task matching" would be a claim that nothing here is that task.
-            // If a directory with that id exists and ahu simply could not read its
-            // record, saying so is the difference between a user looking for a
-            // typo and a user looking at a leftover worktree.
-            bail!(
-                "task {} exists but ahu cannot read its record, so it cannot find its interactive \
-                 session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
-                display_safe(&crate::task_ref::display(&blocked.task_id)),
-                display_safe_block(&blocked.reason),
-                display_path(&blocked.dir)
-            );
-        }
-        Located::NoMatch {
-            unreadable_in_repo: 0,
-        } => {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
-        }
-        Located::NoMatch { unreadable_in_repo } => {
-            bail!(
-                "no readable task matching {task_id:?}. {unreadable_in_repo} other task record(s) \
-                 in this repository could not be read either; run `ahu tasks` to see them."
-            );
-        }
-    };
-    if record.session_ref.is_none() {
-        bail!(
-            "task {} has no recorded interactive session.",
-            record.task_id
-        );
-    }
-    let client = interactive::discover_for_record(repo, &record)?;
-    interactive::session::SessionManager::new(client.as_ref(), repo)
-        .select_task_session(&record)?;
-    console.say(&format!(
-        "Focused {} — {}\n  worktree {}\n",
-        style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
-        display_safe(&record.title),
-        display_path(&record.worktree)
-    ))?;
-    Ok(0)
-}
-
 /// Name what is holding a task worktree back, so the refusal points at files
 /// rather than leaving the reader to run `git status` with ahu's own
 /// environment to find them.
@@ -2141,7 +2093,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 (dir, record, entry.repo_identity.clone(), true, Some(gate))
             }
             Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-            Located::NoMatch { .. } => {
+            Located::NoMatch => {
                 bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
             }
         };

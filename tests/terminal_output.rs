@@ -422,7 +422,6 @@ fn redirected_commands_match_explicit_plain_output() {
         &["doctor"],
         &["knowledge", "lint"],
         &["knowledge", "lint", "--output", "json"],
-        &["focus", "missing"],
         &["@missing", "--prompt", "fixture", "--dry-run"],
         &["run-task", "--task-dir", "missing"],
     ];

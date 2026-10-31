@@ -368,20 +368,6 @@ fn task_resolution_distinguishes_missing_ambiguous_and_unreadable_records() {
             .to_string()
             .contains("ambiguous")
     );
-    assert!(
-        scripted("", |c| focus(c, &repo, "record01"))
-            .0
-            .unwrap_err()
-            .to_string()
-            .contains("no recorded interactive session")
-    );
-    assert!(
-        scripted("", |c| focus(c, &repo, "absent"))
-            .0
-            .unwrap_err()
-            .to_string()
-            .contains("no task matching")
-    );
     std::fs::write(dir.join("task.json"), "{}").unwrap();
     assert!(
         inspect_task(&repo, "record01")
@@ -402,20 +388,6 @@ fn task_resolution_distinguishes_missing_ambiguous_and_unreadable_records() {
             .unwrap_err()
             .to_string()
             .contains("unreadable")
-    );
-    assert!(
-        scripted("", |c| focus(c, &repo, "record01"))
-            .0
-            .unwrap_err()
-            .to_string()
-            .contains("cannot read its record")
-    );
-    assert!(
-        scripted("", |c| focus(c, &repo, "absent"))
-            .0
-            .unwrap_err()
-            .to_string()
-            .contains("other task record")
     );
     assert!(
         scripted("", |c| task_cmd(c, &repo, "absent", false))

@@ -122,7 +122,7 @@ Direct `ahu @agent` submissions do not ask for interactive confirmation and keep
 focus on the caller. The direct form also accepts `--prompt` and `--prompt-file`.
 Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
-the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
+the handle: `ahu task @review` or `ahu cancel @review`.
 Names belong to the repository and remain reserved after removal; task IDs still work.
 Most registered agents declare `permissions = "auto"` (see each manifest's
 `permissions` field), so their launches require the explicit approval-widening
@@ -162,8 +162,7 @@ exact `@name` handles, `ahu:task:<id>`, bare IDs, and unique ID prefixes:
 ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
 ahu task "$task_id"
-ahu result "$task_id"  # headless tasks
-ahu focus "$task_id"  # interactive session-host tasks
+ahu result "$task_id"
 ```
 
 Reviewing the changes is plain Git. `ahu task` prints the task's branch,

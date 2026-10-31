@@ -475,7 +475,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     task_id,
                     output_json,
                 } => commands::task_cmd(console, &repo, &task_id, output_json),
-                Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Remove { task_id } => commands::remove_cmd(console, &repo, &task_id),
                 Command::Message { task_id, text } => {
                     commands::message_cmd(console, &repo, &task_id, &text)
