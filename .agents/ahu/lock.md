@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: d1b087fc6dcf3a75574b2b81dd709865d8a97588456b0e29534b42ad24058c00
+  digest: b6f37a8a8185b3e025ec0718d6b6160f1b8bcccc10520072c70ba33ad76e362b
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -94,10 +94,30 @@ ahu:
     digest: b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8
     executable: false
     path: .agents/ahu/agents/test-kiro.md
-  - bytes: 714
-    digest: 4fbb13a03be594fea6ab19a5bdb4c0a12d731fffedb0ba6371627ea4483d6c9a
+  - bytes: 722
+    digest: b4898ea8c56ba185f9b99731fcecca90effaf4088612cb7f42cf09f0f24f98b1
     executable: false
     path: .agents/ahu/config.md
+  - bytes: 553
+    digest: 01633f956a9dde33c149b9502f3fa2aef97467bb017b491319bd68f94a59e68e
+    executable: false
+    path: .agents/ahu/plugins/harness-antigravity.md
+  - bytes: 553
+    digest: 28c1c7dac8a0da125fda39b5ade60a29d82d00e92f84029f4f8ebe987785d914
+    executable: false
+    path: .agents/ahu/plugins/harness-claude-code.md
+  - bytes: 541
+    digest: 24d8030c5728de6a9fc19675074bef3a9e070647695b20ec44ee810fe0b891e0
+    executable: false
+    path: .agents/ahu/plugins/harness-codex.md
+  - bytes: 539
+    digest: 73e1a893f7a119ac32f6b34a58dc32eb77462917a5409232797d475dc1e93714
+    executable: false
+    path: .agents/ahu/plugins/harness-kiro.md
+  - bytes: 547
+    digest: 44cf307bd95d80e29067c595e0c3fdf4885ea699eb99982fc34abde976e48eeb
+    executable: false
+    path: .agents/ahu/plugins/harness-opencode.md
   - bytes: 117
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
@@ -106,8 +126,8 @@ ahu:
     digest: b2f7e3285be8231d3329e77e455b0bbb0ea74e35ed5c76f95c9358d9485a3659
     executable: false
     path: .agents/skills/ahu-agent-context-critic/SKILL.md
-  - bytes: 27218
-    digest: 18eabae6e4b07dc716aa45290e97764a80972694b4e58bdbd2568b14786ce49c
+  - bytes: 27343
+    digest: efb5661d95b985989ef29278da1613985251656dfe18b48fc33cf04bc365c556
     executable: false
     path: .agents/skills/ahu-architecture/SKILL.md
   - bytes: 13498
@@ -158,8 +178,8 @@ ahu:
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
     path: .mcp.json
-  - bytes: 6230
-    digest: 506677b0626f63a16fcfdb267ba7b5bc51e71562a5a4ab250eb5cab38d0dcc33
+  - bytes: 7702
+    digest: b2614b5a5d9d7792f0a964f303e5e7ca94ba951362b110ec8f9a559263fa2b4c
     executable: false
     path: AGENTS.md
   - bytes: 646
@@ -219,10 +239,7 @@ ahu:
     executable: false
     path: opencode.json
   schema_version: 1
-  skipped_directories:
-  - .ahu
-  - .worktrees
-  - target
+  skipped_directories: []
   symlinks: []
   unscanned_config: []
 okf_version: '0.2'

@@ -60,7 +60,7 @@ fn sample_with_cost<'a>(
         task_id: task,
         attempt,
         agent_identity_digest: Some(AGENT),
-        harness: if cost.source.as_deref() == Some("opencode_step_finish_sum") {
+        harness: if cost.source.as_deref() == Some("native_step_sum_usd") {
             "opencode"
         } else {
             "claude-code"
@@ -206,21 +206,21 @@ fn retries_resumes_and_children_count_once_without_inventing_totals() {
 fn private_summary_keeps_cost_sources_separate_and_reports_attempt_coverage() {
     let mapping = parse(input()).unwrap();
     let usage = TokenUsage::default();
-    let claude_a = cost("claude_code_result_total", 0.01);
-    let claude_b = cost("claude_code_result_total", 0.03);
-    let opencode = cost("opencode_step_finish_sum", 0.005);
+    let claude_a = cost("native_cumulative_usd", 0.01);
+    let claude_b = cost("native_cumulative_usd", 0.03);
+    let opencode = cost("native_step_sum_usd", 0.005);
     let samples = [
         sample_with_cost(TASK, 1, &usage, &claude_a),
         sample_with_cost(TASK, 2, &usage, &claude_b),
     ];
     let report = serde_json::to_value(mapping.summarize(&enabled(), &samples).unwrap()).unwrap();
-    let mean = report["reported_cost"]["mean_observed_usd_by_source"]["claude_code_result_total"]
+    let mean = report["reported_cost"]["mean_observed_usd_by_source"]["native_cumulative_usd"]
         .as_f64()
         .unwrap();
     assert!((mean - 0.02).abs() < f64::EPSILON * 2.0);
     assert_eq!(
         report["reported_cost"]["observed_attempts_by_source"],
-        json!({"claude_code_result_total": 2})
+        json!({"native_cumulative_usd": 2})
     );
     assert_eq!(report["reported_cost"]["unavailable_attempts"], 0);
     assert_eq!(report["group"]["harness"], "claude-code");
@@ -233,7 +233,7 @@ fn private_summary_keeps_cost_sources_separate_and_reports_attempt_coverage() {
     assert_eq!(open_report["group"]["harness"], "opencode");
     assert_eq!(
         open_report["reported_cost"]["mean_observed_usd_by_source"],
-        json!({"opencode_step_finish_sum": 0.005})
+        json!({"native_step_sum_usd": 0.005})
     );
     let encoded = report.to_string();
     for secret in ["synthetic-marker", TASK, CHILD] {
@@ -269,6 +269,39 @@ fn membership_conflicts_and_attempt_bounds_fail_without_partial_results() {
         assert_eq!(
             mapping
                 .summarize(&enabled(), &samples)
+                .err()
+                .unwrap()
+                .to_string(),
+            "invalid private telemetry input"
+        );
+    }
+}
+
+#[test]
+fn installed_harness_identifiers_need_no_core_provider_allowlist() {
+    let mapping = parse(input()).unwrap();
+    let usage = TokenUsage::default();
+    for harness in ["sixth-provider", "kiro"] {
+        let observation = AttemptObservation {
+            harness,
+            outcome: "starting",
+            ..sample(TASK, 1, &usage)
+        };
+        assert!(
+            mapping
+                .summarize(&enabled(), &[observation])
+                .unwrap()
+                .is_some()
+        );
+    }
+    for harness in ["", "../provider", "private\nvalue", "A", "trailing-"] {
+        let observation = AttemptObservation {
+            harness,
+            ..sample(TASK, 1, &usage)
+        };
+        assert_eq!(
+            mapping
+                .summarize(&enabled(), &[observation])
                 .err()
                 .unwrap()
                 .to_string(),

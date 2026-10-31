@@ -10,9 +10,18 @@ mod common;
 use ahu::{git, snapshot};
 use common::TestRepo;
 
+fn native_repo() -> TestRepo {
+    let repo = TestRepo::new_native();
+    repo.install_runtime("claude-code");
+    repo
+}
+
 #[test]
 fn the_snapshot_covers_native_paths_for_every_supported_harness() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
+    for harness in ["codex", "antigravity", "kiro"] {
+        repo.install_runtime(harness);
+    }
     repo.write("CLAUDE.md", "repository guidance\n");
     repo.write("GEMINI.md", "antigravity instructions\n");
     repo.write("AGENTS.md", "other harness guidance\n");
@@ -65,7 +74,7 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
 
 #[test]
 fn the_snapshot_digest_changes_with_any_configuration_change() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("CLAUDE.md", "one\n");
     let before = snapshot::collect(repo.path()).unwrap().digest();
     repo.write("CLAUDE.md", "two\n");
@@ -78,7 +87,7 @@ fn the_snapshot_digest_changes_with_any_configuration_change() {
 
 #[test]
 fn a_worktree_inherits_additions_modifications_deletions_and_ignored_config() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("CLAUDE.md", "committed guidance\n");
     repo.write(".claude/settings.json", "{\"committed\":true}\n");
     repo.write(".claude/skills/old/SKILL.md", "old skill\n");
@@ -148,7 +157,7 @@ fn a_worktree_inherits_additions_modifications_deletions_and_ignored_config() {
 
 #[test]
 fn materializing_twice_changes_nothing_the_second_time() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("CLAUDE.md", "guidance\n");
     repo.commit("config");
     repo.write(".claude/settings.local.json", "{}\n");
@@ -172,7 +181,7 @@ fn materializing_twice_changes_nothing_the_second_time() {
 
 #[test]
 fn a_configuration_edit_during_preparation_is_disclosed() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("CLAUDE.md", "original\n");
     repo.commit("config");
     let discovered = git::discover(repo.path()).unwrap();
@@ -200,7 +209,7 @@ fn a_configuration_edit_during_preparation_is_disclosed() {
 
 #[test]
 fn every_worktree_of_one_repository_shares_a_single_identity() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.commit("base");
     let discovered = git::discover(repo.path()).unwrap();
     let worktree = repo.state_path().join("second");
@@ -224,7 +233,7 @@ fn every_worktree_of_one_repository_shares_a_single_identity() {
 
 #[test]
 fn scan_exclusions_are_disclosed_rather_than_silently_dropped() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("node_modules/some-pkg/.claude/settings.json", "{}\n");
     let taken = snapshot::collect(repo.path()).unwrap();
     assert!(
@@ -246,7 +255,7 @@ fn a_repository_with_no_agent_configuration_produces_an_empty_snapshot() {
 
 #[test]
 fn dotenv_secrets_are_not_agent_configuration_or_task_inheritance() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".env", "TYPESAFE_API_KEY=synthetic-secret\n");
     repo.write(".env.local", "OTHER_SECRET=synthetic-secret\n");
     repo.write(".env.example", "TYPESAFE_API_KEY=replace-me\n");
@@ -274,7 +283,7 @@ fn a_committed_symlink_cannot_redirect_writes_outside_the_worktree() {
     let victim_file = outside.path().join("zshrc");
     std::fs::write(&victim_file, "# victim's real file\n").unwrap();
 
-    let repo = TestRepo::new();
+    let repo = native_repo();
     std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(
@@ -346,7 +355,7 @@ fn a_committed_directory_symlink_cannot_redirect_writes_outside_the_worktree() {
     let outside = tempfile::TempDir::new().unwrap();
     std::fs::write(outside.path().join("existing.txt"), "untouched\n").unwrap();
 
-    let repo = TestRepo::new();
+    let repo = native_repo();
     #[cfg(unix)]
     std::os::unix::fs::symlink(outside.path(), repo.path().join(".claude")).unwrap();
     repo.commit("attacker: .claude is a symlink to a directory outside the repository");
@@ -394,7 +403,7 @@ fn a_committed_symlink_cannot_redirect_a_mode_only_change() {
         std::fs::set_permissions(&victim_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    let repo = TestRepo::new();
+    let repo = native_repo();
     std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&victim_file, repo.path().join(".claude/settings.json")).unwrap();
@@ -440,7 +449,7 @@ fn a_committed_symlink_cannot_redirect_a_mode_only_change() {
 /// Task worktrees live in the repository, and must be invisible to Git.
 #[test]
 fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.commit("base");
     let discovered = git::discover(repo.path()).unwrap();
 
@@ -487,7 +496,7 @@ fn a_source_swapped_for_a_symlink_after_collection_is_not_copied() {
     let secret = outside.path().join("secret.txt");
     std::fs::write(&secret, "SYNTHETIC SECRET\n").unwrap();
 
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".claude/settings.json", "{\"harmless\":true}\n");
     repo.commit("config");
 
@@ -542,7 +551,7 @@ fn a_source_swapped_for_a_symlink_after_collection_is_not_copied() {
 
 #[test]
 fn every_skipped_directory_is_recorded_not_just_configuration_ones() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("vendor/CLAUDE.md", "planted guidance\n");
     repo.write("build/AGENTS.md", "planted guidance\n");
     repo.write("node_modules/some-pkg/.claude/settings.json", "{}\n");
@@ -564,7 +573,7 @@ fn every_skipped_directory_is_recorded_not_just_configuration_ones() {
 
 #[test]
 fn configuration_directly_inside_a_skipped_directory_is_named() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write("vendor/CLAUDE.md", "planted guidance\n");
     repo.write("node_modules/.claude/settings.json", "{}\n");
 
@@ -590,7 +599,7 @@ fn configuration_directly_inside_a_skipped_directory_is_named() {
 
 #[test]
 fn a_directory_past_the_depth_cap_is_disclosed_rather_than_dropped() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     // Deeper than the scan's depth cap, so the walk stops before reading it.
     let deep = "d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14";
     repo.write(&format!("{deep}/CLAUDE.md"), "planted guidance\n");
@@ -614,7 +623,7 @@ fn a_directory_past_the_depth_cap_is_disclosed_rather_than_dropped() {
 /// Context that the bounded scanner cannot lock must block candidate launches.
 #[test]
 fn committed_configuration_inside_skipped_paths_is_not_launchable() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.init_config();
     repo.write("vendor/CLAUDE.md", "planted guidance\n");
     repo.commit("fixture");
@@ -630,7 +639,7 @@ fn committed_configuration_inside_skipped_paths_is_not_launchable() {
 
 #[test]
 fn a_committed_worktrees_gitignore_that_ignores_nothing_is_refused() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".worktrees/.gitignore", "# nothing ignored here\n");
     repo.commit("hostile gitignore");
 
@@ -643,7 +652,7 @@ fn a_committed_worktrees_gitignore_that_ignores_nothing_is_refused() {
 
 #[test]
 fn the_gitignore_ahu_writes_itself_is_accepted_on_every_later_launch() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     ahu::state::ensure_worktrees_root(repo.path()).expect("first call writes it");
     ahu::state::ensure_worktrees_root(repo.path()).expect("second call accepts it");
     assert_eq!(
@@ -656,7 +665,7 @@ fn the_gitignore_ahu_writes_itself_is_accepted_on_every_later_launch() {
 
 #[test]
 fn a_worktree_path_that_cannot_be_resolved_is_refused() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     let discovered = git::discover(repo.path()).unwrap();
     // Textually inside the repository, actually outside it, and nonexistent —
     // so `canonicalize` fails and there is nothing to compare components of.
@@ -672,7 +681,7 @@ fn a_worktree_path_that_cannot_be_resolved_is_refused() {
 
 #[test]
 fn a_prepared_worktree_inside_the_repository_still_verifies() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     let discovered = git::discover(repo.path()).unwrap();
     let worktree = ahu::state::worktree_dir(&discovered.root, "task0001").unwrap();
     std::fs::create_dir_all(&worktree).unwrap();
@@ -684,7 +693,7 @@ fn a_prepared_worktree_inside_the_repository_still_verifies() {
 
 #[test]
 fn a_worktree_path_is_never_read_as_a_git_option() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     let discovered = git::discover(repo.path()).unwrap();
     let base = discovered.head.clone().expect("the fixture has a commit");
     // A leading hyphen is the whole point: without a `--` delimiter git reads
@@ -714,7 +723,7 @@ fn a_worktree_path_is_never_read_as_a_git_option() {
 /// the destination; this is about the source.
 #[test]
 fn an_ancestor_directory_swapped_for_a_symlink_is_refused_not_followed() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".claude/settings.json", "{\"benign\": true}\n");
     repo.commit("fixture");
 
@@ -777,7 +786,7 @@ fn an_ancestor_directory_swapped_for_a_symlink_is_refused_not_followed() {
 /// The leaf case still holds: this is the regression the ancestor case escaped.
 #[test]
 fn a_leaf_swapped_for_a_symlink_is_still_refused() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".claude/settings.json", "{\"benign\": true}\n");
     repo.commit("fixture");
     let taken = ahu::snapshot::collect(repo.path()).unwrap();
@@ -817,7 +826,7 @@ fn a_leaf_swapped_for_a_symlink_is_still_refused() {
 /// a refusal — the distinction matters because only one of them is an attempt.
 #[test]
 fn a_source_deleted_after_collection_is_reported_as_concurrently_modified() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     repo.write(".claude/settings.json", "{\"benign\": true}\n");
     repo.commit("fixture");
     let taken = ahu::snapshot::collect(repo.path()).unwrap();
@@ -850,7 +859,7 @@ fn a_source_deleted_after_collection_is_reported_as_concurrently_modified() {
 /// content that reaches the worktree is the content whose digest was compared.
 #[test]
 fn the_copied_bytes_are_the_digested_bytes() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
     let script = repo.write(".claude/hooks/guard.sh", "#!/bin/sh\nexit 0\n");
     #[cfg(unix)]
     {
@@ -913,7 +922,8 @@ fn the_copied_bytes_are_the_digested_bytes() {
 /// never rewritten, and never disabled with `--pure`.
 #[test]
 fn the_snapshot_covers_opencode_configuration_rules_and_duplicate_skills() {
-    let repo = TestRepo::new();
+    let repo = native_repo();
+    repo.install_runtime("opencode");
     repo.write(
         "opencode.json",
         "{\"$schema\":\"https://opencode.ai/config.json\",\"plugin\":[\"example-plugin\"]}\n",

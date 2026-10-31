@@ -15,76 +15,23 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::bail;
-use crate::catalog;
 use crate::config::AGENTS_RELATIVE_DIR;
 use crate::util::{Error, Result, digest_bytes, is_safe_name, is_semver};
 
 /// The OKF envelope version every manifest this build reads must declare.
 pub const OKF_VERSION: &str = "0.2";
 
-/// Where an agent's instructions and harness-specific settings actually live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceFormat {
-    /// `.claude/agents/<name>.md`, YAML frontmatter plus a Markdown body.
-    ClaudeAgent,
-    /// `.codex/agents/<name>.toml`. The source file's text is delivered
-    /// verbatim; native TOML fields are not interpreted as instruction
-    /// metadata.
-    CodexAgent,
-    /// `.agents/agents/<name>/agent.md`, YAML frontmatter plus Markdown
-    /// instructions.
-    AntigravityAgent,
-    /// `.opencode/agent/<name>.md`, YAML frontmatter plus Markdown
-    /// instructions. Its `model` is provider-qualified, the shape OpenCode's
-    /// own `--model` takes, so a declared model is a catalog identifier
-    /// rather than a bare name.
-    OpenCodeAgent,
-}
+/// A format identifier interpreted by the selected installed harness plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceFormat(String);
 
 impl SourceFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SourceFormat::ClaudeAgent => "claude-agent",
-            SourceFormat::CodexAgent => "codex-agent",
-            SourceFormat::AntigravityAgent => "antigravity-agent",
-            SourceFormat::OpenCodeAgent => "opencode-agent",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
-
-    /// Parse a `source_format` value from manifest frontmatter.
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "claude-agent" => Some(SourceFormat::ClaudeAgent),
-            "codex-agent" => Some(SourceFormat::CodexAgent),
-            "antigravity-agent" => Some(SourceFormat::AntigravityAgent),
-            "opencode-agent" => Some(SourceFormat::OpenCodeAgent),
-            _ => None,
-        }
-    }
-
-    /// Whether a file of this format carries YAML frontmatter that is metadata
-    /// rather than instruction text.
-    ///
-    /// Formats determine how source bytes become instruction text. Frontmatter
-    /// is excluded from the delivered text, so `ResolvedAgent` records separate
-    /// file and instruction digests. No format selects an agent by harness name.
-    pub fn has_frontmatter(self) -> bool {
-        matches!(
-            self,
-            SourceFormat::ClaudeAgent
-                | SourceFormat::AntigravityAgent
-                | SourceFormat::OpenCodeAgent
-        )
-    }
-
-    /// The harness that owns this native format, when one does.
-    pub fn native_harness(self) -> Option<&'static str> {
-        match self {
-            SourceFormat::ClaudeAgent => Some("claude-code"),
-            SourceFormat::CodexAgent => Some("codex"),
-            SourceFormat::AntigravityAgent => Some("antigravity"),
-            SourceFormat::OpenCodeAgent => Some("opencode"),
-        }
+        ahu_harness_api::identifier(value).then(|| Self(value.into()))
     }
 }
 
@@ -316,6 +263,8 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
             path.display()
         );
     }
+    crate::config::validate_harness_id(&harness, path)?;
+    crate::config::validate_model_id(&model, path)?;
     let status = match status.as_str() {
         "" | "stable" => Status::Stable,
         "draft" => Status::Draft,
@@ -346,9 +295,8 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
         (false, false) => {
             let format = SourceFormat::parse(&source_format).ok_or_else(|| {
                 Error::new(format!(
-                    "{}: source_format {source_format:?} is not one of: {}.",
-                    path.display(),
-                    "claude-agent, codex-agent, antigravity-agent, opencode-agent"
+                    "{}: source_format must be a plain plugin-owned format identifier.",
+                    path.display()
                 ))
             })?;
             Some(AgentSource {
@@ -627,51 +575,8 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
         );
     }
 
-    let harness = catalog::harness(&manifest.harness).ok_or_else(|| {
-        Error::new(format!(
-            "{}: harness {:?} is not in compatibility catalog {}.",
-            path.display(),
-            manifest.harness,
-            catalog::CATALOG_VERSION
-        ))
-    })?;
-    if !harness.adapter_available {
-        bail!(
-            "{}: ahu has no validated adapter for harness {:?}, so it cannot launch this agent.\n\
-             Use the harness directly, or wait for an ahu release that supports it.",
-            path.display(),
-            manifest.harness
-        );
-    }
-    if catalog::model(&manifest.harness, &manifest.model).is_none() {
-        bail!(
-            "{}: {:?} is not a catalog model for harness {:?}.\n\
-             Catalog {} lists: {}.\n\
-             ahu will not substitute a different model.",
-            path.display(),
-            manifest.model,
-            manifest.harness,
-            catalog::CATALOG_VERSION,
-            catalog::models_for(&manifest.harness)
-                .iter()
-                .map(|m| m.model)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    if let Some(source) = &manifest.source
-        && let Some(native) = source.format.native_harness()
-        && native != manifest.harness
-    {
-        bail!(
-            "{}: source format {:?} belongs to harness {native:?}, but the manifest selects {:?}.\n\
-             ahu does not translate an agent from one harness to another.",
-            path.display(),
-            source.format.as_str(),
-            manifest.harness
-        );
-    }
-
+    crate::config::validate_harness_id(&manifest.harness, path)?;
+    crate::config::validate_model_id(&manifest.model, path)?;
     // The instruction text is what ahu delivers in the prompt, so where it is
     // read from determines what is delivered: the manifest body when the
     // manifest carries its own instructions, or the native definition it
@@ -707,11 +612,23 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
                     source_path.display()
                 ))
             })?;
-            let (instructions, native_model, native_settings) = if source.format.has_frontmatter() {
-                parse_frontmatter(&source_text)
-            } else {
-                (source_text.clone(), None, BTreeMap::new())
-            };
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ParsedSource {
+                instructions: String,
+                native_model: Option<String>,
+                native_settings: BTreeMap<String, String>,
+            }
+            let repo = crate::git::discover(repo_root)?;
+            let runtime = crate::harness_runtime::load(&repo, &manifest.harness)?;
+            let parsed: ParsedSource = serde_json::from_value(runtime.call("native_sources", serde_json::json!({
+                "action": "parse", "format": source.format.as_str(), "text": source_text, "path": source.path,
+            }))?).map_err(|_| Error::new("invalid native source response from harness plugin"))?;
+            let ParsedSource {
+                instructions,
+                native_model,
+                native_settings,
+            } = parsed;
             (
                 source_path,
                 source_digest,
@@ -827,47 +744,7 @@ pub fn resolve_source_path(
     Ok(canonical)
 }
 
-/// Split an agent file into its YAML frontmatter and Markdown body.
-///
-/// ahu reads the frontmatter to detect a model conflict and to report the native
-/// settings it is preserving. It never rewrites the file.
-fn parse_frontmatter(text: &str) -> (String, Option<String>, BTreeMap<String, String>) {
-    let mut settings = BTreeMap::new();
-    let Some(rest) = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---\r\n"))
-    else {
-        return (text.to_string(), None, settings);
-    };
-    let Some(end) = find_frontmatter_end(rest) else {
-        return (text.to_string(), None, settings);
-    };
-    let (front, body) = rest.split_at(end.0);
-    let body = &body[end.1..];
-    let mut model = None;
-    for line in front.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        if key == "model" {
-            model = Some(value.clone());
-        }
-        settings.insert(key.to_string(), value);
-    }
-    (body.trim_start_matches('\n').to_string(), model, settings)
-}
-
-/// Offset of the closing `---` line and the length of that delimiter line.
+/// Closing delimiter for ahu's own manifest envelope. Native formats are plugin-owned.
 fn find_frontmatter_end(rest: &str) -> Option<(usize, usize)> {
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
@@ -1070,36 +947,14 @@ output_schema:
     }
 
     #[test]
-    fn source_formats_round_trip_their_manifest_spelling_and_own_harness() {
-        let cases = [
-            (
-                SourceFormat::ClaudeAgent,
-                "claude-agent",
-                "claude-code",
-                true,
-            ),
-            (SourceFormat::CodexAgent, "codex-agent", "codex", false),
-            (
-                SourceFormat::AntigravityAgent,
-                "antigravity-agent",
-                "antigravity",
-                true,
-            ),
-            (
-                SourceFormat::OpenCodeAgent,
-                "opencode-agent",
-                "opencode",
-                true,
-            ),
-        ];
-        for (format, spelling, harness, has_frontmatter) in cases {
-            assert_eq!(format.as_str(), spelling);
-            assert_eq!(SourceFormat::parse(spelling), Some(format));
-            assert_eq!(format.native_harness(), Some(harness));
-            assert_eq!(format.has_frontmatter(), has_frontmatter);
+    fn source_formats_are_plugin_owned_identifiers() {
+        for name in ["sixth-agent", "claude-agent", "custom-format"] {
+            let format = SourceFormat::parse(name).unwrap();
+            assert_eq!(format.as_str(), name);
+            assert_eq!(serde_json::to_value(&format).unwrap(), name);
         }
-        for unknown in ["", "claude", "cursor-agent", "CLAUDE-AGENT"] {
-            assert_eq!(SourceFormat::parse(unknown), None);
+        for bad in ["", "bad format", "UPPER", "../path"] {
+            assert!(SourceFormat::parse(bad).is_none());
         }
     }
 
@@ -1263,7 +1118,7 @@ output_schema:
         assert_eq!(
             manifest.source,
             Some(AgentSource {
-                format: SourceFormat::ClaudeAgent,
+                format: SourceFormat::parse("claude-agent").unwrap(),
                 path: ".claude/agents/builder.md".to_string(),
             })
         );
@@ -1272,14 +1127,12 @@ output_schema:
         let (plain, _) = parse(&manifest_text("", "Instructions.\n")).unwrap();
         assert_eq!(plain.source, None);
 
-        let unknown_format = parse_err(&manifest_text(
-            "source_format: cursor-agent\nsource_path: .cursor/agents/builder.md\n",
-            "See the native definition.\n",
-        ));
-        assert!(
-            unknown_format.contains("source_format \"cursor-agent\" is not one of"),
-            "{unknown_format}"
-        );
+        let (custom, _) = parse(&manifest_text(
+            "source_format: sixth-agent\nsource_path: .sixth/builder.md\n",
+            "See source.\n",
+        ))
+        .unwrap();
+        assert_eq!(custom.source.unwrap().format.as_str(), "sixth-agent");
 
         // Half a reference is never a reference: neither half implies the other.
         for half in [
@@ -1521,40 +1374,20 @@ output_schema:
     }
 
     #[test]
-    fn the_harness_and_model_must_both_be_in_the_compatibility_catalog() {
+    fn provider_and_model_inventory_is_not_a_compiled_allowlist() {
         let root = registry();
-        write_manifest(root.path(), "builder", "", "Instructions.\n");
-        let path = root
-            .path()
-            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
+        let path = write_manifest(root.path(), "builder", "", "Instructions.\n");
         let original = std::fs::read_to_string(&path).unwrap();
-
         std::fs::write(
             &path,
-            original.replace("harness: claude-code", "harness: cursor"),
+            original
+                .replace("harness: claude-code", "harness: sixth")
+                .replace("model: claude-sonnet-5", "model: custom/exact-v9"),
         )
         .unwrap();
-        let error = load_err(root.path());
-        assert!(error.contains("is not in compatibility catalog"), "{error}");
-        assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
-
-        // A catalog harness with a model that belongs to another harness.
-        std::fs::write(
-            &path,
-            original.replace("model: claude-sonnet-5", "model: gpt-5.5"),
-        )
-        .unwrap();
-        let error = load_err(root.path());
-        assert!(
-            error.contains("is not a catalog model for harness"),
-            "{error}"
-        );
-        // The refusal lists what the catalog does offer instead of substituting.
-        assert!(error.contains("claude-sonnet-5"), "{error}");
-        assert!(
-            error.contains("will not substitute a different model"),
-            "{error}"
-        );
+        let agent = find(root.path(), "builder").unwrap();
+        assert_eq!(agent.manifest.harness, "sixth");
+        assert_eq!(agent.manifest.model, "custom/exact-v9");
     }
 
     #[test]
@@ -1583,128 +1416,6 @@ output_schema:
             agent.relative_source(Path::new("/nowhere")),
             path.to_string_lossy()
         );
-    }
-
-    #[test]
-    fn a_referenced_claude_definition_supplies_the_instructions_and_its_settings() {
-        let root = registry();
-        write_manifest(
-            root.path(),
-            "builder",
-            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
-            "Instructions live in the native definition.\n",
-        );
-        let native = write(
-            root.path(),
-            ".claude/agents/builder.md",
-            "---\nname: builder\nmodel: claude-sonnet-5\ntools: Read\n---\n\nNative instructions.\n",
-        );
-
-        let agent = find(root.path(), "builder").unwrap();
-        assert_eq!(agent.source_path, native.canonicalize().unwrap());
-        assert_eq!(agent.instructions, "Native instructions.\n");
-        assert_eq!(agent.native_model.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(
-            agent.native_settings.get("tools").map(String::as_str),
-            Some("Read")
-        );
-        // The manifest file and the instruction source are different files.
-        assert_ne!(agent.source_digest, agent.manifest_digest);
-        assert_ne!(agent.instructions_digest, agent.source_digest);
-        // Identity covers both file digests, so changing either is drift.
-        let before = agent.identity_digest();
-        std::fs::write(
-            &native,
-            "---\nname: builder\nmodel: claude-sonnet-5\ntools: Read\n---\n\nChanged.\n",
-        )
-        .unwrap();
-        assert_ne!(
-            find(root.path(), "builder").unwrap().identity_digest(),
-            before
-        );
-    }
-
-    #[test]
-    fn a_codex_source_is_delivered_verbatim_because_it_has_no_frontmatter() {
-        let root = registry();
-        let path = root
-            .path()
-            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: builder\nversion: \
-                 1.0.0\nharness: codex\nmodel: gpt-5.5\nsource_format: \
-                 codex-agent\nsource_path: .codex/agents/builder.toml\n---\n\nSee the TOML.\n"
-            ),
-        )
-        .unwrap();
-        let native_text = "model = \"gpt-5.5\"\ninstructions = \"Do the work.\"\n";
-        write(root.path(), ".codex/agents/builder.toml", native_text);
-
-        let agent = find(root.path(), "builder").unwrap();
-        // TOML fields are not interpreted as instruction metadata, so the whole
-        // file is the delivered text and the two digests cover identical bytes.
-        assert_eq!(agent.instructions, native_text);
-        assert_eq!(agent.instructions_digest, agent.source_digest);
-        assert_eq!(agent.native_model, None);
-        assert!(agent.native_settings.is_empty());
-    }
-
-    #[test]
-    fn ahu_never_translates_an_agent_between_harnesses_or_guesses_a_model() {
-        let root = registry();
-        // A Claude-format source under a manifest that selects Codex.
-        let path = root
-            .path()
-            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mismatched = format!(
-            "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: builder\nversion: \
-             1.0.0\nharness: codex\nmodel: gpt-5.5\nsource_format: \
-             claude-agent\nsource_path: .claude/agents/builder.md\n---\n\nSee it.\n"
-        );
-        std::fs::write(&path, &mismatched).unwrap();
-        write(
-            root.path(),
-            ".claude/agents/builder.md",
-            "---\nname: builder\n---\n\nNative.\n",
-        );
-        let error = load_err(root.path());
-        assert!(
-            error.contains("does not translate an agent from one harness to another"),
-            "{error}"
-        );
-
-        // A native definition that declares a different model than the manifest.
-        write_manifest(
-            root.path(),
-            "builder",
-            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
-            "See it.\n",
-        );
-        write(
-            root.path(),
-            ".claude/agents/builder.md",
-            "---\nname: builder\nmodel: claude-opus-5\n---\n\nNative.\n",
-        );
-        let error = load_err(root.path());
-        assert!(error.contains("but"), "{error}");
-        assert!(error.contains("declares"), "{error}");
-        assert!(error.contains("Make them agree"), "{error}");
-
-        // `inherit` and an empty declaration defer to the manifest rather than
-        // conflicting with it.
-        for declared in ["model: inherit", "model:"] {
-            write(
-                root.path(),
-                ".claude/agents/builder.md",
-                &format!("---\nname: builder\n{declared}\n---\n\nNative.\n"),
-            );
-            let agent = find(root.path(), "builder").unwrap();
-            assert_eq!(agent.manifest.model, "claude-sonnet-5");
-        }
     }
 
     #[test]
@@ -1795,46 +1506,6 @@ output_schema:
             error.contains("cannot carry an external file into a task worktree"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn find_frontmatter_end_reports_the_closing_delimiter_or_nothing() {
-        assert_eq!(find_frontmatter_end("a: 1\n---\nbody"), Some((5, 4)));
-        // A CRLF delimiter line is recognised, and its length includes the \r.
-        assert_eq!(find_frontmatter_end("a: 1\r\n---\r\nbody"), Some((6, 5)));
-        assert_eq!(find_frontmatter_end("a: 1\nno delimiter\n"), None);
-    }
-
-    #[test]
-    fn parse_frontmatter_splits_metadata_from_delivered_text() {
-        // No frontmatter: the whole file is the instructions and nothing is read
-        // as metadata.
-        let (body, model, settings) = parse_frontmatter("Just instructions.\n");
-        assert_eq!(body, "Just instructions.\n");
-        assert_eq!(model, None);
-        assert!(settings.is_empty());
-
-        // Opened but never closed is not frontmatter either, so the text is
-        // delivered whole rather than half-stripped.
-        let (body, model, settings) = parse_frontmatter("---\nmodel: x\nno close\n");
-        assert_eq!(body, "---\nmodel: x\nno close\n");
-        assert_eq!(model, None);
-        assert!(settings.is_empty());
-
-        let (body, model, settings) = parse_frontmatter(
-            "---\n# comment\n\na bare line with no colon\nname: builder\nmodel: \
-             'claude-sonnet-5'\ntools: Read, Write\n---\n\nInstructions.\n",
-        );
-        assert_eq!(body, "Instructions.\n");
-        assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(settings.get("name").map(String::as_str), Some("builder"));
-        assert_eq!(
-            settings.get("tools").map(String::as_str),
-            Some("Read, Write")
-        );
-        // Comments and non-pair lines are not settings.
-        assert!(!settings.contains_key("# comment"));
-        assert_eq!(settings.len(), 3);
     }
 
     #[test]

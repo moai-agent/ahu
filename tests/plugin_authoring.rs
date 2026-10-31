@@ -3,7 +3,7 @@
 mod common;
 
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Output};
+use std::{fs, path::Path, process::Output};
 
 const ID: &str = "text-stats";
 const BINDING: &str = ".agents/ahu/plugins/text-stats.md";
@@ -65,34 +65,11 @@ fn independent_example_installs_invokes_disables_and_removes_offline() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let root = base.join("project");
-    let package = base.join("package");
     let marker = base.join("started");
     fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
-    fs::create_dir(&package).unwrap();
     common::git(&root, &["init", "-q"]);
 
-    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
-    for entry in fs::read_dir(example).unwrap() {
-        let entry = entry.unwrap();
-        fs::copy(entry.path(), package.join(entry.file_name())).unwrap();
-    }
-    let entrypoint = package.join("text-stats.py");
-    assert_ne!(
-        fs::metadata(&entrypoint).unwrap().permissions().mode() & 0o111,
-        0
-    );
-    // Observe every startup, including a hypothetical start that immediately
-    // fails. Instrument only the disposable copy, before calculating its pin.
-    let script = fs::read_to_string(&entrypoint).unwrap();
-    let (shebang, body) = script.split_once('\n').unwrap();
-    fs::write(
-        &entrypoint,
-        format!(
-            "{shebang}\nwith open({}, 'a') as marker:\n    marker.write('started\\n')\n{body}",
-            json!(marker)
-        ),
-    )
-    .unwrap();
+    let package = common::stage_text_stats(&base, Some(&marker));
     let digest = success(run(
         &root,
         &["plugins", "digest", package.to_str().unwrap()],

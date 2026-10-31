@@ -1,8 +1,7 @@
 //! Project configuration: `.agents/ahu/config.md`.
 //!
 //! One policy per project. The file holds the project-agreed harness order, the
-//! project-agreed model order within each harness, the required compatibility
-//! catalog revision. There are deliberately no personal
+//! project-agreed model order within each installed harness. There are no personal
 //! profiles, environment overrides, or command-line switches that change any of
 //! these for one user.
 
@@ -11,7 +10,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::bail;
-use crate::catalog;
 use crate::util::{Error, Result, digest_bytes};
 
 pub const CONFIG_DIR: &str = ".agents/ahu";
@@ -58,14 +56,13 @@ pub struct TelemetryConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HeadlessConfig {
-    /// Trust OpenCode's native account/auth stores for headless runs. This can
-    /// activate remote configuration and executable plugins; ahu records the
-    /// boundary but does not inspect or constrain that configuration.
-    pub trust_opencode_native_state: bool,
+    /// Provider-owned admission settings, keyed by installed harness identity.
+    /// Core validates size and identity; the selected plugin validates meaning.
+    pub native_settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl HeadlessConfig {
     fn is_default(&self) -> bool {
-        !self.trust_opencode_native_state
+        self.native_settings.is_empty()
     }
 }
 
@@ -87,8 +84,6 @@ pub struct ProjectConfig {
     pub harness_preferences: Vec<String>,
     /// The supported selection policy is `project-ranked`.
     pub model_selection: String,
-    /// Required compatibility catalog revision.
-    pub catalog_version: String,
     /// Optional exact harness CLI versions. Missing entries float with the
     /// installed CLI; these pins are project policy and are included in the
     /// committed context lock.
@@ -253,68 +248,26 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
                 path.display()
             );
         }
-        if catalog::harness(harness_id).is_none() {
-            bail!(
-                "{}: harness {harness_id:?} is not in compatibility catalog {}.\n\
-                 Known harnesses: {}.",
-                path.display(),
-                config.catalog_version,
-                catalog::HARNESSES
-                    .iter()
-                    .map(|h| h.id)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
+        validate_harness_id(harness_id, path)?;
     }
     for (harness_id, models) in &config.model_rankings {
-        if catalog::harness(harness_id).is_none() {
-            bail!(
-                "{}: model_rankings names unknown harness {harness_id:?}.",
-                path.display()
-            );
-        }
+        validate_harness_id(harness_id, path)?;
         let mut seen_models = std::collections::BTreeSet::new();
         for model_id in models {
             if !seen_models.insert(model_id.clone()) {
                 bail!(
-                    "{}: model {model_id:?} is listed twice for harness {harness_id:?}.",
+                    "{}: duplicate model in project ranking for {harness_id:?}",
                     path.display()
                 );
             }
-            if catalog::model(harness_id, model_id).is_none() {
-                bail!(
-                    "{}: {model_id:?} is not a catalog model for harness {harness_id:?}.\n\
-                     Catalog {} lists: {}.",
-                    path.display(),
-                    config.catalog_version,
-                    catalog::models_for(harness_id)
-                        .iter()
-                        .map(|m| m.model)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+            validate_model_id(model_id, path)?;
         }
-    }
-    if config.headless.trust_opencode_native_state
-        && !catalog::supports("opencode", catalog::Feature::HeadlessLaunch)
-    {
-        bail!(
-            "{}: headless.trust_opencode_native_state requires an ahu build with the OpenCode headless adapter.",
-            path.display()
-        );
     }
     for (harness_id, version) in &config.harness_version_pins {
-        if catalog::harness(harness_id).is_none() {
-            bail!(
-                "{}: harness_version_pins names unknown harness {harness_id:?}.",
-                path.display()
-            );
-        }
+        validate_harness_id(harness_id, path)?;
         if !crate::util::is_semver(version) {
             bail!(
-                "{}: harness_version_pins.{harness_id} must be an exact semantic version (MAJOR.MINOR.PATCH); found {version:?}.",
+                "{}: harness version pin must be an exact semantic version",
                 path.display()
             );
         }
@@ -329,8 +282,40 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
             );
         }
     }
-    catalog::require_version(&config.catalog_version)?;
+    if config.headless.native_settings.len() > 64
+        || serde_json::to_vec(&config.headless.native_settings)?.len() > 65536
+    {
+        bail!("native settings exceed project configuration bounds");
+    }
+    for (id, settings) in &config.headless.native_settings {
+        validate_harness_id(id, path)?;
+        if !settings.is_object() {
+            bail!("native settings must be objects keyed by harness identity");
+        }
+    }
     crate::telemetry::validate_config(&config.telemetry, path)?;
+    Ok(())
+}
+
+/// Validate an identity without requiring a provider to be installed. Inventory
+/// and policy inspection must remain usable while a plugin is unavailable.
+pub(crate) fn validate_harness_id(id: &str, path: &Path) -> Result<()> {
+    if !ahu_harness_api::identifier(id) {
+        bail!("{}: invalid harness identifier", path.display());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_model_id(id: &str, path: &Path) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 256
+        || id.starts_with('-')
+        || id
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || crate::util::is_display_hostile_char(c))
+    {
+        bail!("{}: invalid exact model identifier", path.display());
+    }
     Ok(())
 }
 

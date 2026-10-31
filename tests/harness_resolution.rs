@@ -363,7 +363,10 @@ fn a_repository_binary_alone_is_reported_as_no_harness_at_all() {
         "ahu must refuse rather than fall back to the repository's binary"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not installed on this machine"), "{stderr}");
+    assert!(
+        stderr.contains("declared native executable is unavailable outside repositories"),
+        "{stderr}"
+    );
 }
 
 /// A program name is a name, not a path.
@@ -398,12 +401,13 @@ fn a_registered_repository_excludes_binaries_under_it() {
     let outside = tempfile::TempDir::new().unwrap();
     assert!(!ahu::selection::is_excluded(&outside.path().join("claude")));
 
-    // A probe of an excluded path is refused rather than run.
+    // Native executable selection refuses explicit and relative paths before
+    // any installed plugin is asked to inspect them.
     assert!(
-        ahu::selection::probe_version(&discovered.root.join("claude").to_string_lossy()).is_none()
+        ahu::selection::resolve_executable(&discovered.root.join("claude").to_string_lossy())
+            .is_none()
     );
-    // And so is a relative one.
-    assert!(ahu::selection::probe_version("claude").is_none());
+    assert!(ahu::selection::resolve_executable("./claude").is_none());
 }
 
 /// The shared fake-harness fixture survives a checkout path containing a quote.

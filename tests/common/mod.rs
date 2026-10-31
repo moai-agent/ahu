@@ -14,6 +14,7 @@ use tempfile::TempDir;
 pub struct TestRepo {
     pub dir: TempDir,
     pub state: TempDir,
+    pub native_runtime: bool,
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
@@ -48,9 +49,19 @@ impl TestRepo {
             dir.path(),
             &["config", "user.email", "tests@example.invalid"],
         );
-        let repo = TestRepo { dir, state };
+        let repo = TestRepo {
+            dir,
+            state,
+            native_runtime: false,
+        };
         repo.write("README.md", "# fixture\n");
         repo.commit("initial");
+        repo
+    }
+
+    pub fn new_native() -> Self {
+        let mut repo = Self::new();
+        repo.native_runtime = true;
         repo
     }
 
@@ -78,7 +89,10 @@ impl TestRepo {
     pub fn commit(&self, message: &str) {
         // `-f` because agent configuration directories such as `.claude/` are
         // commonly ignored globally; these fixtures commit them deliberately.
-        git(self.dir.path(), &["add", "-A", "-f"]);
+        git(
+            self.dir.path(),
+            &["add", "-A", "-f", "--", ".", ":!.ahu", ":!.worktrees"],
+        );
         git(
             self.dir.path(),
             &["commit", "-q", "--allow-empty", "-m", message],
@@ -109,25 +123,77 @@ impl TestRepo {
         );
     }
 
-    /// A minimal, valid project configuration.
+    /// A minimal latest-schema configuration in the legacy fixture container.
+    /// Migration regressions deliberately read and remove this TOML path.
     pub fn init_config(&self) {
+        self.install_runtime("claude-code");
         self.write(
             ".agents/ahu/config.toml",
-            &format!(
-                "schema_version = 1\n\
-                 harness_preferences = [\"claude-code\"]\n\
-                 model_selection = \"project-ranked\"\n\
-                 catalog_version = \"{}\"\n\
-                 \n[model_rankings]\n\
-                 \"claude-code\" = [\"claude-opus-5\", \"claude-sonnet-5\"]\n\
-",
-                ahu::catalog::CATALOG_VERSION
-            ),
+            &toml::to_string(&ahu::config::ProjectConfig {
+                schema_version: ahu::config::SUPPORTED_SCHEMA_VERSION,
+                harness_preferences: vec!["claude-code".into()],
+                model_selection: "project-ranked".into(),
+                harness_version_pins: Default::default(),
+                model_rankings: [(
+                    "claude-code".into(),
+                    vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
+                )]
+                .into(),
+                knowledge: Default::default(),
+                headless: Default::default(),
+                telemetry: Default::default(),
+            })
+            .unwrap(),
         );
+    }
+
+    /// Synthetic plugin metadata supplies historical test identities; no native
+    /// provider implementations are linked or probed by the fixture.
+    pub fn install_runtime(&self, harness: &str) {
+        if self.native_runtime {
+            native_runtime::install(self.path(), harness);
+            return;
+        }
+        let (program, source_dir, format, models): (&str, &str, &str, &[&str]) = match harness {
+            "claude-code" => (
+                "claude",
+                ".claude/agents",
+                "claude-agent",
+                &["claude-opus-5", "claude-sonnet-5"],
+            ),
+            "codex" => ("codex", ".codex/agents", "codex-agent", &["gpt-6-astra"]),
+            "antigravity" => (
+                "agy",
+                ".gemini/agents",
+                "gemini-agent",
+                &["gemini-3.1-pro-high"],
+            ),
+            "opencode" => (
+                "opencode",
+                ".opencode/agents",
+                "opencode-agent",
+                &["synthetic/exact"],
+            ),
+            "kiro" => (
+                "kiro-cli",
+                ".kiro/agents",
+                "kiro-agent",
+                &["synthetic/exact"],
+            ),
+            "sixth" => (
+                "sixth-native",
+                ".sixth/agents",
+                "sixth-agent",
+                &["sixth/exact"],
+            ),
+            _ => panic!("declare synthetic runtime metadata for this test identity"),
+        };
+        runtime::install(self.path(), harness, program, source_dir, format, models);
     }
 
     /// A registered Claude Code agent backed by a native definition.
     pub fn add_agent(&self, name: &str, version: &str, model: &str) {
+        self.install_runtime("claude-code");
         self.write(
             &format!(".claude/agents/{name}.md"),
             &format!(
@@ -165,6 +231,7 @@ impl TestRepo {
     /// second manifest that names another one, with the instructions in the
     /// manifest body.
     pub fn add_agent_on(&self, name: &str, version: &str, harness: &str, model: &str) {
+        self.install_runtime(harness);
         self.write(
             &format!(".agents/ahu/agents/{name}.md"),
             &format!(
@@ -358,7 +425,14 @@ pub fn assert_child_passed(name: &str, output: &std::process::Output) {
 }
 
 /// The harness programs every adapter resolves by name.
-pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
+pub const HARNESS_PROGRAMS: &[&str] = &[
+    "claude",
+    "codex",
+    "agy",
+    "opencode",
+    "kiro-cli",
+    "sixth-native",
+];
 
 /// Run this test in a child process that has a machine of its own.
 ///
@@ -410,3 +484,119 @@ pub fn in_harness_fixture(test_name: &str) -> bool {
 }
 
 pub mod plugin;
+pub(crate) use ahu as core_api;
+pub mod runtime;
+
+/// Build the independent Rust example explicitly, then stage only its package.
+/// Installation itself must never invoke Cargo or use the source directory.
+pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let package = base.join("package");
+    fs::create_dir(&package).unwrap();
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
+    fs::create_dir(package.join("bin")).unwrap();
+    for name in ["Cargo.toml", "ahu-plugin.md"] {
+        fs::copy(example.join(name), package.join(name)).unwrap();
+    }
+    // Instrument a disposable Rust build, never the shipped source or binary.
+    let build = base.join("build");
+    fs::create_dir_all(build.join("src")).unwrap();
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(example.join(name), build.join(name)).unwrap();
+    }
+    let source = fs::read_to_string(example.join("src/main.rs")).unwrap();
+    let instrumented = match marker {
+        Some(marker) => source.replace("fn main() {", &format!(
+            "fn main() {{ use std::io::Write as _; let mut marker = std::fs::OpenOptions::new().create(true).append(true).open({}).unwrap(); writeln!(marker, \"started\").unwrap();",
+            serde_json::json!(marker.to_str().unwrap())
+        )),
+        None => source,
+    };
+    fs::write(build.join("src/main.rs"), instrumented).unwrap();
+    let output = Command::new(env!("CARGO"))
+        .args(["build", "--offline", "--locked", "--manifest-path"])
+        .arg(build.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(base.join("target"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let entrypoint = package.join("bin/text-stats");
+    fs::copy(base.join("target/debug/text-stats"), &entrypoint).unwrap();
+    assert_ne!(
+        fs::metadata(&entrypoint).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    package
+}
+
+/// Inert record data for task-service tests that never plan or execute a launch.
+/// Execution-boundary tests must use an installed runtime and `launch::plan`.
+pub fn record_command(request: &ahu::harness::LaunchRequest<'_>) -> ahu::harness::LaunchCommand {
+    ahu::harness::LaunchCommand {
+        program: "synthetic-native".into(),
+        args: vec![
+            "--model".into(),
+            request.model.into(),
+            "--".into(),
+            request.prompt.into(),
+        ],
+        native_eval_otlp: false,
+        planner_binding_digest: Some("0".repeat(64)),
+        prompt_arg: Some(3),
+    }
+}
+
+pub fn record_enforcement(harness: &str) -> ahu::harness::EnforcementReport {
+    ahu::harness::EnforcementReport {
+        harness: harness.into(),
+        harness_version: Some("1.2.3".into()),
+        model_fixed_for_session: false,
+        gaps: vec!["Synthetic stored record; no runtime observation".into()],
+        applied_controls: vec![],
+    }
+}
+
+/// Exercise core planning with a named identity and an installed independent plugin.
+/// Creates no task worktree and launches no native executable.
+pub fn runtime_plan(
+    harness: &str,
+    request: &ahu::harness::LaunchRequest<'_>,
+) -> ahu::util::Result<ahu::launch::LaunchPlan> {
+    runtime_plan_with_policy(harness, request, serde_json::json!({}))
+}
+
+pub fn runtime_plan_with_policy(
+    harness: &str,
+    request: &ahu::harness::LaunchRequest<'_>,
+    policy: serde_json::Value,
+) -> ahu::util::Result<ahu::launch::LaunchPlan> {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.install_runtime(harness);
+    repo.write(".fixture/runtime.json", &policy.to_string());
+    repo.write(".agents/ahu/agents/runtime-fixture.md", &format!(
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: runtime-fixture\nversion: 1.0.0\nharness: {harness}\nmodel: {}\npermissions: {}\n---\nSynthetic instructions.\n",
+        serde_json::to_string(request.model).unwrap(), request.permissions.as_str()));
+    let agent = ahu::agent::find(repo.path(), "runtime-fixture")?;
+    repo.commit("runtime planning fixture");
+    let discovered = ahu::git::discover(repo.path())?;
+    let loaded = ahu::config::load(repo.path())?.unwrap();
+    let pair = ahu::selection::ResolvedPair {
+        harness: harness.into(),
+        model: request.model.into(),
+        basis: "named synthetic identity".into(),
+        policy_digest: loaded.digest,
+        runtime_binding_digest: ahu::harness_runtime::load(&discovered, harness)?.binding_digest(),
+    };
+    ahu::launch::plan_with_state_home(
+        &discovered,
+        Some(agent),
+        pair,
+        request.prompt,
+        Some(&repo.state.path().canonicalize()?),
+    )
+}
+
+#[allow(unused_imports)]
+pub mod native_runtime;

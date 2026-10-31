@@ -17,67 +17,74 @@ use common::{HOSTILE_PROMPT, TestRepo, fake_harness};
 
 #[test]
 fn the_prompt_is_a_single_argument_reproduced_byte_for_byte() {
-    let adapter = harness::adapter_for("claude-code").unwrap();
-    let command = adapter
-        .launch_command(&LaunchRequest {
-            model: "claude-opus-5",
+    if !common::in_harness_fixture("the_prompt_is_a_single_argument_reproduced_byte_for_byte") {
+        return;
+    }
+    let plan = common::runtime_plan(
+        "sixth",
+        &LaunchRequest {
+            model: "sixth/exact",
             prompt: HOSTILE_PROMPT,
             cwd: Path::new("/tmp"),
             permissions: Default::default(),
-        })
-        .unwrap();
-    assert_eq!(command.program, "claude");
+        },
+    )
+    .unwrap();
+    let index = plan.command.prompt_arg.unwrap();
     assert_eq!(
-        command.args,
-        vec![
-            "--model".to_string(),
-            "claude-opus-5".to_string(),
-            "--".to_string(),
-            HOSTILE_PROMPT.to_string(),
-        ]
+        ahu::orchestration::fence_body(&plan.command.args[index], "request", &plan.delivery.nonce),
+        Some(HOSTILE_PROMPT)
     );
-    // Exactly one argument holds the prompt, and it is unmodified.
     assert_eq!(
-        command
+        plan.command
             .args
             .iter()
-            .filter(|a| a.contains("$(touch"))
+            .filter(|a| a.contains(HOSTILE_PROMPT))
             .count(),
         1
+    );
+    assert_eq!(
+        &plan.command.args[..index],
+        ["--model", "sixth/exact", "--"]
     );
 }
 
 #[test]
 fn a_prompt_that_looks_like_an_option_is_still_a_prompt() {
-    let adapter = harness::adapter_for("claude-code").unwrap();
-    let command = adapter
-        .launch_command(&LaunchRequest {
-            model: "claude-opus-5",
-            prompt: "--dangerously-skip-permissions",
+    if !common::in_harness_fixture("a_prompt_that_looks_like_an_option_is_still_a_prompt") {
+        return;
+    }
+    let prompt = "--dangerously-skip-permissions";
+    let plan = common::runtime_plan(
+        "sixth",
+        &LaunchRequest {
+            model: "sixth/exact",
+            prompt,
             cwd: Path::new("/tmp"),
             permissions: Default::default(),
-        })
-        .unwrap();
-    let separator = command.args.iter().position(|a| a == "--").unwrap();
+        },
+    )
+    .unwrap();
+    let index = plan.command.prompt_arg.unwrap();
+    assert_eq!(plan.command.args[index - 1], "--");
     assert_eq!(
-        command.args[separator + 1],
-        "--dangerously-skip-permissions"
-    );
-    // The adapter never widens permissions on its own.
-    assert!(
-        !command.args[..separator]
-            .iter()
-            .any(|a| a.contains("permission"))
+        ahu::orchestration::fence_body(&plan.command.args[index], "request", &plan.delivery.nonce),
+        Some(prompt)
     );
     assert!(
-        !command.args[..separator]
+        !plan.command.args[..index]
             .iter()
-            .any(|a| a.contains("dangerously"))
+            .any(|arg| arg.contains("permission") || arg.contains("dangerously"))
     );
 }
 
 #[test]
 fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
+    if !common::in_harness_fixture(
+        "file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte",
+    ) {
+        return;
+    }
     use ahu::cli::{Command, parse_with_stdin};
     use std::io::Cursor;
 
@@ -112,19 +119,27 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
             ("antigravity", "gemini-3.1-pro-high"),
             ("opencode", "ollama/glm-5.3:cloud"),
         ] {
-            let command = harness::adapter_for(harness)
-                .unwrap()
-                .launch_command(&LaunchRequest {
+            let plan = common::runtime_plan(
+                harness,
+                &LaunchRequest {
                     model,
                     prompt: &delivered,
                     cwd: temp.path(),
                     permissions: Default::default(),
-                })
-                .unwrap();
+                },
+            )
+            .unwrap();
+            let command = &plan.command;
             let index = command.prompt_arg.unwrap();
-            assert_eq!(command.args[index], delivered);
+            let inner = ahu::orchestration::fence_body(
+                &command.args[index],
+                "request",
+                &plan.delivery.nonce,
+            )
+            .unwrap();
+            assert_eq!(inner, delivered);
             assert_eq!(
-                ahu::orchestration::fence_body(&command.args[index], "request", &delivery.nonce),
+                ahu::orchestration::fence_body(inner, "request", &delivery.nonce),
                 Some(prompt.as_str())
             );
             assert_eq!(
@@ -253,7 +268,18 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         .unwrap()
         .root
         .join(".worktrees/testtask0001");
-    std::fs::create_dir_all(&worktree).unwrap();
+    common::git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "ahu/chris/testtask0001",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
     let state_capture = temp.path().join("session-state.txt");
@@ -276,7 +302,11 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         canary = canary.display()
     );
 
-    let task_dir = temp.path().join("task");
+    let task_dir = ahu::state::worktree_task_dir(
+        &worktree,
+        &ahu::git::discover(repo.path()).unwrap().identity(),
+        "testtask0001",
+    );
     write_task_record(&task_dir, &worktree, &prompt, &bin.join("claude"));
 
     let output = common::ahu()
@@ -340,6 +370,8 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 #[test]
 fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let repo = TestRepo::new();
+    repo.init_config();
+    repo.commit("installed runtime for recorded command validation");
     let temp = tempfile::TempDir::new().unwrap();
     // `run_task` re-derives the worktree from the repository it verifies.
     let worktree = ahu::git::discover(repo.path())
@@ -406,10 +438,8 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
     let repo_root = worktree.parent().and_then(|p| p.parent()).unwrap();
     let discovered = ahu::git::discover(repo_root).expect("fixture repo");
     let repo_identity = discovered.identity();
-    use ahu::harness::LaunchRequest;
     use ahu::task::{LaunchIdentity, LaunchMode, TaskRecord, TaskState};
 
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     // The fixture composes the delivered prompt exactly as `launch::plan` does,
     // because `run_task` rebuilds it from the frozen delivery and compares.
     let (delivered, delivery) = ahu::orchestration::deliver_composed(
@@ -428,17 +458,22 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         },
     )
     .unwrap();
-    let command = adapter
-        .launch_command(&LaunchRequest {
-            model: "claude-opus-5",
-            prompt: &delivered,
-            cwd: worktree,
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
+    let runtime = ahu::harness_runtime::load(&discovered, "claude-code").unwrap();
+    let mut command: ahu::harness::LaunchCommand = serde_json::from_value(
+        runtime
+            .call(
+                "launch",
+                serde_json::json!({
+                    "mode":"interactive", "model":"claude-opus-5",
+                    "permissions":"prompt", "cwd":worktree
+                }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    command.planner_binding_digest = Some(runtime.binding_digest());
+    command.args[command.prompt_arg.unwrap()] = delivered;
+    let enforcement = common::record_enforcement("claude-code");
     let record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "testtask0001".to_string(),
@@ -465,7 +500,6 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -488,66 +522,38 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
 /// not widen the harness's own permission or sandbox defaults.
 #[test]
 fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
-    for (harness, model) in [
-        ("claude-code", "claude-opus-5"),
-        ("codex", "gpt-6-astra"),
-        ("antigravity", "gemini-3.1-pro-high"),
-        ("opencode", "ollama/glm-5.3:cloud"),
-    ] {
-        let adapter = harness::adapter_for(harness).unwrap();
-        let command = adapter
-            .launch_command(&LaunchRequest {
-                model,
+    if !common::in_harness_fixture(
+        "every_adapter_delivers_the_prompt_literally_and_widens_no_permissions",
+    ) {
+        return;
+    }
+    for harness in ["sixth", "codex", "claude-code"] {
+        let plan = common::runtime_plan(
+            harness,
+            &LaunchRequest {
+                model: "synthetic/exact",
                 prompt: HOSTILE_PROMPT,
                 cwd: Path::new("/tmp"),
                 permissions: Default::default(),
-            })
-            .unwrap_or_else(|e| panic!("{harness}: {e}"));
-
-        // The prompt survives byte for byte, in exactly one element.
-        let index = command
-            .prompt_arg
-            .expect("{harness} records the prompt slot");
-        assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness}");
+            },
+        )
+        .unwrap();
+        let command = &plan.command;
+        let index = command.prompt_arg.unwrap();
+        assert_eq!(
+            ahu::orchestration::fence_body(&command.args[index], "request", &plan.delivery.nonce),
+            Some(HOSTILE_PROMPT)
+        );
         assert_eq!(
             command
                 .args
                 .iter()
-                .filter(|a| a.contains("$(touch"))
+                .filter(|arg| arg.contains(HOSTILE_PROMPT))
                 .count(),
-            1,
-            "{harness} must hold the prompt exactly once"
+            1
         );
-        // The exact model is pinned.
-        assert!(command.args.iter().any(|a| a == model), "{harness}");
-        // No adapter selects an identity by name any more: a name is not bound
-        // to the file ahu read, digested, and attributed the instructions to.
-        assert!(
-            !command.args.iter().any(|a| a == "--agent"),
-            "{harness} must not select an agent by name"
-        );
-        // No adapter may widen permissions, sandboxing, or approvals.
-        for forbidden in [
-            "--agent",
-            "--append-system-prompt",
-            "--disallowedTools",
-            "--dangerously-skip-permissions",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--dangerously-bypass-hook-trust",
-            "--permission-mode",
-            "--approve-for-me",
-            "--sandbox",
-            "--ask-for-approval",
-            "--yolo",
-            "--add-dir",
-        ] {
-            assert!(
-                !command.args[..index].iter().any(|a| a == forbidden),
-                "{harness} must not pass {forbidden}"
-            );
-        }
-        // Redaction keeps the prompt out of the stored record.
-        assert_ne!(command.redacted().args[index], HOSTILE_PROMPT, "{harness}");
+        assert_eq!(&command.args[..index], ["--model", "synthetic/exact", "--"]);
+        assert!(!command.redacted().args[index].contains(HOSTILE_PROMPT));
     }
 }
 
@@ -555,40 +561,30 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
 /// instead of implying a guarantee it cannot keep.
 #[test]
 fn adapters_report_their_real_enforcement_limits() {
-    for (harness, model) in [
-        ("claude-code", "claude-opus-5"),
-        ("codex", "gpt-6-astra"),
-        ("antigravity", "gemini-3.1-pro-high"),
-        ("opencode", "ollama/glm-5.3:cloud"),
-    ] {
-        let report = harness::adapter_for(harness)
-            .unwrap()
-            .enforcement(model, Default::default())
-            .unwrap();
-        assert_eq!(report.harness, harness);
-        assert!(
-            !report.model_fixed_for_session,
-            "{harness}: no adapter can hold a model for a whole session"
-        );
-        assert!(!report.gaps.is_empty(), "{harness} must name its gaps");
-        assert!(
-            !report.applied_controls.is_empty(),
-            "{harness} must name what it does control"
-        );
+    if !common::in_harness_fixture("adapters_report_their_real_enforcement_limits") {
+        return;
     }
-
-    // No adapter may claim to select or enforce an agent identity.
-    for harness in ["claude-code", "codex", "antigravity", "opencode"] {
-        let report = harness::adapter_for(harness)
-            .unwrap()
-            .enforcement("x", Default::default())
-            .unwrap();
-        for control in &report.applied_controls {
-            assert!(
-                !control.contains("--agent"),
-                "{harness} must not list agent selection as an applied control: {control}"
-            );
-        }
+    for harness in ["sixth", "codex", "claude-code"] {
+        let plan = common::runtime_plan(
+            harness,
+            &LaunchRequest {
+                model: "synthetic/exact",
+                prompt: "review",
+                cwd: Path::new("/tmp"),
+                permissions: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.enforcement.harness, harness);
+        assert!(!plan.enforcement.model_fixed_for_session);
+        assert!(!plan.enforcement.gaps.is_empty());
+        assert!(!plan.enforcement.applied_controls.is_empty());
+        assert!(
+            plan.enforcement
+                .applied_controls
+                .iter()
+                .all(|c| !c.contains("--agent"))
+        );
     }
 }
 
@@ -617,11 +613,9 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
                 "schema_version = 1\n\
                  harness_preferences = [{harness:?}]\n\
                  model_selection = \"project-ranked\"\n\
-                 catalog_version = {:?}\n\
                  \n[model_rankings]\n\
                  {harness:?} = [{model:?}]\n\
 ",
-                ahu::catalog::CATALOG_VERSION
             ),
         );
         repo.add_agent_on("vela", "1.0.0", harness, model);
@@ -635,7 +629,9 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             model: model.to_string(),
             basis: "named agent".to_string(),
             policy_digest: loaded.digest.clone(),
-            catalog_version: loaded.config.catalog_version.clone(),
+            runtime_binding_digest: ahu::harness_runtime::load(&discovered, harness)
+                .unwrap()
+                .binding_digest(),
         };
         // Every harness resolves, because the fixture PATH installs a fake for
         // each one. Skipping a harness here would have made "no harness is
@@ -688,19 +684,14 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
 /// there is nothing left for a format to select.
 #[test]
 fn a_source_format_only_decides_how_its_file_is_parsed() {
-    use ahu::agent::SourceFormat;
-
-    // A codex definition holds no frontmatter: whatever the file holds is the
-    // verbatim instruction text, frontmatter-looking text and all.
-    assert!(SourceFormat::ClaudeAgent.has_frontmatter());
-    assert!(SourceFormat::AntigravityAgent.has_frontmatter());
-    assert!(!SourceFormat::CodexAgent.has_frontmatter());
-    assert!(SourceFormat::OpenCodeAgent.has_frontmatter());
-
+    if !common::in_harness_fixture("a_source_format_only_decides_how_its_file_is_parsed") {
+        return;
+    }
     // The parse is what ahu delivers: frontmatter is metadata, the body is the
     // instruction text.
     let repo = TestRepo::new();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.install_runtime("codex");
     repo.write(
         ".codex/agents/plain.toml",
         "---\nnot: frontmatter\n---\nplain body\n",
@@ -727,16 +718,16 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
         "frontmatter is still read, just not delivered"
     );
 
-    // The codex-agent parse is verbatim: nothing is stripped, so the
-    // frontmatter-looking text is delivered as instruction text.
+    // The installed fixture defines this opaque format as frontmatter plus
+    // body. Core does not infer a parser from the format name.
     let plain = ahu::agent::find(repo.path(), "plain").unwrap();
-    assert!(plain.instructions.contains("not: frontmatter"));
+    assert_eq!(plain.instructions, "plain body\n");
 
     // And no adapter has anywhere to put a name even if one were derived.
     for harness_id in ["claude-code", "codex", "antigravity"] {
-        let command = harness::adapter_for(harness_id)
-            .unwrap()
-            .launch_command(&LaunchRequest {
+        let command = common::runtime_plan(
+            harness_id,
+            &LaunchRequest {
                 model: match harness_id {
                     "codex" => "gpt-6-astra",
                     "antigravity" => "gemini-3.1-pro-high",
@@ -745,8 +736,10 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
                 prompt: "p",
                 cwd: Path::new("/tmp"),
                 permissions: Default::default(),
-            })
-            .unwrap();
+            },
+        )
+        .unwrap()
+        .command;
         assert!(!command.args.iter().any(|a| a == "--agent"), "{harness_id}");
     }
 }
@@ -755,179 +748,73 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
 /// each harness's own native flag. Absent configuration passes nothing at all.
 #[test]
 fn approval_widening_is_opt_in_and_harness_native() {
-    use ahu::agent::Permissions;
-
-    // Default: ahu adds no permission flag anywhere.
-    for harness_id in ["claude-code", "codex", "antigravity", "opencode"] {
-        let command = harness::adapter_for(harness_id)
-            .unwrap()
-            .launch_command(&LaunchRequest {
-                model: match harness_id {
-                    "codex" => "gpt-6-astra",
-                    "antigravity" => "gemini-3.1-pro-high",
-                    "opencode" => "ollama/glm-5.3:cloud",
-                    _ => "claude-opus-5",
-                },
-                prompt: "p",
-                cwd: Path::new("/tmp"),
-                permissions: Permissions::default(),
-            })
-            .unwrap();
-        for flag in [
-            "--permission-mode",
-            "--dangerously-skip-permissions",
-            "--approve-for-me",
-            "--ask-for-approval",
-            "--sandbox",
-            "--mode",
-            "--auto",
-        ] {
-            assert!(
-                !command.args.iter().any(|a| a == flag),
-                "{harness_id} must pass no permission flag by default, found {flag}"
-            );
-        }
-        if harness_id == "codex" {
-            assert!(
-                !command
-                    .args
-                    .iter()
-                    .any(|a| a.starts_with("mcp_servers.ahu.tools.")),
-                "Codex MCP tools must not be auto-approved for prompt permissions"
-            );
-        }
+    if !common::in_harness_fixture("approval_widening_is_opt_in_and_harness_native") {
+        return;
     }
-
-    // Opt-in maps to the flag each harness actually documents.
-    for (harness_id, model, mode, expected) in [
-        (
-            "claude-code",
-            "claude-opus-5",
-            Permissions::Auto,
-            vec!["--permission-mode", "auto"],
-        ),
-        (
-            "claude-code",
-            "claude-opus-5",
-            Permissions::AcceptEdits,
-            vec!["--permission-mode", "acceptEdits"],
-        ),
-        (
-            "antigravity",
-            "gemini-3.1-pro-high",
-            Permissions::Auto,
-            vec!["--dangerously-skip-permissions"],
-        ),
-        (
-            "antigravity",
-            "gemini-3.1-pro-high",
-            Permissions::AcceptEdits,
-            vec!["--mode", "accept-edits"],
-        ),
-        (
-            "codex",
-            "gpt-6-astra",
-            Permissions::Auto,
-            vec!["--ask-for-approval", "never"],
-        ),
-        (
-            "codex",
-            "gpt-6-astra",
-            Permissions::AcceptEdits,
-            vec!["--approve-for-me"],
-        ),
-        (
-            "opencode",
-            "ollama/glm-5.3:cloud",
-            Permissions::Auto,
-            vec!["--auto"],
-        ),
+    use ahu::agent::Permissions;
+    for (mode, flags) in [
+        (Permissions::Prompt, vec![]),
+        (Permissions::AcceptEdits, vec!["--accept-edits"]),
+        (Permissions::Auto, vec!["--auto"]),
     ] {
-        let command = harness::adapter_for(harness_id)
-            .unwrap()
-            .launch_command(&LaunchRequest {
-                model,
+        let plan = common::runtime_plan(
+            "sixth",
+            &LaunchRequest {
+                model: "sixth/exact",
                 prompt: HOSTILE_PROMPT,
                 cwd: Path::new("/tmp"),
                 permissions: mode,
-            })
-            .unwrap();
-        for flag in &expected {
-            assert!(
-                command.args.iter().any(|a| a == flag),
-                "{harness_id}/{} should pass {flag}: {:?}",
-                mode.as_str(),
-                command.args
-            );
-        }
-        // The prompt is still exactly one literal element after all of that.
-        let index = command.prompt_arg.unwrap();
-        assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness_id}");
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.permissions, mode);
+        let index = plan.command.prompt_arg.unwrap();
+        let mut expected = vec!["--model", "sixth/exact"];
+        expected.extend(flags);
+        expected.push("--");
+        assert_eq!(plan.command.args[..index], expected);
+        assert_eq!(
+            ahu::orchestration::fence_body(
+                &plan.command.args[index],
+                "request",
+                &plan.delivery.nonce
+            ),
+            Some(HOSTILE_PROMPT)
+        );
     }
-
-    // Where a harness has no equivalent of a requested widening, the launch is
-    // refused rather than mapped onto the nearest flag. OpenCode's permission
-    // actions are static configuration and its only flag is the widening
-    // `--auto`, so accept-edits has nothing honest to map to.
-    let refusal = harness::adapter_for("opencode")
-        .unwrap()
-        .launch_command(&LaunchRequest {
-            model: "ollama/glm-5.3:cloud",
-            prompt: HOSTILE_PROMPT,
-            cwd: Path::new("/tmp"),
-            permissions: Permissions::AcceptEdits,
-        })
-        .expect_err("accept-edits must not be approximated")
-        .to_string();
-    assert!(refusal.contains("no accept-edits"), "{refusal}");
-    assert!(refusal.contains("will not widen"), "{refusal}");
-
-    // Every mode explains itself, and only the widening ones say so.
     assert!(!Permissions::Prompt.widens_defaults());
-    assert!(Permissions::AcceptEdits.widens_defaults());
     assert!(Permissions::Auto.widens_defaults());
-    assert!(Permissions::Auto.disclosure().contains("unattended"));
+    assert!(Permissions::AcceptEdits.widens_defaults());
 }
 
 #[test]
-fn codex_auto_approves_local_ahu_tools_in_project_config() {
-    use ahu::agent::Permissions;
-
-    let command = harness::adapter_for("codex")
-        .unwrap()
-        .launch_command(&LaunchRequest {
-            model: "gpt-6-astra",
-            prompt: "p",
+fn native_mcp_approval_flags_are_owned_by_installed_plugins() {
+    if !common::in_harness_fixture("native_mcp_approval_flags_are_owned_by_installed_plugins") {
+        return;
+    }
+    let plan = common::runtime_plan(
+        "sixth",
+        &LaunchRequest {
+            model: "sixth/exact",
+            prompt: "review",
             cwd: Path::new("/tmp"),
-            permissions: Permissions::Auto,
-        })
-        .unwrap();
-    // Per-tool approvals live in the project Codex config. Passing them as
-    // interactive CLI overrides breaks Codex's TUI bootstrap.
+            permissions: ahu::agent::Permissions::Auto,
+        },
+    )
+    .unwrap();
+    assert!(plan.command.args.contains(&"--auto".into()));
     assert!(
-        !command
+        plan.command
             .args
             .iter()
-            .any(|arg| arg.contains("mcp_servers.ahu.tools.")),
-        "Codex MCP approvals must come from project config, not CLI overrides"
+            .all(|arg| !arg.starts_with("mcp_servers."))
     );
-    for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
-        assert!(
-            !command.args.iter().any(|arg| arg.contains(tool)),
-            "provider-backed tool {tool} must retain its approval gate"
-        );
-    }
-
-    let disclosure = harness::adapter_for("codex")
-        .unwrap()
-        .enforcement("gpt-6-astra", Permissions::Auto)
-        .unwrap()
-        .applied_controls
-        .join(" ");
-    assert!(disclosure.contains("ahu_agents_list, ahu_tasks_list"));
-    assert!(disclosure.contains("ahu_request_approval"));
-    assert!(disclosure.contains("pauses without"));
-    assert!(disclosure.contains("remain approval-gated"));
+    assert!(
+        plan.enforcement
+            .gaps
+            .iter()
+            .any(|gap| gap.contains("installed harness plugin"))
+    );
 }
 
 /// The Enforcement block must never deny passing a flag the launch passes.
@@ -947,43 +834,29 @@ fn codex_auto_approves_local_ahu_tools_in_project_config() {
 /// argument vector the same adapter just built.
 #[test]
 fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
-    use ahu::agent::Permissions;
-
-    for (harness, model) in [
-        ("claude-code", "claude-opus-5"),
-        ("codex", "gpt-6-astra"),
-        ("antigravity", "gemini-3.1-pro-high"),
-        ("opencode", "ollama/glm-5.3:cloud"),
+    if !common::in_harness_fixture(
+        "no_enforcement_control_denies_a_flag_the_launch_actually_passes",
+    ) {
+        return;
+    }
+    for permissions in [
+        ahu::agent::Permissions::Prompt,
+        ahu::agent::Permissions::AcceptEdits,
+        ahu::agent::Permissions::Auto,
     ] {
-        for permissions in [
-            Permissions::Prompt,
-            Permissions::AcceptEdits,
-            Permissions::Auto,
-        ] {
-            let adapter = harness::adapter_for(harness).unwrap();
-            // An adapter with no honest mapping for a permission value refuses
-            // the launch. There is then no argv for a control to contradict,
-            // and the contradiction this test exists to catch cannot arise.
-            let Ok(command) = adapter.launch_command(&LaunchRequest {
-                model,
-                prompt: "do the thing",
-                cwd: Path::new("/tmp/ahu-fixture-worktree"),
+        let plan = common::runtime_plan(
+            "sixth",
+            &LaunchRequest {
+                model: "sixth/exact",
+                prompt: "review",
+                cwd: Path::new("/tmp"),
                 permissions,
-            }) else {
-                continue;
-            };
-            let report = adapter.enforcement(model, permissions).unwrap();
-
-            for control in &report.applied_controls {
-                for denied in denied_flags(control) {
-                    assert!(
-                        !command.args.contains(&denied),
-                        "{harness} with permissions = {}: the Enforcement block says \
-                         \"passes no {denied}\" but the launch command is {:?}\n  control: {control}",
-                        permissions.as_str(),
-                        command.args,
-                    );
-                }
+            },
+        )
+        .unwrap();
+        for control in &plan.enforcement.applied_controls {
+            for flag in denied_flags(control) {
+                assert!(!plan.command.args.contains(&flag), "{control}");
             }
         }
     }

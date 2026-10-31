@@ -236,7 +236,19 @@ fn absent_sessions_are_reconciled_without_mutation_and_unbound_coordinators_stay
 
     assert!(
         !manager
-            .group_coordinator("/usr/bin/true", "agent", "codex", "model", &[])
+            .group_coordinator(
+                "/usr/bin/true",
+                "agent",
+                "codex",
+                "model",
+                &crate::harness::LaunchCommand {
+                    program: "true".into(),
+                    args: vec![],
+                    prompt_arg: None,
+                    planner_binding_digest: None,
+                    native_eval_otlp: true
+                }
+            )
             .unwrap()
             .opened_workspace
     );

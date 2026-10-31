@@ -171,20 +171,17 @@ arbitrary shell operations, and harness write events remain reported evidence,
 not OS-level filesystem containment. Approval summaries and targets are kept
 in the task's owner-only state directory.
 
-`ahu setup` is the only setup command. It detects installed supported harnesses,
-asks for a model per detected harness, creates an ahu `dev-<harness>` agent for
-each, installs bundled skills in project locations, and adds a local `ahu mcp
-serve` entry to each harness's project configuration. Setup uses a harness's
-available-model list when that command is supported, intersected with ahu's
-reviewed catalog. Otherwise it offers catalog models and says account access
-is not checked. Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude
-Code uses `.claude/skills/`. The
-canonical bundle remains `.agents/skills/`; for Claude, setup creates ordinary
-project-file copies. Setup checks the local MCP process with an
-initialize/tools-list handshake, validates existing files before writing, and
-refuses conflicting skill, agent, or MCP entries. It refreshes `.agents/ahu/lock.md` after
-creating the project context. Review and commit the files and lock before
-launching; setup does not stage, commit, or push them.
+For offline harness plugin discovery and preparation without activation, see
+[the setup workflow](harness-plugins.md#installation-and-activation).
+These operations do not execute package code or invoke a native provider.
+
+`ahu setup` uses installed harness descriptors and runtime-proposed changes.
+Install and activate the selected runtime plugins first. Each plugin supplies
+model suggestions or native model observations, MCP format and skill locations;
+core preserves exact project selections and applies bounded writes only when
+expected-before digests still match. Model suggestions do not prove entitlement.
+Core checks the local MCP initialize/tools-list handshake and refreshes the
+context lock. Review and commit generated files; setup never stages or pushes.
 
 Antigravity setup retains `.agents/mcp_config.json` for project/print-mode
 use and registers a native user-wide entry for interactive sessions at
@@ -335,7 +332,7 @@ The interactive preview has `schema_version: 1` and these fields:
 | `agent` | Name, version, description, resolved source path, and full identity digest. |
 | `title`, `summary` | Plain sidebar display text, explicit or derived from the assignment. |
 | `harness`, `model`, `selection_basis` | The exact selected pair and why it was selected. |
-| `policy_digest`, `catalog_version` | The configuration and compatibility catalog used. |
+| `policy_digest` | The exact project configuration used; the launch command also freezes installed runtime binding identity. |
 | `permissions` | The manifest's approval mode. |
 | `argv` | Command and arguments, with the delivered prompt redacted. |
 | `prompt_digest`, `prompt_bytes` | SHA-256 and UTF-8 byte length of the original task prompt. |
@@ -362,14 +359,14 @@ Commands return these exit codes:
 
 ## Harness compatibility by execution mode
 
-All five harnesses have interactive and headless adapters. The
-[catalog](../src/catalog.rs), [interactive adapters](../src/harness/mod.rs),
-and [batch command builder](../src/headless.rs) describe different evidence
-and controls for those modes. The catalog's recorded versions are listed below.
-Native-configuration admission limits in this table apply to ordinary headless
-execution; [work mode](#work-mode) skips that admission. The separate
-[work-mode smoke evidence](#headless-work-mode-smoke-evidence) does not extend
-the catalog's validation scope.
+The current implementation uses [installed Rust runtimes](harness-plugins.md),
+with provider-specific behavior outside core. Plugin metadata declares modes and
+native version evidence; each operation can refuse unsupported combinations.
+
+The following table preserves **historical pre-extraction observations**. It is
+not certification of the current plugin-driven candidate. Native admission and
+work-mode evidence remain distinct, and fresh plugin conformance must record the
+actual package, native version, model and execution mode.
 
 | Harness | Interactive evidence | Headless evidence | Limits and refusals |
 | --- | --- | --- | --- |
@@ -776,10 +773,14 @@ in memory, not retained as ahu logs. Admission refuses a new task
 when 16 tasks in the repository runtime store lack terminal results, including
 interrupted tasks; there is no queue.
 
+Background submission is acknowledged after the supervisor acquires ownership.
+The outcome remains `starting` until the native process starts; acceptance of
+the submission does not establish that an agent is running.
+
 The timeout is positive seconds, default 1800 per attempt. `wait` follows the
 current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
 `result` reads the durable envelope without waiting; check its `outcome`, not
-just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
+just the command's exit status. Outcomes include `starting`, `running`, `succeeded`, `failed`,
 `timed_out`, `cancelled`, `boundary_violation`, `capture_failed`, `supervisor_error`, and `interrupted`. New result envelopes use schema 2 and separate process exit, bounded harness
 outcome metadata, native references, and worktree identity. Native transcript,
 final-answer, stderr, and helper-summary text is not copied into the envelope.
@@ -936,9 +937,9 @@ Inside the owning task, request the child through the launching executable:
 
 The child request still needs `--allow-widened-approvals` when its manifest
 requires it. ahu sends a bounded request to the owning supervisor's broker; the
-supervisor starts the real registered child outside the worker sandbox with
-that child's configured harness, model, sandbox, and approval mapping. It does
-not run a replacement harness inside the parent sandbox. Codex workspace-write
+supervisor starts the real registered child as a separate process with
+that child's configured harness, model, and approval mapping. Git worktrees
+separate working copies; they do not enforce filesystem or process isolation. Codex workspace-write
 receives the task's request directory as a narrow additional write root;
 read-only Codex broker transport is refused.
 
@@ -961,45 +962,16 @@ registered specialist, another harness, or independently supervised work.
 then project `[execution].native_helpers`; the default is `disabled`. Child
 requests must retain the policy frozen in their host grant.
 
-| Harness CLI | Headless launch | Bounded native helpers |
-| --- | --- | --- |
-| Claude Code 2.1.269 | Admitted | Refused |
-| Claude Code 2.1.270 | Admitted | Read-only profile |
-| Claude Code 2.1.283 | Admitted; invocation turns hooks off | Refused: no validated bounded-helper profile |
-| Codex 0.154.0/0.155.1/0.157.1 | Admitted | Refused: incomplete helper identity/join event visibility |
-| Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
+Native helper controls belong to the installed harness plugin. Core requests
+one concurrent helper, depth one, the owner's exact model and a USD 5 budget
+per bounded attempt. The plugin must refuse unsupported profiles and disclose
+its enforced controls and remaining gaps. Consult its version-specific
+implementation and documentation; installing ahu alone enables no native profile.
 
-The Claude bounded profile restricts the **entire attempt, including the owner**,
-to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
-Through those tools it cannot edit,
-run shell commands, builds or tests, create native worktrees/teams, or shell-launch
-registered ahu children. Use it for read-only review or investigation:
-
-```sh
-ahu @reviewer --headless --native-helpers bounded \
-  --prompt 'Read the relevant source, use and await a helper, and report findings.' \
-  --output json
-```
-
-This example requires a registered Claude-backed reviewer and CLI 2.1.270.
-All listed profiles must also pass native integration/isolation admission.
-Apply the usual approval-widening flag if its manifest requires it. For a mixed
-workflow, register that reviewer's manifest with `native_helpers = "bounded"`
-and grant it to a shell-capable coordinator at host submission. The coordinator
-launches the separate registered review task and collects its result; the reviewer
-uses native helpers internally. Keep writing assignments in `disabled` mode.
-ahu does not infer from prompt text whether an assignment requires writes.
-
-The integrated bounded profile pins helpers to the owner's exact manifest model,
-one concurrent helper, depth one, and a USD 5 budget per attempt. MCP tools and
-slash commands are excluded. Repository settings and deny rules remain
-discoverable; hook execution as a helper constraint is not established. The
-`ahu-reader` role is requested and actual roles are recorded, but no role
-allowlist or total helper-count cap is enforced. A role change cannot widen the
-profile's tool ceiling or model pin. The ceiling does not establish that
-settings-defined hooks cannot spawn processes or write files; review those
-settings separately before relying on a read-only execution environment.
+A read-only helper profile may restrict the entire owning attempt, including
+shell commands, builds, edits and child launches. Use a separate registered
+reviewer when a coordinator needs implementation tools. Model-tool restrictions
+do not prove that hooks or arbitrary native extensions cannot write files.
 
 `native_completeness` records joins, unjoined helpers, violations, and unknowns.
 A parent's final message is insufficient: bounded attempts require known,
@@ -1457,18 +1429,12 @@ Headless agents can declare nested `input_schema` and `output_schema` objects
 in that YAML frontmatter. See [structured agent contracts](structured-contracts.md)
 for a complete example, the supported Draft 2020-12 subset, and input/result bounds.
 
-`onboard` offers registration for Claude Code and OpenCode Markdown
-definitions—`.claude/agents/<name>.md` and `.opencode/agent/<name>.md`, each
-one file per agent with YAML frontmatter. A declared `model` is checked against
-the catalog rows for that definition's own harness, so an OpenCode agent naming a Claude
-model is a blocker rather than a re-targeted launch. It lists
-Codex TOML and Antigravity native definitions with blockers even though both
-harness adapters exist; this native-onboarding path cannot register them.
-Explicit manifests can use plain Markdown with any supported harness, OpenCode
-included; `antigravity-agent` also reads a Markdown body after frontmatter. An explicit
-`codex-agent` source is delivered verbatim as text; its TOML fields are not parsed
-as native model or instruction metadata. Plain Markdown makes the delivered
-instructions explicit.
+`onboard` asks explicitly enabled runtime plugins for native definition
+candidates. Core validates confined paths, safe selectors and registration
+conflicts. Native format and model interpretation belong to the selected plugin.
+Referenced definitions remain in place; core verifies their digest and refuses a
+native model declaration that conflicts with the registered exact model. A
+plugin's discovery response is not evidence that the harness loaded a definition.
 
 Each resolved registration also has an immutable repository-scoped reference in
 the form `ahu:agent:<uuid>`. The UUID identifies the registered name, version,
@@ -2364,13 +2330,10 @@ usable; aliases resolving into a working tree do not.
 
 The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. ahu does not resolve or invoke a cmux executable; session-host operations use the committed external plugin binding.
 
-The catalog in `src/catalog.rs` records, per adapter, the CLI versions whose
-behavior was checked and the enforcement gaps ahu discloses for it. These are
-compatibility evidence, not an allowlist or a claim that newer versions or
-account entitlements were tested. Where multiple harness installations exist,
-ahu uses the one its own resolution picks; it does not search for a version that
-matches the catalog. An exact project pin can make that choice reproducible.
-Project configuration pins catalog `2026-10-19`; a mismatch is an error.
+Installed runtime descriptors own native version evidence and compatibility.
+Project configuration may pin exact native versions; it no longer selects a
+compiled catalog revision. A missing runtime cannot fall back to a built-in
+adapter, and existing tasks freeze their runtime package/binding identity.
 
 Persisted task records use schema 6, including the frozen `session_host` binding
 and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Only schema 6
@@ -2455,34 +2418,17 @@ ahu's delegation contract travel as prompt text—delivery, not enforcement.
 
 ### Coordinator sessions
 
-All four coordinator shortcuts open the same shape of session: the harness's own
-approval bypass, plus this project's top-ranked model for that harness, both
-passed explicitly on the command line.
-
-| Shortcut | Harness | Arguments ahu passes |
-| --- | --- | --- |
-| `ahu claude` | `claude-code` | `--model <m> --dangerously-skip-permissions` |
-| `ahu codex` | `codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
-| `ahu agy` | `antigravity` | `--model <m> --dangerously-skip-permissions` |
-| `ahu opencode` | `opencode` | `--model <provider>/<model> --auto` |
-
-`<m>` is the first entry for that harness in the project configuration's
-`[model_rankings]`. The model option comes from the same mapping the headless
-adapters use, so a coordinator and a registered agent on one harness cannot end
-up naming the model with different flags. Each shortcut prints its whole argument
-list, model included, before starting, so the disclosed line is exactly what was
-launched.
+Coordinator aliases are provided by installed descriptors. `ahu harness ID`
+also selects an exact descriptor. Direct sessions require a project-ranked model
+and request automatic approval. Plugins map that request to native flags; an
+unsupported combination fails rather than silently weakening permissions.
+OpenCode mini's reviewed version has no automatic interactive mode, so the direct
+automatic shortcut is refused; headless work mode remains a separate capability.
 
 Rankings may include harnesses absent from `harness_preferences`: explicit
-coordinator shortcuts still use those rankings. Only automatic selection walks
-`harness_preferences`. Ranking a moving model alias fixes the requested name,
-not the provider's underlying model revision; see the [OpenCode model
-limitations](#opencode-with-ollama-hosted-models).
-
-A harness with no ranked model launches with **no model option at all**: ahu
-prints a note that the harness default is in use and starts the session on
-whichever model the harness is configured with. ahu does not substitute a model
-the project never agreed to.
+shortcuts use those rankings, while automatic selection walks preferences.
+Requested aliases are not attested model revisions. Missing model rankings are
+errors, and no native default model is silently selected.
 
 These shortcuts explicitly request the harness permission bypass; any outer
 sandbox still applies.
@@ -2495,7 +2441,7 @@ plugin placement when that plugin reports an inherited workspace. The plugin
 owns any repository grouping or window movement; placement errors prevent
 harness startup. `none` or `terminal` selects the current terminal without a
 host. These shortcuts create no task or worktree. Current-terminal operation
-needs no project configuration; plugin placement requires its committed binding.
+requires installed runtime configuration and an exact model ranking; plugin placement also requires its committed session-host binding.
 ahu does not inject `AHU_STATE_DIR`;
 subsequent commands discover checkout and primary coordination paths explicitly.
 Registered child agents retain their own manifest permissions, harness, and

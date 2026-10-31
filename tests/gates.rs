@@ -139,19 +139,16 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
         String::from_utf8_lossy(&output.stderr)
     );
     let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
-    assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
-    let trust: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(repo.state_path().join("home/.claude.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(trust["projects"].as_object().unwrap().len(), 1);
+    assert!(argv.contains("--auto\n"), "{argv}");
+    // This installed fixture declares no native trust capability.
+    assert!(!repo.state_path().join("home/.claude.json").exists());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
-    assert!(!stdout.contains("--permission-mode auto"), "{stdout}");
+    assert!(!stdout.contains("--auto"), "{stdout}");
     let preview = launch(&repo, &["--allow-widened-approvals", "--dry-run"]);
     assert!(preview.status.success());
     let details = String::from_utf8_lossy(&preview.stdout);
-    assert!(details.contains("--permission-mode auto"), "{details}");
+    assert!(details.contains("--auto"), "{details}");
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(
@@ -278,7 +275,9 @@ fn the_preview_shows_the_confirmation_code_only_when_one_is_required() {
         model: "claude-sonnet-5".to_string(),
         basis: "named agent".to_string(),
         policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
+        runtime_binding_digest: ahu::harness_runtime::load(&discovered, "claude-code")
+            .unwrap()
+            .binding_digest(),
     };
     let plan = ahu::launch::plan(&discovered, Some(agent), pair, "review it").unwrap();
 
@@ -328,11 +327,10 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
             "selection_basis": null,
         },
         "policy_digest": "0",
-        "catalog_version": ahu::catalog::CATALOG_VERSION,
         "config_snapshot": {"entries": [], "skipped_directories": []},
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-        "launch_command": {"program": "claude", "args": []},
+        "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
         "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         // prompt_digest is deliberately absent.
         "enforcement": {
@@ -465,20 +463,15 @@ fn write_record(
 
     let repo_root = worktree.parent().and_then(|p| p.parent()).unwrap();
     let discovered = ahu::git::discover(repo_root).expect("fixture repo");
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are sable.\n"), prompt).unwrap();
-    let command = adapter
-        .launch_command(&LaunchRequest {
-            model: "claude-sonnet-5",
-            prompt: &delivered,
-            cwd: worktree,
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let enforcement = adapter
-        .enforcement("claude-sonnet-5", Default::default())
-        .unwrap();
+    let command = common::record_command(&LaunchRequest {
+        model: "claude-sonnet-5",
+        prompt: &delivered,
+        cwd: worktree,
+        permissions: Default::default(),
+    });
+    let enforcement = common::record_enforcement("claude-code");
 
     let mut record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
@@ -506,7 +499,6 @@ fn write_record(
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -539,15 +531,13 @@ fn write_record(
     )
     .unwrap();
     record.delivery = delivery;
-    record.launch_command = adapter
-        .launch_command(&LaunchRequest {
-            model: "claude-sonnet-5",
-            prompt: &delivered,
-            cwd: worktree,
-            permissions: Default::default(),
-        })
-        .unwrap()
-        .redacted();
+    record.launch_command = common::record_command(&LaunchRequest {
+        model: "claude-sonnet-5",
+        prompt: &delivered,
+        cwd: worktree,
+        permissions: Default::default(),
+    })
+    .redacted();
     tamper(&mut record);
     ahu::task::save(task_dir, &record, prompt).unwrap();
 }
@@ -596,11 +586,10 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
             "selection_basis": null,
         },
         "policy_digest": "0",
-        "catalog_version": ahu::catalog::CATALOG_VERSION,
         "config_snapshot": {"entries": [], "skipped_directories": []},
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-        "launch_command": {"program": "claude", "args": []},
+        "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
         "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         "prompt_digest": "0",
         "enforcement": {

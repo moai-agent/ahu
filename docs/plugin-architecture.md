@@ -5,6 +5,27 @@ terminal products integrate through optional skills and plugins. A project can
 require an integration for its own workflow without making it an ahu dependency.
 Current-terminal and headless tasks work without cmux, GitHub, or a tracker.
 
+
+## Customer runtime language policy
+
+All ahu-maintained customer-facing executable code must be implemented in Rust.
+This includes the CLI, shipped harness adapters, executable plugins, session
+hosts, and setup or runtime helpers. Installing and using these components must
+not require Python. Python is allowed only for development tooling, tests,
+fixtures, and experiments that are not shipped as supported customer features.
+A Rust launcher that delegates its implementation to Python does not satisfy
+this rule.
+
+Skills and declarative configuration remain text. External tools such as `gh`,
+cmux, and native harnesses retain their own implementations; this rule governs
+code maintained and distributed by ahu. Plugin wire protocols remain independent
+of implementation language, but ahu-maintained supported plugins must use Rust.
+
+Existing Python adapters require migration before their next supported release.
+Keep them external and optional during migration, preserve their behavior and
+security checks, and verify the Rust replacements through protocol tests and
+live integration checks. Do not claim existing adapters already meet this policy.
+
 ## Ownership
 
 | Core ahu | External integration |
@@ -15,9 +36,12 @@ Current-terminal and headless tasks work without cmux, GitHub, or a tracker.
 | Generic plugin discovery, pins, grants and bounded transports | Provider installation guidance and workflow skills |
 | Bounded task telemetry and evaluation evidence | Provider-specific diagnostics and live conformance tests |
 
-Harness adapters remain in core today. This boundary does not claim that every
-harness is a dynamically installable plugin. Git worktrees separate changes;
-they do not confine processes or filesystem access.
+Native harness implementations live in [Rust runtime packages](harness-plugins.md).
+Core discovers installed descriptors and validates their bounded responses; it
+links only the data contract. Native flags, configuration formats, account probes,
+trust receipts and event decoding belong to those external executables. No
+provider implementation is selected as a built-in fallback. Git worktrees
+separate changes; they do not confine processes or filesystem access.
 
 ## Choose the smallest integration
 
@@ -77,3 +101,13 @@ Test core contracts offline and provider behavior in each plugin. Record live
 checks separately from fixtures and publication verification. Do not claim a
 provider works because an independent fixture passed. Keep private bindings,
 tracker content and raw telemetry out of public source and release artifacts.
+
+## Harness runtime executables
+
+[Installed Rust harness plugins](harness-plugins.md) supply native provider behavior
+through a bounded executable protocol. The [runtime contract](harness-runtime-contract.md)
+separates native inspection, setup proposals, launch planning and event normalization
+from core task, process and MCP authority. Discovery is inert, activation requires
+an explicit runtime grant, and task identities freeze the selected package binding.
+Core has no provider fallback. Native version support can change through a package
+update while core and its data contract remain unchanged.

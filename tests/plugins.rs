@@ -193,6 +193,14 @@ fn disabled_plugin_keeps_actual_coordinators_in_the_current_terminal() {
         ("kiro", "kiro-cli"),
     ] {
         let repo = common::TestRepo::new();
+        let harness = match shortcut {
+            "claude" => "claude-code",
+            "agy" => "antigravity",
+            other => other,
+        };
+        repo.install_runtime(harness);
+        repo.write(".agents/ahu/config.toml", &format!("schema_version=1\nharness_preferences=['{harness}']\nmodel_selection='project-ranked'\n[model_rankings]\n'{harness}'=['fixture-model']\n"));
+        repo.commit("Configure direct harness fixture");
         let scratch = tempfile::tempdir().unwrap();
         let bin = common::fake_harnesses(scratch.path(), &[program], |_| {
             scratch.path().join("unused")

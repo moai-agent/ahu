@@ -2,7 +2,7 @@
 
 mod common;
 
-use ahu::{agent, catalog, config, selection, util};
+use ahu::{agent, config, selection, util};
 use common::TestRepo;
 
 #[test]
@@ -55,8 +55,8 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     repo.write(
         ".agents/ahu/config.toml",
         &text.replace(
-            "catalog_version =",
-            "# byte-level policy change\ncatalog_version =",
+            "schema_version =",
+            "# byte-level policy change\nschema_version =",
         ),
     );
     let after = config::load(repo.path()).unwrap().unwrap();
@@ -90,30 +90,30 @@ fn unknown_schema_version_is_refused() {
 }
 
 #[test]
-fn a_pinned_catalog_this_build_does_not_ship_blocks_selection() {
+fn obsolete_catalog_policy_is_refused_in_latest_configuration() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
+    let text = repo.read(config::LEGACY_CONFIG_PATH);
     repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace(catalog::CATALOG_VERSION, "1999-01-01"),
+        config::LEGACY_CONFIG_PATH,
+        &format!("catalog_version = \"old\"\n{text}"),
     );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("1999-01-01"), "{error}");
-    assert!(error.contains("will not substitute"), "{error}");
+    assert!(config::load(repo.path()).is_err());
 }
 
 #[test]
-fn unknown_harness_or_model_in_the_ranking_is_refused() {
+fn rankings_accept_plugin_owned_model_identifiers_without_substitution() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
-    repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace("\"claude-opus-5\"", "\"gpt-hypothetical\""),
+    let text = repo
+        .read(config::LEGACY_CONFIG_PATH)
+        .replace("claude-opus-5", "custom/exact-v9");
+    repo.write(config::LEGACY_CONFIG_PATH, &text);
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    assert_eq!(
+        loaded.config.model_rankings["claude-code"][0],
+        "custom/exact-v9"
     );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("gpt-hypothetical"), "{error}");
 }
 
 #[test]
@@ -139,7 +139,6 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
         schema_version: 1,
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
-        catalog_version: catalog::CATALOG_VERSION.to_string(),
         harness_version_pins: Default::default(),
         model_rankings: [("claude-code".to_string(), vec!["claude-opus-5".to_string()])]
             .into_iter()
@@ -178,7 +177,6 @@ fn rendered_config_round_trips() {
         schema_version: 1,
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
-        catalog_version: catalog::CATALOG_VERSION.to_string(),
         harness_version_pins: [("claude-code".to_string(), "2.1.283".to_string())]
             .into_iter()
             .collect(),
@@ -208,50 +206,39 @@ fn rendered_config_round_trips() {
 }
 
 #[test]
-fn headless_opencode_native_state_trust_is_explicit_and_round_trips() {
+fn provider_owned_native_settings_are_explicit_bounded_and_round_trip() {
     let repo = TestRepo::new();
     repo.init_config();
-    let mut config = config::load(repo.path()).unwrap().unwrap().config;
-    config.headless.trust_opencode_native_state = true;
-    let rendered = config::try_render(&config).unwrap();
-    assert!(rendered.contains("trust_opencode_native_state: true"));
-    repo.remove(config::LEGACY_CONFIG_PATH);
-    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
-    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, config);
-
-    config.headless.trust_opencode_native_state = false;
-    assert!(
-        !config::try_render(&config)
-            .unwrap()
-            .contains("trust_opencode_native_state")
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    policy.headless.native_settings.insert(
+        "sixth".into(),
+        serde_json::json!({"trust_native_state":true}),
     );
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, policy);
+    policy
+        .headless
+        .native_settings
+        .insert("sixth".into(), serde_json::json!("wrong type"));
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
+    assert!(config::load(repo.path()).is_err());
 }
 
 #[test]
 fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     let repo = TestRepo::new();
-    repo.write(
-        config::LEGACY_CONFIG_PATH,
-        &format!(
-            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    assert!(loaded.config.harness_version_pins.is_empty());
-
-    repo.write(
-        config::LEGACY_CONFIG_PATH,
-        &format!(
-            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n[harness_version_pins]\n\"claude-code\" = \"2.1\"\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
+    repo.init_config();
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    assert!(policy.harness_version_pins.is_empty());
+    policy
+        .harness_version_pins
+        .insert("claude-code".into(), "2.1".into());
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
     let error = config::load(repo.path()).unwrap_err().to_string();
     assert!(error.contains("exact semantic version"), "{error}");
 }
-
-// --- agent manifests ---
 
 #[test]
 fn a_registered_agent_resolves_its_native_definition() {
@@ -311,19 +298,11 @@ fn manifest_stem_and_name_must_match() {
 }
 
 #[test]
-fn a_model_outside_the_catalog_is_refused_rather_than_substituted() {
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    for file in [".agents/ahu/agents/chris.md", ".claude/agents/chris.md"] {
-        let text = repo.read(file);
-        repo.write(file, &text.replace("claude-opus-5", "claude-imaginary-9"));
-    }
-    let error = agent::find(repo.path(), "chris").unwrap_err().to_string();
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
-    );
+fn manifest_model_names_are_plugin_owned_and_preserved_exactly() {
+    let text = "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: provider/future-model\n---\nExact instructions.\n";
+    let (manifest, _) = agent::parse_manifest(text, std::path::Path::new("custom.md")).unwrap();
+    assert_eq!(manifest.harness, "sixth");
+    assert_eq!(manifest.model, "provider/future-model");
 }
 
 #[test]
@@ -402,81 +381,46 @@ fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(
-        error.contains("does not translate an agent from one harness to another"),
+        error.contains("harness runtime operation refused"),
         "{error}"
     );
 }
 
 #[test]
-fn each_supported_harness_pins_models_from_its_own_catalog_entry() {
-    // A model belonging to another harness is refused rather than substituted.
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.write(
-        ".agents/ahu/agents/sam.md",
-        "---\n\
-         okf_version: 0.2\n\
-         type: ahu:agent\n\
-         title: sam\n\
-         description: fixture agent\n\
-         status: stable\n\
-         tags: [agents]\n\
-         harness: codex\n\
-         model: claude-opus-5\n\
-         permissions: prompt\n\
-         version: 0.1.0\n\
-         \n\
-         ---\n\
-         \n\
-         You are sam. Fixture instructions.\n",
-    );
-    let error = agent::load_all(repo.path()).unwrap_err().to_string();
-    assert!(
-        error.contains("is not a catalog model for harness"),
-        "{error}"
-    );
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
-    );
+fn manifest_validation_rejects_option_shaped_models_without_native_execution() {
+    let text = "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: --option\n---\nInstructions.\n";
+    assert!(agent::parse_manifest(text, std::path::Path::new("custom.md")).is_err());
 }
-
-// --- automatic selection ---
 
 #[test]
 fn automatic_selection_follows_the_project_order_deterministically() {
     let repo = TestRepo::new();
     repo.init_config();
     let loaded = config::load(repo.path()).unwrap().unwrap();
-    let pair = selection::resolve_automatic(&loaded).expect("resolves");
+    let pair = selection::resolve_automatic(&ahu::git::discover(repo.path()).unwrap(), &loaded)
+        .expect("resolves");
     assert_eq!(pair.harness, "claude-code");
     assert_eq!(pair.model, "claude-opus-5");
     assert_eq!(pair.policy_digest, loaded.digest);
     assert!(pair.basis.contains("harness_preferences"), "{}", pair.basis);
     // Repeating the resolution gives the same answer.
-    assert_eq!(selection::resolve_automatic(&loaded).unwrap(), pair);
+    assert_eq!(
+        selection::resolve_automatic(&ahu::git::discover(repo.path()).unwrap(), &loaded).unwrap(),
+        pair
+    );
 }
 
 #[test]
-fn a_project_order_naming_only_unsupported_harnesses_reports_a_policy_problem() {
+fn a_project_without_ranked_models_reports_a_policy_problem() {
     let repo = TestRepo::new();
-    repo.write(
-        ".agents/ahu/config.toml",
-        &format!(
-            "schema_version = 1\n\
-             harness_preferences = [\"codex\"]\n\
-             model_selection = \"project-ranked\"\n\
-             catalog_version = \"{}\"\n\
-             \n[knowledge]\n\
-             bundles = []\n",
-            catalog::CATALOG_VERSION
-        ),
-    );
+    repo.init_config();
+    let mut policy = config::load(repo.path()).unwrap().unwrap().config;
+    policy.model_rankings.clear();
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&policy));
     let loaded = config::load(repo.path()).unwrap().unwrap();
-    let error = selection::resolve_automatic(&loaded)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("project policy question"), "{error}");
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    assert!(selection::resolve_automatic(&discovered, &loaded).is_err());
 }
 
 #[test]
@@ -610,43 +554,6 @@ fn a_relative_path_entry_never_resolves_a_harness() {
     );
 }
 
-/// Hooks must not be read through a symlinked `.claude`.
-///
-/// `Scope::Project` is the one scope whose `why_not_project_policy` is "it is
-/// project policy", so `outside_project_policy` excludes it and the
-/// non-project-hook warning is suppressed. Reading through a symlink labelled
-/// hooks from outside the repository as project policy, and the preview also
-/// claimed they travel into the task worktree — which is false, because
-/// `materialize` deletes configuration symlinks from it. Both errors pointed
-/// the permissive way.
-#[test]
-fn hooks_are_not_read_through_a_symlinked_claude_directory() {
-    let repo = TestRepo::new();
-    let outside = repo.path().join("outside-claude");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(
-        outside.join("settings.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/synthetic-marker"}]}]}}"#,
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(&outside, repo.path().join(".claude")).unwrap();
-
-    let found = ahu::hooks::collect(repo.path(), "claude-code").expect("collect succeeds");
-    assert!(
-        !found
-            .hooks
-            .iter()
-            .any(|h| h.command.as_deref() == Some("/usr/bin/synthetic-marker")),
-        "a hook was read through a symlinked .claude: {:?}",
-        found.hooks
-    );
-    assert!(
-        found.unreadable.iter().any(|u| u.contains("symlink")),
-        "the refusal must be disclosed, not silent: {:?}",
-        found.unreadable
-    );
-}
-
 /// A proposed manifest must be parseable by the loader that will read it back.
 ///
 /// `proposed_manifest` quotes candidate-derived values as YAML double-quoted
@@ -704,54 +611,19 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
     }
 }
 
-/// Updating a verified harness version moves the catalog revision, and a
-/// project pinned to the previous one stops rather than being upgraded for free.
-///
-/// That is the point of the pin: catalog `2026-10-19` adds current harness
-/// compatibility evidence while preserving project selection behavior.
-/// headless compatibility check. Changing which catalog a project uses is a
-/// project decision, made by editing `catalog_version`, not a side effect of
-/// installing a newer ahu.
 #[test]
-fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-10-19");
-
-    let error = catalog::require_version("2026-09-27")
-        .expect_err("a superseded pin must not be silently accepted")
-        .to_string();
-    assert!(error.contains("2026-09-27"), "{error}");
-    assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
-    assert!(error.contains("will not substitute"), "{error}");
-    assert!(
-        error.contains("catalog_version"),
-        "the message must name the field to edit: {error}"
-    );
-
-    // Through a real project configuration, too.
+fn installed_provider_requirement_is_separate_from_policy_parsing() {
     let repo = TestRepo::new();
     repo.init_config();
-    let text = repo.read(".agents/ahu/config.toml");
-    repo.write(
-        ".agents/ahu/config.toml",
-        &text.replace(catalog::CATALOG_VERSION, "2026-09-12"),
-    );
-    let error = config::load(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("2026-09-12"), "{error}");
-
-    // The catalog this build ships does carry the OpenCode pair.
-    assert!(catalog::require_version(catalog::CATALOG_VERSION).is_ok());
-    assert!(catalog::harness("opencode").is_some());
-    assert_eq!(
-        catalog::models_for("opencode")
-            .iter()
-            .map(|m| m.model)
-            .collect::<Vec<_>>(),
-        vec!["ollama/glm-5.3:cloud"]
-    );
+    let text = repo
+        .read(config::LEGACY_CONFIG_PATH)
+        .replace("claude-code", "sixth");
+    repo.write(config::LEGACY_CONFIG_PATH, &text);
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    assert!(selection::resolve_automatic(&discovered, &loaded).is_err());
 }
 
-/// A registered OpenCode agent loads, keeps its harness, and is refused a model
-/// belonging to someone else.
 #[test]
 fn an_opencode_agent_keeps_its_own_harness_and_model() {
     let repo = TestRepo::new();
@@ -779,19 +651,14 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
     assert_eq!(loaded.manifest.harness, "opencode");
     assert_eq!(loaded.manifest.model, "ollama/glm-5.3:cloud");
 
-    // The bare Ollama tag is not a catalog model for this harness.
+    // Core preserves opaque model identifiers; native validation belongs to the runtime.
     repo.write(
         ".agents/ahu/agents/oc.md",
         &manifest.replace("ollama/glm-5.3:cloud", "glm-5.3:cloud"),
     );
-    let error = agent::load_all(repo.path()).unwrap_err().to_string();
-    assert!(
-        error.contains("is not a catalog model for harness"),
-        "{error}"
-    );
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
+    assert_eq!(
+        agent::load_all(repo.path()).unwrap()[0].manifest.model,
+        "glm-5.3:cloud"
     );
 }
 
@@ -807,13 +674,20 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
 fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
     let repo = TestRepo::new();
     repo.init_config();
+    common::runtime::install(
+        repo.path(),
+        "opencode",
+        "opencode",
+        ".opencode/agent",
+        "opencode-agent",
+        &["ollama/glm-5.3:cloud"],
+    );
     repo.write(
         ".opencode/agent/reviewer.md",
         "---\ndescription: Reviews changes\nmode: primary\nmodel: ollama/glm-5.3:cloud\n\
          temperature: 0.1\n---\n\nYou review changes.\n",
     );
-    // A definition whose model belongs to another harness is a blocker, not a
-    // silent re-targeting of the launch.
+    // Opaque native model metadata is preserved without silent retargeting.
     repo.write(
         ".opencode/agent/borrowed.md",
         "---\ndescription: Borrowed model\nmodel: claude-opus-5\n---\n\nBody.\n",
@@ -832,7 +706,7 @@ fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
         .expect("the OpenCode definition is a candidate");
     assert_eq!(reviewer.path, ".opencode/agent/reviewer.md");
     assert_eq!(reviewer.format.as_str(), "opencode-agent");
-    assert_eq!(reviewer.format.native_harness(), Some("opencode"));
+    assert_eq!(reviewer.harness, "opencode");
     assert_eq!(
         reviewer.native_model.as_deref(),
         Some("ollama/glm-5.3:cloud")
@@ -852,15 +726,9 @@ fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
         .iter()
         .find(|c| c.name == "borrowed")
         .expect("the borrowed-model definition is still listed");
-    assert!(!borrowed.registrable());
-    assert!(
-        borrowed
-            .blockers
-            .iter()
-            .any(|b| b.contains("claude-opus-5") && b.contains("opencode")),
-        "the blocker must name the model and the harness it was checked against: {:?}",
-        borrowed.blockers
-    );
+    assert!(borrowed.registrable());
+    assert_eq!(borrowed.native_model.as_deref(), Some("claude-opus-5"));
+    // Discovery preserves the plugin's assessment; it cannot invent a core model catalog.
 
     let inheriting = candidates
         .iter()

@@ -5,14 +5,7 @@
 //! translate an agent to another harness, drop native settings, or widen
 //! permissions beyond the manifest request.
 
-pub mod antigravity;
-pub mod claude_code;
-pub mod codex;
-pub mod codex_metadata;
-pub mod isolation;
-pub mod kiro;
 pub(crate) mod native_trust;
-pub mod opencode;
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +43,12 @@ pub struct LaunchRequest<'a> {
 pub struct LaunchCommand {
     pub program: String,
     pub args: Vec<String>,
+    /// Plugin evidence that native export is compatible with the eval receiver.
+    pub native_eval_otlp: bool,
+    /// Digest of the committed planner binding; prevents changing planner policy
+    /// or rebuilding a plugin-planned task through a built-in adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_binding_digest: Option<String>,
     /// Index in `args` holding the task prompt, when one is passed there.
     ///
     /// Task records store the command with this element replaced, so a prompt is
@@ -65,15 +64,13 @@ pub const REDACTED_PROMPT: &str = "<prompt: see prompt.txt>";
 /// Set the native task directory when launching a harness process.
 pub(crate) fn configure_task_directory(
     command: &mut std::process::Command,
-    harness: &str,
+    _harness: &str,
     cwd: &std::path::Path,
 ) {
     command.current_dir(cwd);
-    if harness == "opencode" {
-        // OpenCode 2's mini and run prefer PWD over process.cwd() and chdir
-        // there. Command::current_dir alone leaves the parent's PWD intact.
-        command.env("PWD", cwd);
-    }
+    // Keep the standard working-directory environment consistent with cwd for
+    // every native process. Plugins need no provider-specific environment hook.
+    command.env("PWD", cwd);
 }
 
 impl LaunchCommand {
@@ -90,55 +87,6 @@ impl LaunchCommand {
     }
 }
 
-/// The exact-model option a harness CLI takes, with the checks that option needs.
-///
-/// One mapping serves the headless adapters and the coordinator shortcuts in
-/// `crate::commands`, so a coordinating session cannot pass a flag an adapter
-/// does not use, and a model an adapter would refuse is refused there too.
-///
-/// Verified against the installed CLIs' own help: Claude Code, the Antigravity
-/// CLI and OpenCode take `--model`; Codex takes `-m` (its `--model` alias is
-/// equivalent, and `-m` is what the catalog's enforcement gap names).
-pub fn model_args(harness_id: &str, model: &str) -> Result<Vec<String>> {
-    let entry = crate::catalog::harness(harness_id).ok_or_else(|| {
-        crate::util::Error::new(format!(
-            "the compatibility catalog has no entry for harness {harness_id:?}, so ahu cannot \
-             name the option that CLI takes for a model. This is an ahu build problem, not a \
-             repository one."
-        ))
-    })?;
-    let name = entry.display_name;
-    let flag = match harness_id {
-        "claude-code" | "antigravity" | "opencode" | "kiro" => "--model",
-        "codex" => "-m",
-        other => {
-            bail!("ahu has no validated model option for harness {other:?}. It will not guess one.")
-        }
-    };
-    if model.is_empty() {
-        bail!("the {name} adapter requires an exact model identifier.");
-    }
-    if model.starts_with('-') {
-        bail!("model identifier {model:?} would be read as an option by the {name} CLI.");
-    }
-    // OpenCode documents `--model` as `provider/model`. An unqualified
-    // identifier is a silent-misroute risk: which provider it would reach
-    // depends on the user's configuration, and ahu will not guess one.
-    if entry.supports(crate::catalog::Feature::ProviderQualifiedModels)
-        && !model.split_once('/').is_some_and(|(provider, rest)| {
-            !provider.is_empty() && !rest.is_empty() && !rest.contains('/')
-        })
-    {
-        bail!(
-            "model identifier {model:?} is not provider-qualified. {name}'s --model takes \
-             <provider>/<model>, where the provider half names one of the providers \
-             {name}'s own configuration defines. ahu will not guess which provider an \
-             unqualified identifier means; name it in the manifest."
-        );
-    }
-    Ok(vec![flag.to_string(), model.to_string()])
-}
-
 /// What an adapter can actually guarantee about the session it starts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnforcementReport {
@@ -152,101 +100,155 @@ pub struct EnforcementReport {
     pub applied_controls: Vec<String>,
 }
 
-pub trait Adapter {
-    fn id(&self) -> &'static str;
-    /// Build the exact command for a launch.
-    fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand>;
-    /// Report what this adapter can enforce on this machine.
-    ///
-    /// Takes the launch's `permissions` because the report describes the flags
-    /// this adapter actually passes, and those depend on it. A report built
-    /// without it can only assert a fixed list, which is how the Enforcement
-    /// block came to claim ahu passes no `--permission-mode` on a launch that
-    /// passes exactly that.
-    ///
-    /// Fallible because the report is built from the compatibility catalog. The
-    /// entry is there in every shipped build, but a catalog edit that does not
-    /// update an adapter must surface as an error the caller can print, not as
-    /// a panic inside a harness adapter.
-    fn enforcement(
-        &self,
-        model: &str,
-        permissions: crate::agent::Permissions,
-    ) -> Result<EnforcementReport>;
+/// Resolve native launch behavior exclusively through the installed runtime.
+pub(crate) fn task_command(
+    repo: &crate::git::Repo,
+    harness: &str,
+    request: &LaunchRequest<'_>,
+    batch: Option<&crate::headless::Spec>,
+) -> Result<LaunchCommand> {
+    let runtime = crate::harness_runtime::load(repo, harness)?;
+    let version = match batch {
+        Some(spec) => spec.harness_version.clone(),
+        None => probe_version(repo, &runtime)?,
+    };
+    let value = runtime.call(
+        "launch",
+        serde_json::json!({
+            "mode": if batch.is_some() { "headless" } else { "interactive" },
+            "model": request.model, "permissions": request.permissions,
+            "work_mode": batch.is_some_and(|s| s.options.work_mode),
+            "session": batch.and_then(|s| s.session.as_deref()),
+            "native_version": version,
+            "timeout_seconds": batch.map_or(1800, |s| s.options.timeout_seconds),
+            "cwd": request.cwd,
+            "broker_dir": batch.and_then(|s| s.broker_dir.as_ref()),
+            "native_profile": batch.and_then(|s| s.native_profile.as_ref()),
+            "native_controls": batch.map(|s| &s.native_controls).cloned().unwrap_or_default(),
+        }),
+    )?;
+    decode_plan(
+        value,
+        runtime.descriptor().program.as_str(),
+        Some(request.prompt),
+        runtime.binding_digest(),
+    )
 }
 
-pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
-    match harness_id {
-        "claude-code" => Ok(Box::new(claude_code::ClaudeCode)),
-        "codex" => Ok(Box::new(codex::Codex)),
-        "antigravity" => Ok(Box::new(antigravity::Antigravity)),
-        "opencode" => Ok(Box::new(opencode::OpenCode)),
-        "kiro" => Ok(Box::new(kiro::Kiro)),
-        other => bail!(
-            "ahu has no validated adapter for harness {other:?}. \
-             It will not substitute another harness."
-        ),
+/// A coordinator's direct session has no injected task prompt.
+pub(crate) fn direct_command(
+    repo: &crate::git::Repo,
+    harness: &str,
+    model: &str,
+) -> Result<LaunchCommand> {
+    let runtime = crate::harness_runtime::load(repo, harness)?;
+    let version = probe_version(repo, &runtime)?;
+    let value = runtime.call(
+        "launch",
+        serde_json::json!({
+            "mode": "direct", "model": model, "permissions": "auto", "work_mode": false,
+            "session": null, "native_version": version, "timeout_seconds": 1800,
+            "cwd": repo.root, "broker_dir": null, "native_profile": null, "native_controls": [],
+        }),
+    )?;
+    decode_plan(
+        value,
+        runtime.descriptor().program.as_str(),
+        None,
+        runtime.binding_digest(),
+    )
+}
+
+pub(crate) fn probe_version(
+    repo: &crate::git::Repo,
+    runtime: &crate::harness_runtime::Runtime,
+) -> Result<String> {
+    let value = runtime.call(
+        "probe",
+        crate::harness_runtime::native_params(repo, runtime.descriptor())?,
+    )?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| crate::util::is_semver(v))
+        .ok_or_else(|| crate::util::Error::new("runtime returned an invalid native version"))?;
+    Ok(version.to_owned())
+}
+
+fn decode_plan(
+    value: serde_json::Value,
+    program: &str,
+    prompt: Option<&str>,
+    digest: String,
+) -> Result<LaunchCommand> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Plan {
+        native_eval_otlp: bool,
+        program: String,
+        args: Vec<String>,
+        prompt_arg: Option<usize>,
     }
+    let mut plan: Plan = serde_json::from_value(value)
+        .map_err(|_| crate::util::Error::new("invalid native launch plan"))?;
+    if plan.program != program
+        || plan.args.len() > 256
+        || plan
+            .args
+            .iter()
+            .any(|s| s.contains('\0') || s.len() > 65536)
+        || plan.args.iter().map(String::len).sum::<usize>() > 262144
+    {
+        bail!("native launch plan violates executable or argument bounds");
+    }
+    let placeholders = plan
+        .args
+        .iter()
+        .filter(|s| s.as_str() == REDACTED_PROMPT)
+        .count();
+    match (prompt, plan.prompt_arg) {
+        (Some(prompt), Some(index))
+            if index.checked_add(1) == Some(plan.args.len())
+                && placeholders == 1
+                && plan.args[index] == REDACTED_PROMPT =>
+        {
+            plan.args[index] = prompt.into()
+        }
+        (None, None) if placeholders == 0 => (),
+        _ => bail!("native launch plan violates prompt contract"),
+    }
+    Ok(LaunchCommand {
+        program: plan.program,
+        native_eval_otlp: plan.native_eval_otlp,
+        args: plan.args,
+        prompt_arg: plan.prompt_arg,
+        planner_binding_digest: Some(digest),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use serde_json::json;
     #[test]
-    fn adapter_lookup_fails_closed_for_unregistered_harnesses() {
-        assert!(adapter_for("codex").is_ok());
-        assert!(
-            adapter_for("unknown")
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("no validated adapter")
-        );
-    }
-
-    #[test]
-    fn model_arguments_require_an_exact_safe_catalog_model() {
-        assert_eq!(model_args("codex", "gpt-5.5").unwrap(), ["-m", "gpt-5.5"]);
-        assert_eq!(
-            model_args("claude-code", "claude-sonnet").unwrap(),
-            ["--model", "claude-sonnet"]
-        );
-        assert!(
-            model_args("missing", "model")
-                .unwrap_err()
-                .to_string()
-                .contains("no entry for harness")
-        );
-        assert!(
-            model_args("codex", "")
-                .unwrap_err()
-                .to_string()
-                .contains("exact model")
-        );
-        assert!(
-            model_args("codex", "--help")
-                .unwrap_err()
-                .to_string()
-                .contains("option")
-        );
-        assert!(
-            model_args("opencode", "model-without-provider")
-                .unwrap_err()
-                .to_string()
-                .contains("provider-qualified")
-        );
-        assert!(
-            model_args("opencode", "/model")
-                .unwrap_err()
-                .to_string()
-                .contains("provider-qualified")
-        );
-        assert!(
-            model_args("opencode", "provider/")
-                .unwrap_err()
-                .to_string()
-                .contains("provider-qualified")
-        );
+    fn validates_native_identity_prompt_boundary_and_bounds() {
+        let value = json!({"native_eval_otlp":true,"program":"sixth", "args":["--",REDACTED_PROMPT], "prompt_arg":1});
+        let plan =
+            decode_plan(value.clone(), "sixth", Some("--literal"), "binding".into()).unwrap();
+        assert_eq!(plan.args, ["--", "--literal"]);
+        assert_eq!(plan.redacted().args[1], REDACTED_PROMPT);
+        for (field, replacement) in [
+            ("program", json!("/bin/sh")),
+            ("prompt_arg", json!(0)),
+            ("args", json!([REDACTED_PROMPT, REDACTED_PROMPT])),
+            ("extra", json!(true)),
+        ] {
+            let mut invalid = value.clone();
+            invalid[field] = replacement;
+            assert!(decode_plan(invalid, "sixth", Some("prompt"), "binding".into()).is_err());
+        }
+        assert!(decode_plan(value, "sixth", None, "binding".into()).is_err());
+        let direct = json!({"native_eval_otlp":true,"program":"sixth","args":[],"prompt_arg":null});
+        assert!(decode_plan(direct, "sixth", None, "binding".into()).is_ok());
     }
 }

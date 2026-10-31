@@ -260,63 +260,21 @@ fn utility_marker_inspection_does_not_follow_git_pointers_or_unbounded_ancestry(
     }
 }
 
-/// A catalog entry that lists several verified versions matches any of them.
-///
-/// OpenCode updates itself in place: the install used to verify its adapter
-/// reported 1.18.29 at the start of the review and 1.18.30 by the end of it,
-/// with no user action. An entry that could only name one of the two would tell
-/// a user on the other that the adapter was verified against a version they do
-/// not have, which is a false warning rather than a cautious one.
+/// Installed version evidence is metadata, not a core version allowlist.
 #[test]
 fn observed_versions_are_evidence_not_an_allowlist() {
-    let entry = ahu::catalog::harness("opencode").expect("catalog entry");
-    assert!(
-        entry.verified_versions.contains(','),
-        "this test is only meaningful for a multi-version entry: {}",
-        entry.verified_versions
-    );
-
-    let verified: Vec<&str> = entry
-        .verified_versions
-        .split(',')
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .collect();
-    assert_eq!(
-        verified,
-        vec![
-            "1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34", "2.0.32",
-        ]
-    );
-
-    // The current installed CLI floats by default. Only a missing or
-    // unparseable version produces a prerequisite note.
-    let prerequisite = ahu::selection::check_prerequisite("opencode");
-    if let Some(version) = &prerequisite.version {
-        assert!(
-            ahu::catalog::version_token(version).is_some(),
-            "{version:?}"
-        );
-        assert!(prerequisite.notes.is_empty(), "{:?}", prerequisite.notes);
+    if !common::in_harness_fixture("observed_versions_are_evidence_not_an_allowlist") {
+        return;
     }
-
-    // Catalog entries name only versions whose surface has been observed.
-    for (harness, expected) in [
-        ("claude-code", vec!["2.1.269", "2.1.283", "2.1.288"]),
-        ("codex", vec!["0.154.0", "0.157.1", "0.160.0"]),
-        ("antigravity", vec!["1.2.2", "1.2.16", "1.4.2"]),
-    ] {
-        let entry = ahu::catalog::harness(harness).expect("catalog entry");
-        let versions: Vec<&str> = entry
-            .verified_versions
-            .split(',')
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .collect();
-        assert!(
-            versions == expected,
-            "{harness} verified versions differ: {}",
-            entry.verified_versions
-        );
-    }
+    let repo = common::TestRepo::new();
+    repo.install_runtime("sixth");
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let descriptor = ahu::harness_runtime::discover(&discovered)
+        .unwrap()
+        .remove(0);
+    assert_eq!(descriptor.tested_versions, ["1.2.3"]);
+    let prerequisite = ahu::selection::check_prerequisite(&discovered, "sixth").unwrap();
+    assert_eq!(prerequisite.version.as_deref(), Some("1.2.3"));
+    ahu::catalog::check_version("9.8.7", None).unwrap();
+    assert!(ahu::catalog::check_version("9.8.7", Some("1.2.3")).is_err());
 }

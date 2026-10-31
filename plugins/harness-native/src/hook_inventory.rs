@@ -1,0 +1,1371 @@
+//! Harness hooks: shell commands the harness runs on its own lifecycle events.
+//!
+//! ahu reports visible hooks with their scope, event, and digest. Hooks outside
+//! shared project policy raise a consistency warning because they can differ
+//! between teammates. Local repository settings travel with the snapshot; home
+//! and managed settings remain at their native locations.
+//!
+//! ahu never adds, edits, removes, or disables hooks. Hook and approval-settings
+//! inspection covers Claude Code; other harnesses report unknown coverage.
+//! Hook commands are not serialized because they can contain credentials.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use crate::util::display_safe;
+use crate::util::{Result, digest_bytes};
+
+/// Where a hook is configured, which decides whether it is project policy and
+/// whether it travels into a task worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    /// `<repo>/.claude/settings.json` — shared project policy.
+    Project,
+    /// `<repo>/.claude/settings.local.json` — in the repository, but typically
+    /// ignored by Git, so not necessarily shared or reviewed.
+    ProjectLocal,
+    /// `~/.claude/settings.json` — this machine's user only.
+    User,
+    /// Machine policy. Required, and not removable by ahu.
+    Managed,
+}
+
+#[cfg(test)]
+impl Scope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Project => "project",
+            Scope::ProjectLocal => "project-local",
+            Scope::User => "user",
+            Scope::Managed => "managed",
+        }
+    }
+
+    /// Whether a hook at this scope is part of the shared project policy that
+    /// every ahu user in the project is supposed to be running.
+    pub fn is_project_policy(self) -> bool {
+        matches!(self, Scope::Project)
+    }
+
+    /// Why a hook at this scope is not shared project policy.
+    ///
+    /// The reasons genuinely differ: a `settings.local.json` hook does travel
+    /// into the worktree but is typically Git-ignored, while a user hook is the
+    /// opposite. Saying "does not travel" for both would be wrong.
+    pub fn why_not_project_policy(self) -> &'static str {
+        match self {
+            Scope::Project => "it is project policy",
+            Scope::ProjectLocal => {
+                "in the repository and it does travel into the task worktree, but this file is \
+                 conventionally Git-ignored, so it may never have been shared or reviewed"
+            }
+            Scope::User => {
+                "configured in a home directory: it does not travel into the task worktree and \
+                 may differ for every teammate"
+            }
+            Scope::Managed => {
+                "machine policy: it does not travel into the task worktree and ahu cannot \
+                 remove or override it"
+            }
+        }
+    }
+
+    /// Whether configuration at this scope is copied into a task worktree.
+    ///
+    /// Only paths inside the repository travel; a hook in the user's home
+    /// directory keeps its native handling and applies from wherever the
+    /// harness reads it.
+    pub fn travels_into_worktree(self) -> bool {
+        matches!(self, Scope::Project | Scope::ProjectLocal)
+    }
+}
+
+/// One configured hook command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hook {
+    /// Harness lifecycle event, e.g. `PreToolUse`.
+    pub event: String,
+    /// Matcher the event is filtered by, when the event supports one.
+    pub matcher: Option<String>,
+    /// `command` for a shell hook; anything else is recorded as declared.
+    pub kind: String,
+    /// The shell command, when this is a command hook.
+    ///
+    /// Never serialized: hook commands routinely embed credentials, and task
+    /// records are ordinary files. `command_digest` identifies the command for
+    /// drift detection without storing it.
+    #[serde(skip)]
+    pub command: Option<String>,
+    /// Digest of the command, which is what gets persisted and compared.
+    #[serde(default)]
+    pub command_digest: String,
+    pub scope: Scope,
+    /// Settings file the hook is declared in, repository-relative when inside
+    /// the repository and absolute otherwise.
+    pub source: String,
+}
+
+#[cfg(test)]
+impl Hook {
+    /// A short, stable label for terminal output.
+    ///
+    /// Only the command's program is shown, not its arguments: hook commands
+    /// routinely carry tokens in their arguments, and an inventory must not leak
+    /// a credential merely to describe a hook. The digest identifies the whole
+    /// command for drift purposes.
+    pub fn label(&self) -> String {
+        let target = match &self.command {
+            Some(command) => program_label(command),
+            None => format!("<{} hook>", display_safe(&self.kind)),
+        };
+        let event = display_safe(&self.event);
+        match &self.matcher {
+            Some(matcher) if !matcher.is_empty() => {
+                format!("{event}:{} → {target}", display_safe(matcher))
+            }
+            _ => format!("{event} → {target}"),
+        }
+    }
+}
+
+/// Name the program a hook command runs, without printing a credential.
+///
+/// The first whitespace-separated word is a program name only when the command
+/// does not open with shell assignments. `API_TOKEN=secret checker` puts the
+/// credential in exactly that position, and truncating it to 48 characters is
+/// not redaction. Quoting makes the following words unsafe to guess at too — in
+/// `API_TOKEN="a b" checker` the second word is still part of the value — so ahu
+/// stops trying to identify a program the moment it sees an assignment and
+/// leaves the command to its digest.
+#[cfg(test)]
+fn program_label(command: &str) -> String {
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return "<empty command>".to_string();
+    };
+    if first.contains('=') {
+        return "<command opens with an inline environment assignment; identified by digest only>"
+            .to_string();
+    }
+    let rendered = display_safe(&truncate(first, 48));
+    if words.next().is_some() {
+        format!("{rendered} …")
+    } else {
+        rendered
+    }
+}
+
+#[cfg(test)]
+fn truncate(value: &str, limit: usize) -> String {
+    let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let kept: String = flat.chars().take(limit - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// What a settings file says about the session's approval boundary.
+///
+/// Native settings can affect approvals independently of manifest flags, so
+/// the inventory reports their relevant declarations without inferring an
+/// effective boundary.
+///
+/// Values are only ever repeated for keys whose values are policy. `env` is the
+/// exception: its values are routinely credentials, so only the names are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_widened: Option<bool>,
+    /// Settings file this came from, labelled as the hook scan labels it.
+    pub source: String,
+    pub scope: Scope,
+    /// `permissions.defaultMode`, e.g. `bypassPermissions`.
+    pub default_mode: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub ask: Vec<String>,
+    pub additional_directories: Vec<String>,
+    pub enabled_plugins: Vec<String>,
+    pub enable_all_project_mcp_servers: Option<bool>,
+    pub enabled_mcpjson_servers: Vec<String>,
+    /// Names only. A settings `env` block routinely holds API tokens.
+    pub env_names: Vec<String>,
+    /// Top-level keys ahu does not interpret, named rather than silently
+    /// dropped — the same treatment the hook scan already gives a shape it
+    /// cannot walk.
+    pub uninterpreted_keys: Vec<String>,
+}
+
+impl SettingsFacts {
+    fn new(source: &str, scope: Scope) -> Self {
+        SettingsFacts {
+            approvals_widened: None,
+            source: source.to_string(),
+            scope,
+            default_mode: None,
+            allow: Vec::new(),
+            deny: Vec::new(),
+            ask: Vec::new(),
+            additional_directories: Vec::new(),
+            enabled_plugins: Vec::new(),
+            enable_all_project_mcp_servers: None,
+            enabled_mcpjson_servers: Vec::new(),
+            env_names: Vec::new(),
+            uninterpreted_keys: Vec::new(),
+        }
+    }
+
+    /// Whether this file says anything about the approval boundary at all.
+    pub fn is_empty(&self) -> bool {
+        self.default_mode.is_none()
+            && self.allow.is_empty()
+            && self.deny.is_empty()
+            && self.ask.is_empty()
+            && self.additional_directories.is_empty()
+            && self.enabled_plugins.is_empty()
+            && self.enable_all_project_mcp_servers.is_none()
+            && self.enabled_mcpjson_servers.is_empty()
+            && self.env_names.is_empty()
+            && self.uninterpreted_keys.is_empty()
+    }
+
+    /// Whether this file widens what the harness would otherwise ask about.
+    ///
+    /// Deliberately generous: anything that pre-approves tools, adds a directory
+    /// the session may reach, or removes a trust prompt counts.
+    pub fn widens_approvals(&self) -> bool {
+        matches!(
+            self.default_mode.as_deref(),
+            Some("bypassPermissions") | Some("acceptEdits") | Some("auto") | Some("dontAsk")
+        ) || !self.allow.is_empty()
+            || !self.additional_directories.is_empty()
+            || self.enable_all_project_mcp_servers == Some(true)
+            || !self.enabled_mcpjson_servers.is_empty()
+            || !self.enabled_plugins.is_empty()
+    }
+}
+
+/// An MCP server a repository asks the harness to start.
+///
+/// A repository MCP declaration is copied with configuration and reported as a
+/// potential subprocess source. Whether it runs depends on the selected harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub source: String,
+    pub name: String,
+    /// The command as declared, including its arguments. This is a process the
+    /// session will start, so it is shown whole rather than reduced to a program
+    /// name — unlike a hook label, an MCP `command` is not a place credentials
+    /// conventionally live, and the reader needs to see `sh -c curl … | sh`.
+    pub command: String,
+}
+
+/// A plugin module an `opencode.json` declares.
+///
+/// OpenCode installs and runs these at startup, so a name here is executable
+/// configuration the reader is trusting, not an inert setting. ahu records the
+/// module string exactly as declared — it may be an npm specifier that resolves
+/// to code ahu never sees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredPlugin {
+    pub source: String,
+    pub module: String,
+}
+
+/// Every hook ahu could find, plus an honest account of what it could not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookInventory {
+    pub hooks: Vec<Hook>,
+    /// What the settings files say beyond their `hooks` key.
+    #[serde(default)]
+    pub settings: Vec<SettingsFacts>,
+    /// MCP servers declared by the repository's `.mcp.json`.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
+    /// Plugin modules declared by the repository's `opencode.json(c)`.
+    ///
+    /// Skipped when empty so a record written by a build without this field and
+    /// a record written by one with it are byte-identical. Task records are
+    /// frozen and digested; a new always-present `[]` would change the digest of
+    /// every existing record that declares no plugin, which would read as
+    /// configuration drift where nothing about the configuration moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_plugins: Vec<DeclaredPlugin>,
+    /// Settings files that exist but could not be parsed. Their hooks are
+    /// unknown, which is reported rather than treated as "none".
+    pub unreadable: Vec<String>,
+    /// Settings files ahu looked for and did not find. Used to say which scopes
+    /// were actually checked.
+    pub checked: Vec<String>,
+    /// Set when ahu has no implementation of this launch's harness hook surface,
+    /// so "none found" would be a false negative rather than a result.
+    #[serde(default)]
+    pub unscanned_harness: Option<String>,
+}
+
+#[cfg(test)]
+impl HookInventory {
+    /// Hooks that are not shared project policy. These raise the consistency
+    /// warning: they change behaviour and can differ for every teammate.
+    pub fn outside_project_policy(&self) -> Vec<&Hook> {
+        self.hooks
+            .iter()
+            .filter(|hook| !hook.scope.is_project_policy())
+            .collect()
+    }
+
+    /// Hooks copied into the task worktree, which will run there.
+    pub fn travelling(&self) -> Vec<&Hook> {
+        self.hooks
+            .iter()
+            .filter(|hook| hook.scope.travels_into_worktree())
+            .collect()
+    }
+}
+
+/// Where the non-repository settings files live on this machine.
+///
+/// Taken as a parameter rather than read from the environment inside the scan so
+/// the whole hook inventory is testable without mutating process-wide state.
+#[derive(Debug, Clone, Default)]
+pub struct Locations {
+    /// The user's home directory, holding `~/.claude/settings.json`.
+    pub home: Option<PathBuf>,
+    /// Machine policy settings.
+    pub managed: Option<PathBuf>,
+}
+
+/// One settings file ahu will try to read hooks from.
+struct SettingsFile {
+    scope: Scope,
+    path: PathBuf,
+    display: String,
+    /// Repository-root-relative path, for the scopes that live in the
+    /// repository. `None` for files in a home directory or machine policy,
+    /// which are the user's own and are not resolved against the repository.
+    relative: Option<&'static str>,
+}
+
+/// Settings files ahu reads hooks from, in the harness's own precedence order.
+fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> {
+    let mut found = vec![
+        SettingsFile {
+            scope: Scope::Project,
+            path: repo_root.join(".claude/settings.json"),
+            display: ".claude/settings.json".to_string(),
+            relative: Some(".claude/settings.json"),
+        },
+        SettingsFile {
+            scope: Scope::ProjectLocal,
+            path: repo_root.join(".claude/settings.local.json"),
+            display: ".claude/settings.local.json".to_string(),
+            relative: Some(".claude/settings.local.json"),
+        },
+    ];
+    if let Some(home) = &locations.home {
+        let path = home.join(".claude/settings.json");
+        let display = path.to_string_lossy().to_string();
+        found.push(SettingsFile {
+            scope: Scope::User,
+            path,
+            display,
+            relative: None,
+        });
+    }
+    if let Some(managed) = &locations.managed {
+        let display = managed.to_string_lossy().to_string();
+        found.push(SettingsFile {
+            scope: Scope::Managed,
+            path: managed.clone(),
+            display,
+            relative: None,
+        });
+    }
+    found
+}
+
+/// Whether ahu has an implementation of a harness's hook configuration.
+///
+/// Harnesses without an implemented hook inventory (e.g. Codex, Antigravity)
+/// produce an explicit unknown-coverage report rather than a misleading empty
+/// inventory.
+pub fn hook_surface_is_implemented(harness_id: &str) -> bool {
+    matches!(harness_id, "claude-code" | "opencode")
+}
+
+/// Read hooks for a Claude Code launch, using explicit machine locations.
+#[cfg(test)]
+pub fn collect_in(repo_root: &Path, locations: &Locations) -> Result<HookInventory> {
+    collect_for(repo_root, "claude-code", locations)
+}
+
+/// Read hooks and settings using explicit machine locations.
+pub fn collect_for(
+    repo_root: &Path,
+    harness_id: &str,
+    locations: &Locations,
+) -> Result<HookInventory> {
+    let mut inventory = HookInventory::default();
+    // `.mcp.json` is read for every harness: it is repository configuration that
+    // travels into the task worktree either way. Whether a declared server
+    // starts depends on the selected harness.
+    collect_mcp_servers(repo_root, &mut inventory);
+    collect_mcp_file(repo_root, ".kiro/settings/mcp.json", &mut inventory);
+    // Repository OpenCode plugins and configuration travel into the task worktree whatever
+    // the harness is, and its plugin entries are modules OpenCode installs and
+    // executes at startup.
+    collect_opencode_plugins_in_repo(repo_root, &mut inventory);
+    if !hook_surface_is_implemented(harness_id) {
+        inventory.unscanned_harness = Some(harness_id.to_string());
+        return Ok(inventory);
+    }
+
+    if harness_id == "claude-code" {
+        collect_claude_settings(repo_root, locations, &mut inventory);
+    } else if harness_id == "opencode" {
+        collect_opencode_user_config(locations, &mut inventory);
+    }
+
+    inventory
+        .hooks
+        .sort_by(|a, b| (a.scope, &a.event, &a.matcher).cmp(&(b.scope, &b.event, &b.matcher)));
+    inventory
+        .declared_plugins
+        .sort_by(|a, b| (&a.source, &a.module).cmp(&(&b.source, &b.module)));
+    inventory.declared_plugins.dedup();
+    inventory.checked.sort();
+    inventory.checked.dedup();
+    inventory.unreadable.sort();
+    inventory.unreadable.dedup();
+    Ok(inventory)
+}
+
+fn collect_claude_settings(repo_root: &Path, locations: &Locations, inventory: &mut HookInventory) {
+    for SettingsFile {
+        scope,
+        path,
+        display,
+        relative,
+    } in settings_files(repo_root, locations)
+    {
+        // Resolve without following repository symlinks. Otherwise an external
+        // settings file could be mislabeled as shared project policy, hiding
+        // its warning and falsely claiming it travels into the task worktree.
+        let path = match relative {
+            Some(relative) => match crate::util::resolve_existing_within(repo_root, relative) {
+                Ok(Some(resolved)) => resolved,
+                Ok(None) => continue,
+                Err(_) => {
+                    inventory.unreadable.push(format!(
+                        "{display} (not read: it or one of its parent directories is a symlink, \
+                         so its hooks are not this repository's)"
+                    ));
+                    continue;
+                }
+            },
+            None => path,
+        };
+        let bytes = match read_inventory_file(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                // Present but unreadable: report the gap rather than assume none.
+                inventory.unreadable.push(display);
+                continue;
+            }
+        };
+        inventory.checked.push(display.clone());
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            inventory.unreadable.push(display);
+            continue;
+        };
+        let facts = parse_claude_settings(&value, scope, &display);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
+        match parse_hooks(&value, scope, &display) {
+            Some(hooks) => inventory.hooks.extend(hooks),
+            None => inventory.unreadable.push(display),
+        }
+    }
+}
+
+/// Record the plugin modules an `opencode.json` or `opencode.jsonc` declares,
+/// as well as local `.opencode/plugin/*` modules in the repository.
+///
+/// These are named, not resolved: OpenCode installs them itself, from wherever
+/// the specifier points. Reporting the names is the whole point — the snapshot
+/// already carries the file and digests it, but a digest of a file naming a
+/// remote module tells the reader nothing about what will run, and an npm
+/// specifier is not a file the executable-bit scan can see.
+///
+/// A `.jsonc` with comments will not parse as JSON. That is recorded as
+/// unreadable rather than as "no plugins", because the difference matters.
+fn collect_opencode_plugins_in_repo(repo_root: &Path, inventory: &mut HookInventory) {
+    let project_files = [
+        ("opencode.json", Scope::Project),
+        ("opencode.jsonc", Scope::Project),
+        (".opencode/opencode.json", Scope::Project),
+        (".opencode/opencode.jsonc", Scope::Project),
+    ];
+    for (source, scope) in project_files {
+        let path = match crate::util::resolve_existing_within(repo_root, source) {
+            Ok(Some(path)) => path,
+            Ok(None) => continue,
+            Err(_) => {
+                inventory.unreadable.push(format!(
+                    "{source} (not read: it or one of its parent directories is a symlink, so \
+                     its plugin declarations are not this repository's)"
+                ));
+                continue;
+            }
+        };
+        let Ok(bytes) = read_inventory_file(&path) else {
+            inventory.unreadable.push(source.to_string());
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            inventory.unreadable.push(format!(
+                "{source} (not valid JSON to ahu, so its plugin declarations are unknown rather \
+                 than absent; JSONC comments are not parsed)"
+            ));
+            continue;
+        };
+        inventory.checked.push(source.to_string());
+        let facts = parse_opencode_settings(&value, scope, source);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
+        collect_mcp_from_value(&value, source, inventory);
+        if let Some(plugins) = value.get("plugin").or_else(|| value.get("plugins")) {
+            if let Some(plugins) = plugins.as_array() {
+                for module in plugins {
+                    inventory.declared_plugins.push(DeclaredPlugin {
+                        source: source.to_string(),
+                        module: module
+                            .as_str()
+                            .unwrap_or("(non-string plugin entry)")
+                            .to_string(),
+                    });
+                }
+            } else {
+                inventory.unreadable.push(format!(
+                    "{source} (its plugin key is not a shape ahu understands, so its plugins are \
+                     unknown rather than absent)"
+                ));
+            }
+        }
+    }
+
+    // Repository local plugin directories and files:
+    for dir in [".opencode/plugin", ".opencode/plugins"] {
+        let resolved = match crate::util::resolve_existing_within(repo_root, dir) {
+            Ok(Some(path)) => path,
+            Ok(None) => continue,
+            Err(_) => {
+                inventory.unreadable.push(format!(
+                    "{dir} (not read: it or one of its parent directories is a symlink, so \
+                     its plugins are not this repository's)"
+                ));
+                continue;
+            }
+        };
+        if resolved.is_dir() {
+            match std::fs::read_dir(&resolved) {
+                Ok(entries) => {
+                    let mut files = Vec::new();
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let rel = path
+                                .strip_prefix(repo_root)
+                                .unwrap_or(&path)
+                                .to_string_lossy()
+                                .to_string();
+                            files.push(rel);
+                        }
+                    }
+                    files.sort();
+                    for file in files {
+                        inventory.checked.push(file.clone());
+                        inventory.declared_plugins.push(DeclaredPlugin {
+                            source: file.clone(),
+                            module: file,
+                        });
+                    }
+                }
+                Err(_) => {
+                    inventory.unreadable.push(dir.to_string());
+                }
+            }
+        } else if resolved.is_file() {
+            inventory.checked.push(dir.to_string());
+            inventory.declared_plugins.push(DeclaredPlugin {
+                source: dir.to_string(),
+                module: dir.to_string(),
+            });
+        }
+    }
+
+    for single in [
+        ".opencode/plugin.js",
+        ".opencode/plugin.ts",
+        ".opencode/plugins.js",
+        ".opencode/plugins.ts",
+    ] {
+        if let Ok(Some(path)) = crate::util::resolve_existing_within(repo_root, single) {
+            if !path.is_file() {
+                continue;
+            }
+            inventory.checked.push(single.to_string());
+            inventory.declared_plugins.push(DeclaredPlugin {
+                source: single.to_string(),
+                module: single.to_string(),
+            });
+        }
+    }
+}
+
+/// User-level OpenCode configuration and plugins.
+fn collect_opencode_user_config(locations: &Locations, inventory: &mut HookInventory) {
+    let Some(home) = &locations.home else {
+        return;
+    };
+    let user_configs = [
+        home.join(".config/opencode/opencode.json"),
+        home.join(".config/opencode/opencode.jsonc"),
+        home.join(".opencode/opencode.json"),
+        home.join(".opencode/opencode.jsonc"),
+    ];
+    for path in user_configs {
+        if !path.exists() {
+            continue;
+        }
+        let display = path.to_string_lossy().to_string();
+        let Ok(bytes) = read_inventory_file(&path) else {
+            inventory.unreadable.push(display);
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            inventory.unreadable.push(format!(
+                "{display} (not valid JSON to ahu, so its plugin declarations are unknown rather \
+                 than absent; JSONC comments are not parsed)"
+            ));
+            continue;
+        };
+        inventory.checked.push(display.clone());
+        let facts = parse_opencode_settings(&value, Scope::User, &display);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
+        collect_mcp_from_value(&value, &display, inventory);
+        if let Some(plugins) = value.get("plugin").or_else(|| value.get("plugins")) {
+            if let Some(plugins) = plugins.as_array() {
+                for module in plugins {
+                    inventory.declared_plugins.push(DeclaredPlugin {
+                        source: display.clone(),
+                        module: module
+                            .as_str()
+                            .unwrap_or("(non-string plugin entry)")
+                            .to_string(),
+                    });
+                }
+            } else {
+                inventory.unreadable.push(format!(
+                    "{display} (its plugin key is not a shape ahu understands, so its plugins are \
+                     unknown rather than absent)"
+                ));
+            }
+        }
+    }
+
+    let user_plugin_dirs = [
+        home.join(".config/opencode/plugin"),
+        home.join(".config/opencode/plugins"),
+        home.join(".opencode/plugin"),
+        home.join(".opencode/plugins"),
+    ];
+    for dir in user_plugin_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(path.to_string_lossy().to_string());
+                }
+            }
+            files.sort();
+            for file in files {
+                inventory.checked.push(file.clone());
+                inventory.declared_plugins.push(DeclaredPlugin {
+                    source: file.clone(),
+                    module: file,
+                });
+            }
+        }
+    }
+}
+
+fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
+    collect_mcp_file(repo_root, ".mcp.json", inventory);
+}
+
+fn collect_mcp_file(repo_root: &Path, source: &str, inventory: &mut HookInventory) {
+    let path = match crate::util::resolve_existing_within(repo_root, source) {
+        Ok(Some(path)) => path,
+        Ok(None) => return,
+        Err(_) => {
+            inventory.unreadable.push(format!(
+                "{source} (not read: it or one of its parent directories is a symlink, so its \
+                 MCP servers are not this repository's)"
+            ));
+            return;
+        }
+    };
+    let Ok(bytes) = read_inventory_file(&path) else {
+        inventory.unreadable.push(source.to_string());
+        return;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        inventory.unreadable.push(source.to_string());
+        return;
+    };
+    if value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .is_some_and(|servers| !servers.is_object())
+    {
+        inventory.unreadable.push(format!(
+            "{source} (its mcpServers key is not a shape ahu understands, so its servers are \
+             unknown rather than absent)"
+        ));
+        return;
+    }
+    collect_mcp_from_value(&value, source, inventory);
+}
+
+fn collect_mcp_from_value(value: &serde_json::Value, source: &str, inventory: &mut HookInventory) {
+    let servers = value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .and_then(|s| s.as_object());
+    let Some(servers) = servers else {
+        return;
+    };
+    for (name, server) in servers {
+        let command = server
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("(no command declared)");
+        let args = server
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("(non-string)").to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        inventory.mcp_servers.push(McpServer {
+            source: source.to_string(),
+            name: name.clone(),
+            command: if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{command} {args}")
+            },
+        });
+    }
+}
+
+/// Top-level Claude Code settings keys ahu interprets. Anything else is named as unknown.
+const CLAUDE_INTERPRETED_KEYS: &[&str] = &[
+    "hooks",
+    "permissions",
+    "enabledPlugins",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "env",
+];
+
+/// Pull the approval-relevant keys out of one Claude Code settings document.
+fn parse_claude_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
+    let mut facts = SettingsFacts::new(source, scope);
+    let Some(object) = value.as_object() else {
+        return facts;
+    };
+    for key in object.keys() {
+        if !CLAUDE_INTERPRETED_KEYS.contains(&key.as_str()) {
+            facts.uninterpreted_keys.push(key.clone());
+        }
+    }
+    if let Some(permissions) = object.get("permissions") {
+        facts.default_mode = permissions
+            .get("defaultMode")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
+        facts.allow = string_list(permissions.get("allow"));
+        facts.deny = string_list(permissions.get("deny"));
+        facts.ask = string_list(permissions.get("ask"));
+        facts.additional_directories = string_list(permissions.get("additionalDirectories"));
+    }
+    facts.enabled_plugins = string_list(object.get("enabledPlugins"));
+    facts.enable_all_project_mcp_servers = object
+        .get("enableAllProjectMcpServers")
+        .and_then(|v| v.as_bool());
+    facts.enabled_mcpjson_servers = string_list(object.get("enabledMcpjsonServers"));
+    // Names only: a settings `env` block is a common place for an API token, and
+    // an inventory must not leak a credential to describe a setting.
+    if let Some(env) = object.get("env").and_then(|e| e.as_object()) {
+        facts.env_names = env.keys().cloned().collect();
+    }
+    facts
+}
+
+/// Top-level OpenCode settings keys ahu interprets. Anything else is named as unknown.
+const OPENCODE_INTERPRETED_KEYS: &[&str] = &[
+    "plugin",
+    "plugins",
+    "permission",
+    "permissions",
+    "mcp",
+    "mcpServers",
+    "env",
+    "model",
+    "provider",
+    "agent",
+    "mode",
+    "command",
+    "$schema",
+    "username",
+];
+
+/// Pull the approval-relevant keys out of one OpenCode settings document.
+fn parse_opencode_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
+    let mut facts = SettingsFacts::new(source, scope);
+    let Some(object) = value.as_object() else {
+        return facts;
+    };
+    for key in object.keys() {
+        if !OPENCODE_INTERPRETED_KEYS.contains(&key.as_str()) {
+            facts.uninterpreted_keys.push(key.clone());
+        }
+    }
+    if let Some(permissions) = object
+        .get("permissions")
+        .or_else(|| object.get("permission"))
+    {
+        facts.default_mode = permissions
+            .get("defaultMode")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
+        facts.allow = string_list(permissions.get("allow"));
+        facts.deny = string_list(permissions.get("deny"));
+        facts.ask = string_list(permissions.get("ask"));
+        facts.additional_directories = string_list(permissions.get("additionalDirectories"));
+        if let Some(map) = permissions.as_object() {
+            for (action, val) in map {
+                match val.as_str() {
+                    Some("allow") => facts.allow.push(action.clone()),
+                    Some("deny") => facts.deny.push(action.clone()),
+                    Some("ask") => facts.ask.push(action.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    facts.enabled_plugins = string_list(object.get("enabledPlugins"));
+    if let Some(env) = object.get("env").and_then(|e| e.as_object()) {
+        facts.env_names = env.keys().cloned().collect();
+    }
+    facts
+}
+
+fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| match item.as_str() {
+                    Some(text) => text.to_string(),
+                    None => item.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pull hook commands out of one settings document.
+///
+/// Returns `None` when a `hooks` key exists but is not shaped the way ahu
+/// understands, so the caller can report it as unreadable instead of silently
+/// reporting no hooks.
+fn parse_hooks(value: &serde_json::Value, scope: Scope, source: &str) -> Option<Vec<Hook>> {
+    let Some(hooks) = value.get("hooks") else {
+        return Some(Vec::new());
+    };
+    let events = hooks.as_object()?;
+    let mut found = Vec::new();
+    for (event, entries) in events {
+        let entries = entries.as_array()?;
+        for entry in entries {
+            let matcher = entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            // The usual shape nests the commands under `hooks`; some events take
+            // a bare command entry instead.
+            let commands = match entry.get("hooks").and_then(|h| h.as_array()) {
+                Some(commands) => commands.clone(),
+                None => vec![entry.clone()],
+            };
+            for command in commands {
+                let kind = command
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let body = command
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string);
+                found.push(Hook {
+                    event: event.clone(),
+                    matcher: matcher.clone(),
+                    command_digest: digest_bytes(body.as_deref().unwrap_or("").as_bytes()),
+                    command: body,
+                    kind,
+                    scope,
+                    source: source.to_string(),
+                });
+            }
+        }
+    }
+    Some(found)
+}
+
+// Inventory must not block on native FIFOs or read an unbounded declaration.
+fn read_inventory_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > crate::files::LIMIT as u64 {
+        return Err(std::io::Error::other("native inventory file is invalid"));
+    }
+    let mut bytes = Vec::new();
+    file.take(crate::files::LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > crate::files::LIMIT {
+        return Err(std::io::Error::other("native inventory file exceeds limit"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write_fixture(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn collected_hooks_preserve_all_scopes_and_commandless_labels() {
+        let repo = tempfile::tempdir().unwrap();
+        let machine = tempfile::tempdir().unwrap();
+        let document = r#"{"hooks":{"SessionStart":[{"type":"prompt"}]}}"#;
+        write_fixture(repo.path(), ".claude/settings.json", document);
+        write_fixture(repo.path(), ".claude/settings.local.json", document);
+        write_fixture(machine.path(), ".claude/settings.json", document);
+        write_fixture(machine.path(), "managed.json", document);
+        let inventory = collect_in(
+            repo.path(),
+            &Locations {
+                home: Some(machine.path().to_path_buf()),
+                managed: Some(machine.path().join("managed.json")),
+            },
+        )
+        .unwrap();
+        assert!(inventory.unreadable.is_empty());
+        assert_eq!(inventory.checked.len(), 4);
+        assert_eq!(
+            inventory.hooks.iter().map(|h| h.scope).collect::<Vec<_>>(),
+            [
+                Scope::Project,
+                Scope::ProjectLocal,
+                Scope::User,
+                Scope::Managed
+            ]
+        );
+        assert_eq!(
+            inventory
+                .travelling()
+                .iter()
+                .map(|h| h.scope)
+                .collect::<Vec<_>>(),
+            [Scope::Project, Scope::ProjectLocal]
+        );
+        assert_eq!(
+            inventory
+                .outside_project_policy()
+                .iter()
+                .map(|h| h.scope)
+                .collect::<Vec<_>>(),
+            [Scope::ProjectLocal, Scope::User, Scope::Managed]
+        );
+        for hook in &inventory.hooks {
+            assert_eq!(hook.label(), "SessionStart → <prompt hook>");
+            assert_eq!(hook.command, None);
+            assert_eq!(hook.command_digest, digest_bytes(b""));
+        }
+        assert_eq!(inventory.hooks[0].source, ".claude/settings.json");
+        assert_eq!(
+            inventory.hooks[3].source,
+            machine.path().join("managed.json").to_string_lossy()
+        );
+        assert!(
+            inventory
+                .hooks
+                .iter()
+                .any(|hook| hook.scope == Scope::Managed)
+        );
+        assert_eq!(
+            Scope::Project.why_not_project_policy(),
+            "it is project policy"
+        );
+    }
+
+    #[test]
+    fn unreadable_and_malformed_files_report_gaps_without_losing_valid_hooks() {
+        for (source, harness) in [
+            (".claude/settings.local.json", "claude-code"),
+            (".mcp.json", "claude-code"),
+            ("opencode.json", "opencode"),
+        ] {
+            for contents in [None, Some("{invalid-json")] {
+                let repo = tempfile::tempdir().unwrap();
+                write_fixture(
+                    repo.path(),
+                    ".claude/settings.json",
+                    r#"{"hooks":{"Stop":[{"type":"command","command":"fixture-check"}]}}"#,
+                );
+                if let Some(contents) = contents {
+                    write_fixture(repo.path(), source, contents);
+                } else {
+                    // A directory in place of a file fails reads even under root.
+                    std::fs::create_dir_all(repo.path().join(source)).unwrap();
+                }
+                let inventory = collect_for(repo.path(), harness, &Locations::default()).unwrap();
+                assert_eq!(inventory.unreadable.len(), 1, "{source}");
+                assert!(inventory.unreadable[0].starts_with(source));
+                assert!(inventory.mcp_servers.is_empty());
+                assert!(inventory.declared_plugins.is_empty());
+                if harness == "claude-code" {
+                    assert_eq!(inventory.hooks.len(), 1);
+                    assert_eq!(inventory.hooks[0].label(), "Stop → fixture-check");
+                }
+                assert!(!inventory.unreadable.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_declaration_shapes_are_unknown_not_absent() {
+        for (source, contents) in [
+            (".mcp.json", r#"{"mcpServers":[]}"#),
+            (".mcp.json", r#"{"mcp":false}"#),
+            ("opencode.json", r#"{"plugins":"fixture-plugin"}"#),
+            (".claude/settings.json", r#"{"hooks":{"Stop":{}}}"#),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            write_fixture(repo.path(), source, contents);
+            let inventory = collect_in(repo.path(), &Locations::default()).unwrap();
+            assert_eq!(inventory.unreadable.len(), 1);
+            assert!(inventory.unreadable[0].starts_with(source));
+            assert!(inventory.hooks.is_empty());
+            assert!(inventory.mcp_servers.is_empty());
+            assert!(inventory.declared_plugins.is_empty());
+        }
+    }
+
+    #[test]
+    fn repository_plugins_inventory_files_and_skip_subdirectories() {
+        let repo = tempfile::tempdir().unwrap();
+        for source in [
+            ".opencode/plugin/z.ts",
+            ".opencode/plugin/a.js",
+            ".opencode/plugins",
+            ".opencode/plugin.ts",
+            ".opencode/plugins.js",
+        ] {
+            write_fixture(repo.path(), source, "export default {};");
+        }
+        std::fs::create_dir_all(repo.path().join(".opencode/plugin/nested")).unwrap();
+        std::fs::create_dir_all(repo.path().join(".opencode/plugin.js")).unwrap();
+        write_fixture(
+            repo.path(),
+            "opencode.json",
+            r#"{"plugins":["fixture-plugin", "fixture-plugin"],"mcp":{"fixture":{"command":"fixture-server"}}}"#,
+        );
+        let inventory = collect_for(repo.path(), "opencode", &Locations::default()).unwrap();
+        assert!(inventory.unreadable.is_empty());
+        let modules: Vec<_> = inventory
+            .declared_plugins
+            .iter()
+            .map(|p| p.module.as_str())
+            .collect();
+        assert_eq!(
+            modules,
+            [
+                ".opencode/plugin.ts",
+                ".opencode/plugin/a.js",
+                ".opencode/plugin/z.ts",
+                ".opencode/plugins",
+                ".opencode/plugins.js",
+                "fixture-plugin"
+            ]
+        );
+        assert_eq!(inventory.mcp_servers.len(), 1);
+        assert_eq!(inventory.mcp_servers[0].command, "fixture-server");
+        assert!(
+            !inventory
+                .checked
+                .iter()
+                .any(|p| p.ends_with("nested") || p == ".opencode/plugin.js")
+        );
+    }
+
+    #[test]
+    fn opencode_user_settings_keep_scope_and_report_read_and_shape_errors() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_fixture(
+            home.path(),
+            ".config/opencode/opencode.json",
+            r#"{"permission":{"read":"allow"},"plugins":false}"#,
+        );
+        write_fixture(
+            home.path(),
+            ".config/opencode/opencode.jsonc",
+            "// unsupported JSONC",
+        );
+        std::fs::create_dir_all(home.path().join(".opencode/opencode.json")).unwrap();
+        write_fixture(home.path(), ".opencode/opencode.jsonc", "[]");
+        let inventory = collect_for(
+            repo.path(),
+            "opencode",
+            &Locations {
+                home: Some(home.path().to_path_buf()),
+                ..Locations::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(inventory.settings.len(), 1);
+        assert_eq!(inventory.settings[0].scope, Scope::User);
+        assert_eq!(inventory.settings[0].allow, ["read"]);
+        assert_eq!(inventory.checked.len(), 2);
+        assert_eq!(inventory.unreadable.len(), 3);
+        for (source, reason) in [
+            (
+                ".config/opencode/opencode.json",
+                "not a shape ahu understands",
+            ),
+            (".config/opencode/opencode.jsonc", "not valid JSON"),
+            (".opencode/opencode.json", ""),
+        ] {
+            let path = home.path().join(source).to_string_lossy().to_string();
+            assert!(
+                inventory
+                    .unreadable
+                    .iter()
+                    .any(|s| s.starts_with(&path) && s.contains(reason))
+            );
+        }
+        assert!(inventory.declared_plugins.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_symlinks_refuse_external_declarations() {
+        let repo = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        write_fixture(
+            external.path(),
+            "settings.json",
+            r#"{"plugins":["external-plugin"],"mcpServers":{"external":{"command":"external-server"}}}"#,
+        );
+        std::fs::create_dir_all(repo.path().join(".opencode")).unwrap();
+        for source in ["opencode.json", ".mcp.json", ".opencode/plugin"] {
+            std::os::unix::fs::symlink(
+                external.path().join("settings.json"),
+                repo.path().join(source),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(external.path(), repo.path().join(".claude")).unwrap();
+        let inventory = collect_in(repo.path(), &Locations::default()).unwrap();
+        assert_eq!(inventory.unreadable.len(), 5);
+        assert!(
+            inventory
+                .unreadable
+                .iter()
+                .all(|gap| gap.contains("symlink"))
+        );
+        assert!(inventory.checked.is_empty());
+        assert!(inventory.hooks.is_empty());
+        assert!(inventory.settings.is_empty());
+        assert!(inventory.declared_plugins.is_empty());
+        assert!(inventory.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn scope_policy_and_worktree_properties_are_distinct() {
+        assert!(Scope::Project.is_project_policy());
+        assert!(Scope::Project.travels_into_worktree());
+        assert!(!Scope::ProjectLocal.is_project_policy());
+        assert!(Scope::ProjectLocal.travels_into_worktree());
+        assert!(!Scope::User.travels_into_worktree());
+        assert!(!Scope::Managed.travels_into_worktree());
+        assert!(
+            Scope::User
+                .why_not_project_policy()
+                .contains("home directory")
+        );
+        assert!(
+            Scope::Managed
+                .why_not_project_policy()
+                .contains("machine policy")
+        );
+        assert_eq!(Scope::ProjectLocal.as_str(), "project-local");
+    }
+
+    #[test]
+    fn claude_settings_capture_policy_and_only_environment_names() {
+        let facts = parse_claude_settings(
+            &json!({
+                "permissions": {
+                    "defaultMode": "acceptEdits",
+                    "allow": ["Read", 7],
+                    "deny": ["Bash(rm *)"],
+                    "ask": ["Write"],
+                    "additionalDirectories": ["../shared"]
+                },
+                "enabledPlugins": ["lint"],
+                "enableAllProjectMcpServers": true,
+                "enabledMcpjsonServers": ["docs"],
+                "env": {"API_TOKEN": "super-secret"},
+                "futureSetting": true
+            }),
+            Scope::Project,
+            "settings.json",
+        );
+        assert_eq!(facts.default_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(facts.allow, ["Read", "7"]);
+        assert_eq!(facts.deny, ["Bash(rm *)"]);
+        assert_eq!(facts.ask, ["Write"]);
+        assert_eq!(facts.additional_directories, ["../shared"]);
+        assert_eq!(facts.enabled_plugins, ["lint"]);
+        assert_eq!(facts.enable_all_project_mcp_servers, Some(true));
+        assert_eq!(facts.enabled_mcpjson_servers, ["docs"]);
+        assert_eq!(facts.env_names, ["API_TOKEN"]);
+        assert_eq!(facts.uninterpreted_keys, ["futureSetting"]);
+        assert!(facts.widens_approvals());
+        assert!(!format!("{facts:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn opencode_permission_alias_and_action_map_are_interpreted() {
+        let facts = parse_opencode_settings(
+            &json!({
+                "permission": {
+                    "read": "allow",
+                    "write": "ask",
+                    "shell": "deny",
+                    "unknown": "prompt",
+                    "additionalDirectories": ["/tmp/work"]
+                },
+                "plugins": ["plugin-a"],
+                "env": {"SECRET": "private"},
+                "newKey": 1
+            }),
+            Scope::User,
+            "opencode.json",
+        );
+        assert!(facts.allow.contains(&"read".to_string()));
+        assert!(facts.ask.contains(&"write".to_string()));
+        assert!(facts.deny.contains(&"shell".to_string()));
+        assert_eq!(facts.enabled_plugins, Vec::<String>::new());
+        assert_eq!(facts.env_names, ["SECRET"]);
+        assert_eq!(facts.uninterpreted_keys, ["newKey"]);
+        assert!(facts.widens_approvals());
+        assert!(!facts.is_empty());
+    }
+
+    #[test]
+    fn approval_fact_detection_is_conservative_but_ignores_deny_and_ask() {
+        for mode in ["bypassPermissions", "acceptEdits", "auto", "dontAsk"] {
+            let mut facts = SettingsFacts::new("settings", Scope::Project);
+            facts.default_mode = Some(mode.to_string());
+            assert!(facts.widens_approvals(), "mode {mode}");
+        }
+        let mut narrow = SettingsFacts::new("settings", Scope::Project);
+        narrow.deny.push("Bash".into());
+        narrow.ask.push("Write".into());
+        assert!(!narrow.widens_approvals());
+    }
+
+    #[test]
+    fn hook_parser_handles_nested_and_bare_shapes_and_rejects_malformed_events() {
+        let hooks = parse_hooks(
+            &json!({"hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "checker --token secret"},
+                    {"command": "second"}
+                ]}],
+                "SessionStart": [{"type": "prompt", "command": "hello"}]
+            }}),
+            Scope::Project,
+            "settings.json",
+        )
+        .unwrap();
+        assert_eq!(hooks.len(), 3);
+        assert_eq!(hooks[0].event, "PreToolUse");
+        assert_eq!(hooks[0].matcher.as_deref(), Some("Bash"));
+        assert!(hooks[0].label().contains("checker …"));
+        assert!(!hooks[0].label().contains("secret"));
+        assert_eq!(hooks[1].kind, "unknown");
+        assert_eq!(hooks[2].kind, "prompt");
+        assert!(parse_hooks(&json!({"hooks": []}), Scope::Project, "x").is_none());
+        assert!(parse_hooks(&json!({"hooks": {"event": {}}}), Scope::Project, "x").is_none());
+        assert!(
+            parse_hooks(&json!({}), Scope::Project, "x")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn command_labels_hide_assignments_and_truncate_by_characters() {
+        assert_eq!(program_label("  "), "<empty command>");
+        assert!(program_label("TOKEN='two words' checker").contains("digest only"));
+        assert_eq!(truncate("alpha\n beta", 20), "alpha beta");
+        assert!(truncate("é".repeat(60).as_str(), 48).chars().count() <= 48);
+        assert_eq!(string_list(Some(&json!("not-array"))), Vec::<String>::new());
+    }
+}

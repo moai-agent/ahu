@@ -58,17 +58,14 @@ fn branch_of(task_id: &str) -> String {
 
 fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskRecord {
     let discovered = git::discover(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are chris."), "current work").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: &delivered,
-            cwd: worktree,
-            permissions: Default::default(),
-        })
-        .unwrap();
+    let command = common::record_command(&ahu::harness::LaunchRequest {
+        model: "claude-opus-5",
+        prompt: &delivered,
+        cwd: worktree,
+        permissions: Default::default(),
+    });
     task::TaskRecord {
         schema_version: task::TASK_SCHEMA_VERSION,
         task_id: task_id.to_string(),
@@ -95,7 +92,6 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -106,9 +102,7 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
         prompt_digest: ahu::util::digest_bytes(b"current work"),
         harness_executable: PathBuf::from("/usr/local/bin/claude"),
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: common::record_enforcement("claude-code"),
         session_host: None,
         session_ref: None,
         state: task::TaskState::Exited,
@@ -671,7 +665,7 @@ fn remove_headless_keeps_prelaunch_failure_with_spawn_evidence() {
 /// A configuration file the parent working tree holds but never committed.
 /// A user's global ignore rule commonly hides exactly this from their own
 /// `git status`; ahu reads Git with no global configuration and sees it.
-const LOCAL_CONFIG: &str = ".claude/settings.local.json";
+const LOCAL_CONFIG: &str = ".fixture/local.json";
 
 /// A finished task whose worktree holds the configuration ahu copied out of
 /// the parent working tree, recorded the way a launch records it.
@@ -822,7 +816,7 @@ fn remove_keeps_a_worktree_whose_copied_config_changed_or_holds_extra_files() {
 #[test]
 fn remove_accounts_for_copies_hidden_by_an_inherited_ignore_file() {
     let repo = fixture();
-    repo.write(".claude/.gitignore", "settings.local.json\n");
+    repo.write(".fixture/.gitignore", "local.json\n");
     repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
     let id = "006aa50000000000c3";
     let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
@@ -846,7 +840,7 @@ fn remove_accounts_for_copies_hidden_by_an_inherited_ignore_file() {
         "the branch outlived removal"
     );
     assert_eq!(repo.read(LOCAL_CONFIG), "{\"permissions\":{}}\n");
-    assert_eq!(repo.read(".claude/.gitignore"), "settings.local.json\n");
+    assert_eq!(repo.read(".fixture/.gitignore"), "local.json\n");
 }
 
 /// If another ignored file prevents Git from removing the worktree after
@@ -855,7 +849,7 @@ fn remove_accounts_for_copies_hidden_by_an_inherited_ignore_file() {
 #[test]
 fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
     let repo = fixture();
-    repo.write(".claude/.gitignore", "settings.local.json\nnotes.md\n");
+    repo.write(".fixture/.gitignore", "local.json\nnotes.md\n");
     repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
     let id = "01900000-0000-7000-8000-000000000004";
     let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
@@ -872,7 +866,7 @@ fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
         .unwrap()
         .join(format!("{id}.json"));
     assert!(index.is_file());
-    std::fs::write(worktree.join(".claude/notes.md"), "task work\n").unwrap();
+    std::fs::write(worktree.join(".fixture/notes.md"), "task work\n").unwrap();
 
     let out = ahu_in(repo.path(), &["remove", id]);
     let text = text_of(&out);
@@ -889,7 +883,7 @@ fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
         record_dir.is_dir(),
         "a failed cleanup deleted its task record"
     );
-    assert!(worktree.join(".claude/notes.md").is_file());
+    assert!(worktree.join(".fixture/notes.md").is_file());
     assert!(
         git::branch_exists(&git::discover(repo.path()).unwrap(), &branch).unwrap(),
         "a failed cleanup deleted its branch"
@@ -899,7 +893,7 @@ fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
 
     // Once the task's ignored artifact is removed, the exposed status is
     // reviewable and must be handled before cleanup can finish.
-    std::fs::remove_file(worktree.join(".claude/notes.md")).unwrap();
+    std::fs::remove_file(worktree.join(".fixture/notes.md")).unwrap();
     let out = ahu_in(repo.path(), &["remove", id]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");

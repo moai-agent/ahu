@@ -121,7 +121,11 @@ fn deeper_identity_and_tasks_links_are_refused_for_every_state_command() {
         let repo = repo_with_state();
         let external = External::new();
         let at = relative.replace("IDENTITY", &identity(&repo));
-        link(external.path(), repo.path().join(&at));
+        let target = repo.path().join(&at);
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target).unwrap();
+        }
+        link(external.path(), target);
         repo.commit("fixture with a tracked state link");
 
         for command in commands {

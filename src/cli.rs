@@ -94,19 +94,8 @@ Commands:
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor [--verbose] [--work-mode]
                         Check readiness for native or explicit work-mode launches
-  agy                   Open the Antigravity CLI here on this project's
-                        top-ranked Antigravity model, in YOLO mode
-                        (--dangerously-skip-permissions)
-  claude                Open Claude here on this project's top-ranked
-                        Claude Code model, with permission checks bypassed
-                        (--dangerously-skip-permissions)
-  codex                 Open Codex here on this project's top-ranked Codex
-                        model, with approval prompts and the sandbox bypassed
-                        (--dangerously-bypass-approvals-and-sandbox)
-  opencode              Open OpenCode here on this project's top-ranked OpenCode
-                        model, auto-approving every permission it does not deny
-                        (--auto; ahu passes no --pure)
-  kiro                  Open Kiro V3 here with the ranked model and --trust-all-tools
+  harness ID            Open a direct session using an installed harness plugin.
+                        Installed aliases may also be used as commands.
   run-task              Internal: run a prepared task (used by the session host)
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
@@ -239,12 +228,9 @@ agent assignment options:
   --background          Detach a headless supervisor after startup acknowledgement
   --timeout <seconds>   Bound a headless attempt (default 1800)
   --native-helpers <policy>
-                        disabled (default), or bounded: Claude 2.1.270 ONLY.
-                        Bounded confines the entire parent and helpers to read-only
-                        model tools. No shell, edits, builds or ahu child launches.
-                        Settings-defined hook side effects remain unverified. Budget
-                        $5 per attempt; one concurrent helper, depth one, same model.
-                        Roles are requested; total helper count is not capped.
+                        disabled (default), or bounded when the installed runtime
+                        supports the requested controls. Check the plugin's native
+                        version and enforcement documentation before enabling it.
                         Agent native_helpers or project [execution].native_helpers
                         supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing
@@ -288,8 +274,7 @@ Commands:
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
-  agy|claude|codex|opencode|kiro
-                        Open a coordinating harness session
+  harness ID            Open an installed harness (or use its declared alias)
 
 Use `ahu help COMMAND` or `ahu COMMAND --help` for focused help.
 Use `ahu help all` for the full command and option reference.
@@ -311,7 +296,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         return Ok(HELP_ALL.to_string());
     }
     let help = match topic {
-        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "setup" => "Usage: ahu setup [--list-harness-plugins]\n       ahu setup --harness-plugin /absolute/staged/package\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching. Harness plugin discovery is metadata-only. --harness-plugin prepares a disabled local content-pinned binding without executing, building, downloading, installing or enabling it. Review and commit the binding and context lock, explicitly install, then review grants and enable in a second commit. Harness launches and native configuration/event handling require an installed, enabled runtime plugin with the harness-runtime grant.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
@@ -323,8 +308,8 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "doctor" => "Usage: ahu doctor [--verbose] [--work-mode]\n\nSummarize project, context-lock, skills, harness and telemetry readiness. By default, headless readiness uses native admission and checks the selected interactive session host. --work-mode checks explicit headless automatic-approval mode, skips native configuration and session-host checks, and reports native compatibility as unverified. Use --verbose for component-level diagnostics.\n".to_string(),
         "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and duplicate formats, supports mixed policy/lock formats while preserving canonical policy bytes and lock annotations, preserves exact source backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
-        "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect external session plugins, committed bindings, and host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
-        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
+        "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect installed plugins, committed bindings, and session-host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. Harness runtime packages require a committed harness-runtime grant; they provide harness descriptors and native operations, and never become session-host defaults. Use ahu harness ID after activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity and readiness probes are supplied by installed harness runtime plugins. Unsupported observations remain unknown. A readiness check does not establish model entitlement, inference access or complete telemetry; consult the selected plugin documentation for its evidence and limitations.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
@@ -339,7 +324,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
-        "agents" | "eval" | "knowledge" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        "agents" | "eval" | "knowledge" | "mcp" | "harness" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
     };
     Ok(help)
@@ -373,11 +358,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "telemetry" => "ahu telemetry — link private records and report local measurements",
         "explain" => "ahu explain — show the architecture overview",
         "onboard" => "ahu onboard — preview native agent definitions",
-        "agy" => "ahu agy — open Antigravity",
-        "claude" => "ahu claude — open Claude Code",
-        "codex" => "ahu codex — open Codex",
-        "opencode" => "ahu opencode — open OpenCode",
-        "kiro" => "ahu kiro — open Kiro CLI V3 (--trust-all-tools)",
+        "harness" => "ahu harness ID — open an installed harness plugin's direct session",
         "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
         "run-task" => "ahu run-task — internal task worker",
@@ -413,6 +394,10 @@ pub enum Command {
         agent: Option<String>,
     },
     Setup,
+    SetupHarnessPlugins,
+    SetupHarnessPlugin {
+        package: String,
+    },
     Launch {
         agent: String,
         prompt: PromptSource,
@@ -533,11 +518,9 @@ pub enum Command {
         verbose: bool,
         work_mode: bool,
     },
-    Codex,
-    Claude,
-    OpenCode,
-    Kiro,
-    Antigravity,
+    Harness {
+        selector: String,
+    },
     RunTask {
         task_dir: PathBuf,
     },
@@ -633,6 +616,18 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             Ok(Command::Explain { format })
         }
         "setup" => {
+            if args.get(1).map(String::as_str) == Some("--list-harness-plugins") {
+                expect_no_more(&args[2..])?;
+                return Ok(Command::SetupHarnessPlugins);
+            }
+            if args.get(1).map(String::as_str) == Some("--harness-plugin") {
+                if args.len() != 3 {
+                    bail!("setup --harness-plugin requires one absolute staged package path");
+                }
+                return Ok(Command::SetupHarnessPlugin {
+                    package: args[2].clone(),
+                });
+            }
             expect_no_more(&args[1..])?;
             Ok(Command::Setup)
         }
@@ -841,14 +836,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             } else {
                 let harness = harness
                     .ok_or_else(|| crate::util::Error::new("auth command requires --harness ID"))?;
-                if !matches!(
-                    harness.as_str(),
-                    "codex" | "claude-code" | "antigravity" | "opencode" | "kiro" | "ollama"
-                ) {
-                    bail!(
-                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, kiro, or ollama"
-                    );
-                }
+                crate::config::validate_harness_id(&harness, std::path::Path::new("auth"))?;
                 harness
             };
             if action == "select" && profile.is_none() {
@@ -882,25 +870,15 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             }
             Ok(Command::Doctor { verbose, work_mode })
         }
-        "claude" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Claude)
-        }
-        "codex" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Codex)
-        }
-        "opencode" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::OpenCode)
-        }
-        "kiro" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Kiro)
-        }
-        "agy" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Antigravity)
+        "harness" => {
+            let selector = args
+                .get(1)
+                .ok_or_else(|| crate::util::Error::new("expected ahu harness ID"))?;
+            expect_no_more(&args[2..])?;
+            crate::config::validate_harness_id(selector, std::path::Path::new("command"))?;
+            Ok(Command::Harness {
+                selector: selector.clone(),
+            })
         }
         "task" => {
             let task_id = args
@@ -984,6 +962,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "launch" => bail!(
             "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
         ),
+        other if args.len() == 1 && crate::util::is_safe_name(other) => Ok(Command::Harness {
+            selector: other.into(),
+        }),
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
 }
@@ -2785,10 +2766,7 @@ mod focused_help_tests {
             "telemetry",
             "mcp",
             "doctor",
-            "agy",
-            "claude",
-            "codex",
-            "opencode",
+            "harness",
             "run-task",
             "supervise",
         ] {
@@ -2845,11 +2823,9 @@ mod focused_help_tests {
         let help = help_for(Some("@agent")).unwrap();
         assert!(help.contains("assignments already leave focus unchanged"));
         assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
-        assert!(
-            help_for(Some("auth"))
-                .unwrap()
-                .contains("does not verify OpenCode's configured provider endpoint")
-        );
+        assert!(help_for(Some("auth")).unwrap().contains(
+            "Identity and readiness probes are supplied by installed harness runtime plugins."
+        ));
     }
 
     #[test]
@@ -2945,21 +2921,23 @@ mod direct_agent_tests {
             HELP.lines()
                 .any(|line| line.trim_start().starts_with("lock [--update]"))
         );
-        assert!(parse(["inventory"]).is_err());
-        assert!(parse(["hygiene"]).is_err());
+        for selector in ["inventory", "hygiene"] {
+            assert!(
+                matches!(parse([selector]).unwrap(), Command::Harness { selector: found, .. } if found == selector)
+            );
+        }
         assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
     }
 
-    /// `ahu diff` was removed; plain git on the task's branch does the same
-    /// job. It must now fail exactly like any other word ahu does not know,
-    /// not be quietly re-parsed as something else.
+    /// Non-command words select an installed harness; extra positional
+    /// arguments still fail instead of restoring the removed diff command.
     #[test]
-    fn diff_is_no_longer_a_command() {
-        let unknown = parse(["not-a-command"]).expect_err("parsed");
-        for args in [vec!["diff"], vec!["diff", "abc1"]] {
-            let error = parse(args.clone()).unwrap_err();
-            assert_eq!(error.kind(), unknown.kind(), "{args:?}");
-            assert!(error.to_string().contains("unknown command"), "{error}");
+    fn removed_commands_follow_generic_harness_selector_syntax() {
+        for selector in ["diff", "not-a-command"] {
+            assert!(
+                matches!(parse([selector]).unwrap(), Command::Harness { selector: found, .. } if found == selector)
+            );
         }
+        assert!(parse(["diff", "abc1"]).is_err());
     }
 }

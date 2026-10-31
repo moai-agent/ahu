@@ -147,6 +147,7 @@ fn migration_cli_preview_apply_and_legacy_refresh_boundary() {
     // A legacy project without a lock can explicitly create its first OKF lock.
     repo.remove(context_lock::LOCK_PATH);
     let before = common::git(repo.path(), &["status", "--porcelain"]);
+    let state_before = repo.path().join(".ahu").exists();
     let command = |args: &[&str]| {
         common::ahu()
             .current_dir(repo.path())
@@ -164,7 +165,7 @@ fn migration_cli_preview_apply_and_legacy_refresh_boundary() {
     assert!(text.contains("Effective typed policy parity: identical"));
     assert!(text.contains(config::CONFIG_RELATIVE_PATH));
     assert_eq!(before, common::git(repo.path(), &["status", "--porcelain"]));
-    assert!(!repo.path().join(".ahu").exists());
+    assert_eq!(repo.path().join(".ahu").exists(), state_before);
     let applied = command(&["migrate", "--apply"]);
     assert!(
         applied.status.success(),

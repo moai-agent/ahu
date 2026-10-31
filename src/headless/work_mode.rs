@@ -8,19 +8,8 @@ pub(crate) fn hooks(harness: &str) -> crate::hooks::HookInventory {
     }
 }
 
-pub(crate) fn permission_mapping(harness: &str) -> &'static str {
-    match harness {
-        "codex" => {
-            "approval_policy=never, sandbox_mode=danger-full-access (no native filesystem sandbox)"
-        }
-        "claude-code" => {
-            "--permission-prompts none --permission-mode auto (native automatic decisions may deny tools)"
-        }
-        "antigravity" => "--dangerously-skip-permissions (native permission checks bypassed)",
-        "opencode" => "--auto (native explicit denies still apply)",
-        "kiro" => "--no-interactive --trust-all-tools",
-        _ => "unavailable",
-    }
+pub(crate) fn permission_mapping(_harness: &str) -> &'static str {
+    "native permission controls are supplied by the selected runtime plugin"
 }
 
 pub(crate) fn integration(harness: &str, version: Option<&str>, pin: Option<&str>) -> Status {
@@ -43,7 +32,7 @@ pub(crate) fn integration(harness: &str, version: Option<&str>, pin: Option<&str
         }
         _ => {}
     }
-    if harness == "codex" || harness == "claude-code" {
+    {
         gaps.push("Ahu's native-helper disable controls are not applied in work mode; native delegation follows harness configuration and agent instructions.".into());
     }
     Status {
@@ -97,7 +86,7 @@ mod tests {
             status
                 .gaps
                 .iter()
-                .any(|gap| gap.contains("0.163.0 vs 0.160.0"))
+                .any(|gap| gap.contains("codex-cli 0.163.0 vs 0.160.0"))
         );
         assert!(
             status

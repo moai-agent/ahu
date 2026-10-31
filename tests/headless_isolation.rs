@@ -1,15 +1,48 @@
 //! Frozen invocation controls must match the version used for admission.
 use ahu::agent::Permissions;
-use ahu::harness::{LaunchRequest, isolation};
+mod common;
+use ahu::harness::LaunchRequest;
+
+fn profile(repo: &ahu::git::Repo, harness: &str, version: &str) -> Option<ahu::native::Profile> {
+    ahu::native::profile_at(
+        repo,
+        &ahu::native::Request {
+            harness,
+            harness_version: version,
+            policy: "disabled",
+            session_model: "synthetic-model",
+            helper_model: None,
+            helper_role: "reader",
+            max_concurrent: 1,
+            max_depth: 1,
+            budget_usd: None,
+            assignment_writes: false,
+        },
+    )
+    .ok()
+    .filter(|p| {
+        p.enforced
+            .iter()
+            .any(|c| c.id.starts_with("native.isolation."))
+    })
+}
+
 use ahu::headless::{Options, Spec, batch_command};
 
 #[test]
 fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
-    let root = tempfile::tempdir().unwrap();
+    let root = common::TestRepo::new_native();
+    root.init_config();
+    root.add_agent_on("fixture", "1.0.0", "codex", "synthetic-model");
+    root.commit("synthetic runtime bindings");
+    let repo = ahu::git::discover(root.path()).unwrap();
     for version in ["0.157.1", "0.160.0"] {
-        let profile = isolation::profile("codex", version).unwrap();
+        let control_profile = profile(&repo, "codex", version).unwrap();
         let decorated = format!("codex-cli v{version}");
-        assert_eq!(isolation::profile("codex", &decorated), Some(profile));
+        assert_eq!(
+            profile(&repo, "codex", &decorated),
+            Some(control_profile.clone())
+        );
         for permissions in [
             Permissions::Prompt,
             Permissions::Auto,
@@ -31,19 +64,15 @@ fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
                 spec.session = session;
                 spec.native_controls.clear();
                 assert!(batch_command("codex", &request, &spec).is_err());
-                spec.native_controls.push(profile.id.into());
+                spec.native_controls = control_profile.control_ids();
+                spec.native_profile = Some(control_profile.clone());
                 let result = batch_command("codex", &request, &spec);
                 if permissions == Permissions::AcceptEdits && spec.session.is_some() {
                     assert!(result.is_err());
                     continue;
                 }
                 let command = result.unwrap();
-                assert!(
-                    command
-                        .args
-                        .windows(profile.args.len())
-                        .any(|args| args == profile.args)
-                );
+                assert!(contains_ordered(&command.args, &control_profile.args));
                 assert!(
                     !command
                         .args
@@ -54,13 +83,17 @@ fn decorated_codex_versions_keep_frozen_controls_on_launch_and_resume() {
         }
     }
     for version in ["v0.160.1", "v0.160.0-beta.1", "vv0.160.0"] {
-        assert!(isolation::profile("codex", version).is_none());
+        assert!(profile(&repo, "codex", version).is_none());
     }
 }
 
 #[test]
 fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native_config() {
-    let root = tempfile::tempdir().unwrap();
+    let root = common::TestRepo::new_native();
+    root.init_config();
+    root.add_agent_on("fixture", "1.0.0", "codex", "synthetic-model");
+    root.commit("synthetic runtime bindings");
+    let repo = ahu::git::discover(root.path()).unwrap();
     let request = LaunchRequest {
         model: "synthetic-model",
         prompt: "literal prompt",
@@ -76,8 +109,8 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
         ("claude-code", "2.1.302 (Claude Code)", "2.1.289"),
         ("claude-code", "v2.1.302", "2.1.289"),
     ] {
-        let profile = isolation::profile(harness, version).unwrap();
-        let other = isolation::profile(harness, other_version).unwrap();
+        let control_profile = profile(&repo, harness, version).unwrap();
+        let other = profile(&repo, harness, other_version).unwrap();
         let mut spec: Spec = serde_json::from_value(serde_json::json!({
             "schema_version": 2,
             "options": Options::default(),
@@ -93,16 +126,13 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
             spec.session = session;
             spec.native_controls.clear();
             assert!(batch_command(harness, &request, &spec).is_err());
-            spec.native_controls.push(other.id.into());
+            spec.native_controls
+                .push(other.control_ids().first().unwrap().clone());
             assert!(batch_command(harness, &request, &spec).is_err());
-            spec.native_controls = vec![profile.id.into()];
+            spec.native_controls = control_profile.control_ids();
+            spec.native_profile = Some(control_profile.clone());
             let command = batch_command(harness, &request, &spec).unwrap();
-            assert!(
-                command
-                    .args
-                    .windows(profile.args.len())
-                    .any(|args| args == profile.args)
-            );
+            assert!(contains_ordered(&command.args, &control_profile.args));
             assert!(
                 command
                     .args
@@ -135,6 +165,13 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
         ("opencode", "1.18.34"),
         ("antigravity", "1.2.16"),
     ] {
-        assert!(isolation::profile(harness, version).is_none());
+        assert!(profile(&repo, harness, version).is_none());
     }
+}
+
+fn contains_ordered(actual: &[String], expected: &[String]) -> bool {
+    let mut actual = actual.iter();
+    expected
+        .iter()
+        .all(|item| actual.any(|candidate| candidate == item))
 }

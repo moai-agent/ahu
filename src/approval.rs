@@ -425,7 +425,6 @@ mod tests {
         let repo = crate::git::discover(temp.path()).unwrap();
         let task_id = crate::task::new_task_id().unwrap();
         let dir = crate::state::worktree_task_dir(&repo.root, &repo.identity(), &task_id);
-        let adapter = crate::harness::adapter_for("codex").unwrap();
         let delivery = crate::orchestration::deliver(None, "approval fixture")
             .unwrap()
             .1;
@@ -455,24 +454,28 @@ mod tests {
                 selection_basis: None,
             },
             policy_digest: "0".repeat(64),
-            catalog_version: crate::catalog::CATALOG_VERSION.into(),
             config_snapshot: Default::default(),
             config_snapshot_digest: "0".repeat(64),
             hooks: Default::default(),
             hooks_digest: String::new(),
             materialize: Default::default(),
-            launch_command: adapter
-                .launch_command(&crate::harness::LaunchRequest {
-                    model: "gpt-6",
-                    prompt: "approval fixture",
-                    cwd: &repo.root,
-                    permissions: Default::default(),
-                })
-                .unwrap(),
+            launch_command: crate::harness::LaunchCommand {
+                program: "synthetic".into(),
+                native_eval_otlp: true,
+                args: vec!["approval fixture".into()],
+                prompt_arg: Some(0),
+                planner_binding_digest: Some("synthetic-binding".into()),
+            },
             delivery,
             prompt_digest: crate::util::digest_bytes(b"approval fixture"),
             harness_executable: "/synthetic/codex".into(),
-            enforcement: adapter.enforcement("gpt-6", Default::default()).unwrap(),
+            enforcement: crate::harness::EnforcementReport {
+                harness: "synthetic".into(),
+                harness_version: None,
+                model_fixed_for_session: false,
+                gaps: vec![],
+                applied_controls: vec![],
+            },
             reliability_warning: None,
             session_host: None,
             session_ref: None,

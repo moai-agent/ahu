@@ -71,6 +71,7 @@ pub struct Compatibility {
 #[serde(rename_all = "kebab-case")]
 pub enum Grant {
     InteractiveBackend,
+    HarnessRuntime,
     Execute,
     ReadProjectContext,
 }
@@ -207,6 +208,7 @@ mod tests {
         for grants in [
             vec![],
             vec![Grant::Execute],
+            vec![Grant::HarnessRuntime],
             vec![Grant::InteractiveBackend],
             vec![Grant::ReadProjectContext],
             vec![
@@ -229,6 +231,7 @@ mod tests {
                         .iter()
                         .map(|grant| match grant {
                             Grant::Execute => "execute".into(),
+                            Grant::HarnessRuntime => "harness-runtime".into(),
                             Grant::InteractiveBackend => "interactive-backend".into(),
                             Grant::ReadProjectContext => "read-project-context".into(),
                         })
@@ -250,7 +253,7 @@ mod tests {
                     .contains("duplicate plugin capability grant")
             );
         }
-        for unknown in ["all", "executes", "Execute"] {
+        for unknown in ["all", "executes", "Execute", "harness-launch"] {
             let mut document =
                 crate::okf::Document::new("ahu:plugin-binding", &binding(), "").unwrap();
             document.fields.get_mut("ahu").unwrap()["grants"] =
@@ -327,6 +330,7 @@ mod tests {
     #[test]
     fn binding_files_are_context_and_symlinks_are_refused() {
         let root = tempfile::tempdir().unwrap();
+        crate::git::run_ok(root.path(), &["init", "-q"]).unwrap();
         let directory = root.path().join(DIRECTORY);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("fixture.md"), render(&binding())).unwrap();

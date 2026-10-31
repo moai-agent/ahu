@@ -34,6 +34,7 @@ fn sibling(repo: &TestRepo) -> TestRepo {
     TestRepo {
         dir,
         state: tempfile::tempdir().unwrap(),
+        native_runtime: repo.native_runtime,
     }
 }
 
@@ -125,17 +126,14 @@ fn branch_of(task_id: &str) -> String {
 
 fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskRecord {
     let discovered = git::discover(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are chris."), "current work").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: &delivered,
-            cwd: worktree,
-            permissions: Default::default(),
-        })
-        .unwrap();
+    let command = common::record_command(&ahu::harness::LaunchRequest {
+        model: "claude-opus-5",
+        prompt: &delivered,
+        cwd: worktree,
+        permissions: Default::default(),
+    });
     task::TaskRecord {
         schema_version: task::TASK_SCHEMA_VERSION,
         task_id: task_id.to_string(),
@@ -162,7 +160,6 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
             selection_basis: None,
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -173,9 +170,7 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
         prompt_digest: ahu::util::digest_bytes(b"current work"),
         harness_executable: PathBuf::from("/usr/local/bin/claude"),
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: common::record_enforcement("claude-code"),
         session_host: None,
         session_ref: None,
         state: task::TaskState::Exited,

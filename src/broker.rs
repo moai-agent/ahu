@@ -365,11 +365,23 @@ pub fn request(
         bail!("parent is cancelling; child admission refused");
     }
     let capability=std::env::var("AHU_BROKER_TOKEN").map_err(|_|Error::new("owning supervisor has no live child broker; do not launch a nested harness or widen its sandbox"))?;
-    if record.identity.harness == "codex"
-        && record.identity.permissions == crate::agent::Permissions::Prompt
+    let runtime = crate::harness_runtime::load(repo, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!("broker runtime binding differs from the frozen parent task");
+    }
+    if !crate::native::execution_capabilities(
+        repo,
+        &record.identity.harness,
+        &spec.harness_version,
+        record.identity.permissions,
+        spec.options.work_mode,
+    )?
+    .broker_transport
     {
         bail!(
-            "broker_transport_unavailable_for_read_only: this Codex task retains read-only sandboxing; submit from the host with an explicitly authorized workspace-write coordinator and frozen child grant"
+            "broker_transport_unavailable_for_read_only: selected runtime does not admit broker transport under the frozen permission controls"
         );
     }
     let request = Request {
@@ -525,6 +537,8 @@ fn bounded_dispatch(
 }
 
 #[cfg(test)]
+use crate::fixture_runtime;
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -541,6 +555,14 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        fixture_runtime::install(
+            dir.path(),
+            "claude-code",
+            "claude",
+            ".claude/agents",
+            "claude-agent",
+            &["claude-opus-5"],
+        );
         let repo = crate::git::discover(dir.path()).unwrap();
         (dir, repo)
     }
@@ -550,13 +572,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            format!(
-                "schema_version = 1\n\
-                 harness_preferences = [\"claude-code\"]\n\
-                 model_selection = \"project-ranked\"\n\
-                 catalog_version = \"{}\"\n",
-                crate::catalog::CATALOG_VERSION
-            ),
+            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\n",
         )
         .unwrap();
     }
@@ -613,11 +629,10 @@ mod tests {
                 "selection_basis": null
             },
             "policy_digest": "0".repeat(64),
-            "catalog_version": crate::catalog::CATALOG_VERSION,
             "config_snapshot": {"entries": [], "skipped_directories": []},
             "config_snapshot_digest": "snapshot-digest",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-            "launch_command": {"program": "claude", "args": []},
+            "launch_command": {"native_eval_otlp":true,"program": "claude", "args": []},
             "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "n", "agent_instructions": null, "digest": "d"},
             "prompt_digest": "p",
             "enforcement": {

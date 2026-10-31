@@ -1,0 +1,9 @@
+[package]
+name = "ahu-plugin-sixth"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Example declarative MCP-only harness for ahu; contains no code"
+publish = false
+
+[workspace]

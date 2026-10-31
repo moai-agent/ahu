@@ -172,7 +172,6 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "model": plan.pair.model,
         "selection_basis": plan.pair.basis,
         "policy_digest": plan.pair.policy_digest,
-        "catalog_version": plan.pair.catalog_version,
         "native_admission": plan.native_admission,
         "permissions": plan.permissions.as_str(),
         "argv": argv,
@@ -237,7 +236,6 @@ fn plan_with_mode(
              Make an initial commit first."
         );
     }
-    let adapter = harness::adapter_for(&pair.harness)?;
     let snapshot = snapshot::collect(&repo.root)?;
     let context_lock = crate::context_lock::check_with_state_home(repo, &snapshot, state_home)?;
     if !context_lock.current {
@@ -246,6 +244,11 @@ fn plan_with_mode(
             context_lock.detail
         );
     }
+    let runtime = crate::harness_runtime::load(repo, &pair.harness)?;
+    if runtime.binding_digest() != pair.runtime_binding_digest {
+        bail!("selected runtime binding changed before launch planning");
+    }
+
     if !work_mode {
         crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
     }
@@ -300,12 +303,32 @@ fn plan_with_mode(
         prompt,
         crate::orchestration::Composition::interactive(Some(metadata)),
     )?;
-    let command = adapter.launch_command(&LaunchRequest {
-        model: &pair.model,
-        prompt: &delivered,
-        cwd: &worktree,
-        permissions,
-    })?;
+    let command = if work_mode {
+        // Headless preparation needs native identity/version before its Spec is
+        // available. Do not ask a planner for an interactive command: a package
+        // may support unattended headless work but refuse interactive auto mode.
+        // headless::launch replaces this identity-only value with the installed
+        // planner's command before preflight, persistence or process execution.
+        harness::LaunchCommand {
+            program: runtime.descriptor().program.clone(),
+            native_eval_otlp: false,
+            args: Vec::new(),
+            prompt_arg: None,
+            planner_binding_digest: None,
+        }
+    } else {
+        harness::task_command(
+            repo,
+            &pair.harness,
+            &LaunchRequest {
+                model: &pair.model,
+                prompt: &delivered,
+                cwd: &worktree,
+                permissions,
+            },
+            None,
+        )?
+    };
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -317,27 +340,27 @@ fn plan_with_mode(
             ))
             .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
-    let mut enforcement = adapter.enforcement(&pair.model, permissions)?;
+    let mut enforcement = harness::EnforcementReport {
+        harness: pair.harness.clone(), harness_version: Some(harness::probe_version(repo, &runtime)?),
+        model_fixed_for_session: false,
+        gaps: vec!["Native settings and controls are owned by the installed harness plugin; Git worktrees do not establish filesystem confinement.".into()],
+        applied_controls: vec!["Launch arguments supplied by the verified installed runtime plugin.".into()],
+    };
     let loaded = crate::config::load(&repo.root)?
         .ok_or_else(|| Error::new("missing project configuration"))?;
     let version = enforcement
         .harness_version
         .as_deref()
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    let check_version = if work_mode {
-        crate::headless::work_mode::check_version
-    } else {
-        crate::catalog::check_harness_version
-    };
-    check_version(
-        &pair.harness,
-        version,
-        loaded
+    if !work_mode
+        && loaded
             .config
             .harness_version_pins
             .get(&pair.harness)
-            .map(String::as_str),
-    )?;
+            .is_some_and(|pin| pin != version)
+    {
+        bail!("installed native version differs from the project's exact version pin");
+    }
     state::ensure_worktrees_root(&repo.root)?;
     // An *applied control* is something ahu did, stated without implying more.
     // Delivering text is something ahu did; the model heeding it is not, and the
@@ -389,28 +412,10 @@ fn plan_with_mode(
     // specifier is not a file the executable-bit scan can see. Counting the
     // names is what makes the trust decision visible on the launch preview.
     //
-    // Gated through the feature matrix: `opencode.json` travels into every
-    // task worktree, but only OpenCode reads it, and telling a launch of
-    // another harness that it executes these modules would be false.
-    // A harness with no catalog entry claims no feature, so the lookup and the
-    // feature test are one step: an absent entry simply leaves the gap unsaid
-    // rather than panicking the preview on a cross-module invariant.
-    if let Some(entry) = crate::catalog::harness(&pair.harness)
-        .filter(|entry| entry.supports(crate::catalog::Feature::StartupPluginInventory))
-        && !found_hooks.declared_plugins.is_empty()
-    {
-        let modules: Vec<String> = found_hooks
-            .declared_plugins
-            .iter()
-            .map(|plugin| crate::util::display_safe(&plugin.module))
-            .collect();
+    if !found_hooks.declared_plugins.is_empty() {
         enforcement.gaps.push(format!(
-            "{} plugin module(s) declared by this repository ({}) are installed and executed by \
-             {} at startup; ahu carries the declaration into the task worktree but \
-             neither resolves, pins, nor sandboxes what it fetches.",
-            modules.len(),
-            modules.join(", "),
-            entry.display_name
+            "The installed {} runtime reports {} declared native plugin module(s); core does not resolve or sandbox their code.",
+            runtime.descriptor().display_name, found_hooks.declared_plugins.len()
         ));
     }
     let native_admission = if work_mode {
@@ -504,7 +509,6 @@ pub(crate) fn prepared_record(
             },
         },
         policy_digest: loaded.digest.clone(),
-        catalog_version: plan.pair.catalog_version.clone(),
         config_snapshot_digest: plan.snapshot.digest(),
         config_snapshot: plan.snapshot.clone(),
         hooks: plan.hooks.clone(),
@@ -671,21 +675,20 @@ pub fn execute(
     prompt: &str,
     focus: bool,
 ) -> Result<Launched> {
-    let mut plan = plan.clone();
+    let plan = plan.clone();
     // Interactive admission runs in the submitting checkout. Headless callers
     // perform their native probe only after their isolation policy is admitted.
-    crate::selection::check_interactive_command(
-        &plan.harness_executable,
-        &plan.pair.harness,
-        &mut plan.command,
+    crate::native_admission::validate_launch(
         &repo.root,
-    )?;
-    crate::selection::check_launch_compatibility(
-        &plan.harness_executable,
         &plan.pair.harness,
         &plan.pair.model,
         plan.permissions,
-        &repo.root,
+        "interactive",
+        plan.enforcement
+            .harness_version
+            .as_deref()
+            .ok_or_else(|| Error::new("missing frozen native version"))?,
+        &plan.harness_executable,
     )?;
     let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
@@ -1022,18 +1025,21 @@ pub(crate) fn verify_task(
         }
     }
 
-    let adapter = harness::adapter_for(&record.identity.harness)?;
+    let runtime = crate::harness_runtime::load(&discovered, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!(
+            "task runtime binding changed; restore the frozen installation before starting or resuming"
+        );
+    }
     let request = LaunchRequest {
         model: &record.identity.model,
         prompt: &delivered,
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     };
-    let mut rebuilt = if let Some(spec) = batch {
-        crate::headless::batch_command(&record.identity.harness, &request, spec)?
-    } else {
-        adapter.launch_command(&request)?
-    };
+    let rebuilt = harness::task_command(&discovered, &record.identity.harness, &request, batch)?;
     let executable = crate::selection::resolve_executable(&rebuilt.program)
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
@@ -1044,14 +1050,6 @@ pub(crate) fn verify_task(
             ))
             .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
-    if batch.is_none() {
-        crate::selection::check_interactive_command(
-            &executable,
-            &record.identity.harness,
-            &mut rebuilt,
-            &record.worktree,
-        )?;
-    }
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -1321,26 +1319,22 @@ fn record_startup_error(task_dir: &Path, started: bool, error: Error) -> Error {
 fn run_verified_task(
     task_dir: &Path,
     mut record: TaskRecord,
-    mut rebuilt: LaunchCommand,
+    rebuilt: LaunchCommand,
     executable: PathBuf,
     started: &mut bool,
 ) -> Result<HarnessOutcome> {
     harness::native_trust::prepare(task_dir, &record)?;
     let loaded = crate::config::load(&record.worktree)?;
     let config = loaded.as_ref().map(|loaded| &loaded.config);
-    let version = crate::selection::probe_version(
-        executable
-            .to_str()
-            .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
-    )
-    .ok_or_else(|| Error::new("cannot determine installed harness version before launch"))?;
-    crate::catalog::check_harness_version(
-        &record.identity.harness,
-        &version,
-        config
-            .and_then(|config| config.harness_version_pins.get(&record.identity.harness))
-            .map(String::as_str),
-    )?;
+    let worktree_repo = git::discover(&record.worktree)?;
+    let runtime = crate::harness_runtime::load(&worktree_repo, &record.identity.harness)?;
+    let version = harness::probe_version(&worktree_repo, &runtime)?;
+    if config
+        .and_then(|config| config.harness_version_pins.get(&record.identity.harness))
+        .is_some_and(|pin| pin != &version)
+    {
+        bail!("native version differs from the project pin");
+    }
     record_runtime_metadata(task_dir, &mut record, &version, &executable)?;
     let telemetry = config
         .map(|config| config.telemetry.clone())
@@ -1405,18 +1399,14 @@ fn run_verified_task(
     // workspace starts and pin this task immediately before starting an
     // interactive harness, so a changed native login cannot inherit the task.
     let repo = git::discover(&record.repo_root)?;
-    crate::selection::check_interactive_command(
-        &executable,
-        &record.identity.harness,
-        &mut rebuilt,
+    crate::native_admission::validate_launch(
         &record.worktree,
-    )?;
-    crate::selection::check_launch_compatibility(
-        &executable,
         &record.identity.harness,
         &record.identity.model,
         record.identity.permissions,
-        &record.worktree,
+        "interactive",
+        &version,
+        &executable,
     )?;
     crate::auth_binding::capture_interactive_task_for_model(
         &repo,
@@ -1454,6 +1444,8 @@ fn run_verified_task(
             Some(&record.task_id),
             None,
         );
+
+        crate::telemetry::configure_native_export(&mut command, rebuilt.native_eval_otlp);
         crate::telemetry::configure_task_identity(&mut command, &record, None);
         _span.configure_child_context(&mut command);
         pin.configure_command(&mut command)?;

@@ -1,4 +1,5 @@
 /target/
+/examples/plugins/*/target/
 /.ahu/
 /.worktrees/
 /security-reviews/

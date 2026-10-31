@@ -101,7 +101,9 @@ subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.2)'], stdin=s
 server.stdin.close()
 session = os.environ['AHU_PARENT_TASK']
 def emit(kind, part):
-    print(json.dumps({'type':kind,'timestamp':1,'sessionID':session,'part':part}), flush=True)
+    if kind == 'step_finish':
+        print(json.dumps({'fixture_event':'observation','usage':{'input':12,'output':4,'total':16},'model':'fixture-model'}), flush=True)
+        print(json.dumps({'fixture_event':'result','session':session}), flush=True)
 emit('text', {'type':'text','text':'synthetic answer saved'})
 emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens':12,'output_tokens':4,'total_tokens':16},'model':'fixture-model'})
 "#,
@@ -263,7 +265,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(rows[0]["trial_index"], 1);
     assert_eq!(rows[0]["evaluator_model"], "ollama/glm-5.3:cloud");
     assert_eq!(rows[0]["evaluator_harness"], "opencode");
-    assert_eq!(rows[0]["evaluator_harness_version"], "1.18.32");
+    assert_eq!(rows[0]["evaluator_harness_version"], "1.2.3");
     assert!(rows[0]["evaluator_task_id"].as_str().is_some());
     assert!(rows[0]["elapsed_ms"].as_u64().is_some());
     assert!(rows[0].get("trace_id").and_then(Value::as_str).is_some());
@@ -396,7 +398,8 @@ elif mode == 'invalid_value':
         json.dump({'route':'unknown'}, answer)
 elif mode == 'timed_out':
     session = os.environ['AHU_PARENT_TASK']
-    print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':3,'output_tokens':4,'total_tokens':7},'model':'fixture'}}), flush=True)
+    print(json.dumps({'fixture_event':'observation','usage':{'input':3,'output':4,'total':7}}), flush=True)
+    print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK']}), flush=True)
     time.sleep(60)
     raise SystemExit(0)
 requests = [
@@ -409,8 +412,8 @@ server.stdin.write(''.join(json.dumps(row)+'\n' for row in requests))
 server.stdin.close()
 server.wait(timeout=5)
 session = os.environ['AHU_PARENT_TASK']
-print(json.dumps({'type':'text','timestamp':1,'sessionID':session,'part':{'type':'text','text':'saved invalid answer'}}), flush=True)
-print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':1,'output_tokens':1,'total_tokens':2},'model':'fixture'}}), flush=True)
+print(json.dumps({'fixture_event':'observation','usage':{'input':1,'output':1,'total':2}}), flush=True)
+print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK']}), flush=True)
 "##,
     )
     .unwrap();
@@ -575,7 +578,7 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
                 "{mode} kept its observed {field}: {row}"
             );
         }
-        assert_eq!(row["harness_version"], "1.18.32", "{mode}");
+        assert_eq!(row["harness_version"], "1.2.3", "{mode}");
         assert_eq!(
             row["skill_digest"].as_str().map(str::len),
             Some(64),
@@ -757,15 +760,17 @@ assert responses[-1]['result']['structuredContent']['status'] == 'suggested', re
 if os.environ['FIXTURE_WRITE_ANSWER'] == 'yes':
     with open('answer.json','w') as f:
         json.dump({'route':'billing'}, f)
-print(json.dumps({'type':'text','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'text','text':'done'}}), flush=True)
-print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'step-finish','reason':'stop'}}), flush=True)
+print(json.dumps({'fixture_event':'observation','usage':{}}), flush=True)
+print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK']}), flush=True)
 "#).unwrap();
         std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
         let service = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            // The request follows real CLI preflight and process startup; this is
+            // a bounded fixture wait, not the service response timeout.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -910,8 +915,8 @@ with open('answer.json', 'w') as f: json.dump({'route':'billing'}, f)
 rows = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
         {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}]
 subprocess.run([os.environ['AHU_BIN'],'mcp','serve'], input=''.join(json.dumps(r)+'\n' for r in rows), text=True, stdout=subprocess.DEVNULL, check=True)
-print(json.dumps({'type':'text','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'text','text':'done'}}), flush=True)
-print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':12,'output_tokens':4,'total_tokens':16}}}), flush=True)
+print(json.dumps({'fixture_event':'observation','usage':{'input':12,'output':4,'total':16}}), flush=True)
+print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK']}), flush=True)
 "#).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -919,7 +924,9 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
     let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
     let service = std::thread::spawn(move || {
         for success in [true, false] {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            // The request follows real CLI preflight and process startup; this is
+            // a bounded fixture wait, not the service response timeout.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -1116,16 +1123,14 @@ assert sys.argv[1] != 'models', sys.argv
 with open('answer.json', 'w', encoding='utf-8') as answer:
     json.dump({'route':'billing'}, answer)
 mode = os.environ['AHU_TEST_TRAJECTORY_MODE']
-def emit(kind, part):
-    print(json.dumps({'type':kind,'timestamp':1,'sessionID':os.environ['AHU_PARENT_TASK'],'part':part}), flush=True)
 if mode != 'missing':
-    emit('step_start', {'id':'start','type':'step-start'})
-    emit('tool_use', {'id':'call','callID':'call','tool':'read','state':{'status':'error' if mode == 'fail' else 'completed'}})
-    if mode == 'partial':
-        emit('tool_use', {'id':'pending','callID':'pending','tool':'read','state':{'status':'running'}})
-    emit('step_finish', {'id':'end','type':'step-finish','reason':'stop'})
-else:
-    emit('text', {'type':'text','text':'answer saved without trajectory evidence'})
+    trajectory={'source':'fixture-events','coverage':'partial' if mode == 'partial' else 'complete_observed_stream',
+        'steps':1,'tool_calls':2 if mode == 'partial' else 1,'completed_tool_calls':1,
+        'tool_errors':1 if mode == 'fail' else 0,'repeated_tool_calls':0,'repeated_tool_errors':0,
+        'tool_recoveries':0,'malformed_events':0,'unclassified_events':0,'tracking_limited':False,'stream_incomplete':False}
+    print(json.dumps({'fixture_event':'observation','trajectory':trajectory}), flush=True)
+    print(json.dumps({'fixture_event':'result','session':os.environ['AHU_PARENT_TASK']}), flush=True)
+
 "#).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = external.path().canonicalize().unwrap().join("home");

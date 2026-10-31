@@ -7,6 +7,12 @@ use common::TestRepo;
 
 #[test]
 fn invalid_setup_rankings_are_usage_errors() {
+    if !common::in_harness_fixture("invalid_setup_rankings_are_usage_errors") {
+        return;
+    }
+    let repo = TestRepo::new();
+    repo.install_runtime("sixth");
+    let discovered = ahu::git::discover(repo.path()).unwrap();
     let mut failures = Vec::new();
     for input in [
         "bad\n", "0\n", "1,1\n", "1\nbad\n", "1\n0\n", "1\n1,1\n", "1\n,\n",
@@ -18,7 +24,7 @@ fn invalid_setup_rankings_are_usage_errors() {
             output: &mut output,
             interactive: true,
         };
-        let error = ahu::launcher::run_setup(&mut console).unwrap_err();
+        let error = ahu::launcher::run_setup(&mut console, &discovered).unwrap_err();
         if error.kind() != ahu::util::ErrorKind::Usage {
             failures.push(format!("{input:?}: {:?}: {error}", error.kind()));
         }
@@ -29,6 +35,7 @@ fn invalid_setup_rankings_are_usage_errors() {
 #[test]
 fn setup_and_registration_classify_actionable_errors() {
     let repo = TestRepo::new();
+    repo.install_runtime("claude-code");
     repo.write(
         ".claude/agents/fixture.md",
         "---\nname: fixture\ndescription: fixture agent\nmodel: inherit\n---\nFixture instructions.\n",
@@ -39,7 +46,7 @@ fn setup_and_registration_classify_actionable_errors() {
             3,
             "no native definition",
         ),
-        (&["setup"], 4, "needs a terminal"),
+        (&["setup"], 4, "requires a terminal"),
         (&["onboard", "--register", "fixture"], 2, "--model"),
     ];
     let mut failures = Vec::new();
@@ -61,7 +68,7 @@ fn setup_and_registration_classify_actionable_errors() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/config.md").exists());
     assert!(!repo.path().join(".agents/ahu/agents").exists());
 }
 
@@ -79,7 +86,7 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
     let cases: Vec<(&str, &std::path::Path, &[&str], &str, i32)> = vec![
         ("success", repo.path(), &["help"], "", 0),
         ("cancelled", repo.path(), &[], "@reviewer\n.cancel\n", 1),
-        ("usage", repo.path(), &["not-a-command"], "", 2),
+        ("missing runtime", repo.path(), &["not-a-command"], "", 5),
         (
             "unknown agent",
             repo.path(),

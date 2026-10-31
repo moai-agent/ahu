@@ -587,11 +587,12 @@ pub fn configure_child(
         )
         .env("OTEL_SERVICE_NAME", "ahu-agent")
         .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
-    if eval_mode && harness == "kiro" {
-        // Kiro V3 emits native OTLP JSON traces/metrics even when told to use
-        // protobuf and disable metrics. The eval receiver projects ahu's
-        // protobuf spans only. Keep its endpoint in AHU_EVAL_OTEL_ENDPOINT
-        // for ahu/MCP, without opting Kiro into incompatible native exports.
+}
+
+/// Apply provider-declared native export compatibility after generic attribution.
+/// This affects native exporters only; ahu and MCP keep their local eval endpoint.
+pub(crate) fn configure_native_export(command: &mut std::process::Command, native_eval_otlp: bool) {
+    if eval_endpoint_override().is_some() && !native_eval_otlp {
         command
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
             .env("OTEL_TRACES_EXPORTER", "none");
@@ -1647,7 +1648,8 @@ mod tests {
             return;
         }
         let mut events = crate::headless::Events::default();
-        events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
+        events.usage.input = Some(0);
+        events.usage.output = Some(7);
         let mut config = TelemetryConfig::default();
         assert!(super::local_metrics(&config, &events.usage, &events.cost, Some(12)).is_none());
         config.local_metrics = true;
@@ -2852,6 +2854,10 @@ mod primary_export_tests {
                 Some("synthetic-task"),
                 Some(1),
             );
+            super::configure_native_export(
+                &mut command,
+                std::env::var("AHU_TEST_NATIVE_EVAL_OTLP").as_deref() != Ok("false"),
+            );
             let env: std::collections::BTreeMap<_, _> = command
                 .get_envs()
                 .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
@@ -2860,7 +2866,7 @@ mod primary_export_tests {
             if expected == "disabled" {
                 assert!(!env.contains_key("OTEL_TRACES_EXPORTER"));
                 assert!(!env.contains_key("AHU_MCP_RESOURCE_ATTRIBUTES"));
-            } else if expected == "kiro-eval" {
+            } else if expected == "native-export-disabled" {
                 assert!(!env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"));
                 assert_eq!(env["OTEL_TRACES_EXPORTER"], "none");
                 assert_eq!(env["OTEL_METRICS_EXPORTER"], "none");
@@ -3230,11 +3236,16 @@ mod primary_export_tests {
         }
         for eval in [false, true] {
             let mut command = child_command("child-settings", &trap);
-            command.env("AHU_TEST_CHILD_HARNESS", "kiro");
+            command.env("AHU_TEST_CHILD_HARNESS", "invented");
+            command.env("AHU_TEST_NATIVE_EVAL_OTLP", "false");
             command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
             command.env(
                 "AHU_TEST_EXPECT_SIGNALS",
-                if eval { "kiro-eval" } else { "otlp" },
+                if eval {
+                    "native-export-disabled"
+                } else {
+                    "otlp"
+                },
             );
             if eval {
                 command.env("AHU_EVAL_OTEL_ENDPOINT", "http://127.0.0.1:54321");

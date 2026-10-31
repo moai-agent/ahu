@@ -220,48 +220,16 @@ Probabilities and confidence remain model estimates, not calibrated correctness.
 Ollama currently limits choice questions to 26 options; ahu's portable schema
 allows up to 32, so larger choices may be refused by Ollama.
 
-### Legacy local adapter
+### Migrating from the Python example
 
-The repository also includes a small standard-library adapter for older Ollama
-versions using `/api/chat` and JSON Schema. To select this generic adapter instead
-of the native Ollama provider or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
-and leave both `AHU_OLLAMA_MODEL` and `AHU_OLLAMA_URL` unset.
+The legacy `/api/chat` Python server example is no longer bundled. Use the
+Rust-native provider above with Ollama 0.35+ and a compatible decision model.
+This is not a drop-in mapping for arbitrary chat models. Remove the old
+`AHU_DECISION_URL` and `AHU_DECISION_MODEL` overrides before selecting the native
+provider; conflicting provider settings refuse execution. An independently
+maintained service can still implement the generic decision HTTP contract.
 
-Choose a locally installed model from `ollama list`. For example, if
-`qwen3.6:35b-mlx` is available, start the adapter in a terminal:
-
-```sh
-python3 examples/ollama_decision_service.py --model qwen3.6:35b-mlx
-```
-
-In a second terminal, check readiness and send a sample request:
-
-```sh
-curl --fail-with-body -sS http://127.0.0.1:8001/health
-curl --fail-with-body -sS http://127.0.0.1:8001/v1/decisions \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "state": {"subject": "Duplicate charge", "body": "Please refund this."},
-    "questions": {
-      "department": {
-        "type": "choice",
-        "instructions": "Which team should handle this?",
-        "options": {"billing": "Invoices and refunds", "other": "Everything else"}
-      },
-      "refund_requested": {
-        "type": "probability",
-        "instructions": "Is a refund explicitly requested?"
-      }
-    }
-  }'
-```
-
-The selected Qwen model was already present locally. In a spot check on this
-M1 Max, the same two-question request returned the same answers from Gemma 4
-with 12 billion parameters and Qwen 3.6 with 35 billion parameters. Gemma took 10.7 seconds cold and 4.2 seconds warm; Qwen
-took 21.1 seconds cold (18.0 seconds to load) and 1.1 seconds warm. This is one
-example for plumbing and timing, not an accuracy comparison. The adapter keeps
-the chosen model loaded for five minutes after a call.
+## Decision telemetry
 
 When project OpenTelemetry is enabled, the `ahu mcp serve` process exports a
 span for each parsed MCP request, including initialize,

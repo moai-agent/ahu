@@ -1,5 +1,6 @@
 //! Command behavior with isolated repositories and scripted terminal input.
 use super::*;
+use crate::fixture_runtime as runtime;
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -21,6 +22,11 @@ fn git(root: &Path, args: &[&str]) {
 fn repository() -> (tempfile::TempDir, Repo) {
     let root = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "-q"]);
+    git(root.path(), &["config", "user.name", "Fixture"]);
+    git(
+        root.path(),
+        &["config", "user.email", "fixture@example.invalid"],
+    );
     git(
         root.path(),
         &[
@@ -34,6 +40,14 @@ fn repository() -> (tempfile::TempDir, Repo) {
             "fixture",
         ],
     );
+    runtime::install(
+        root.path(),
+        "claude-code",
+        "claude",
+        ".claude/agents",
+        "claude-agent",
+        &["claude-opus-5"],
+    );
     let repo = crate::git::discover(root.path()).unwrap();
     (root, repo)
 }
@@ -45,7 +59,6 @@ fn configured(repo: &Repo) {
             schema_version: 1,
             harness_preferences: vec!["claude-code".into()],
             model_selection: "project-ranked".into(),
-            catalog_version: catalog::CATALOG_VERSION.into(),
             harness_version_pins: Default::default(),
             model_rankings: BTreeMap::from([("claude-code".into(), vec!["claude-opus-5".into()])]),
             knowledge: Default::default(),
@@ -79,7 +92,6 @@ fn scripted(input: &str, f: impl FnOnce(&mut Console<'_>) -> Result<i32>) -> (Re
 }
 
 fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
-    let adapter = harness::adapter_for("claude-code").unwrap();
     let record = task::TaskRecord {
         schema_version: crate::task::TASK_SCHEMA_VERSION,
         task_id: id.to_string(),
@@ -106,7 +118,6 @@ fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
             selection_basis: Some("test".to_string()),
         },
         policy_digest: "0".repeat(64),
-        catalog_version: crate::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -115,18 +126,25 @@ fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
         prompt_digest: String::new(),
         harness_executable: std::path::PathBuf::from("claude"),
         materialize: Default::default(),
-        launch_command: adapter
-            .launch_command(&crate::harness::LaunchRequest {
-                model: "claude-opus-5",
-                prompt: "synthetic prompt",
-                cwd: &repo.root,
-                permissions: Default::default(),
-            })
-            .unwrap(),
+        launch_command: harness::LaunchCommand {
+            program: "fixture-native".into(),
+            args: vec![
+                "--model".into(),
+                "fixture/exact".into(),
+                "synthetic prompt".into(),
+            ],
+            native_eval_otlp: true,
+            planner_binding_digest: Some("0".repeat(64)),
+            prompt_arg: Some(2),
+        },
         reliability_warning: None,
-        enforcement: adapter
-            .enforcement("claude-opus-5", Default::default())
-            .unwrap(),
+        enforcement: harness::EnforcementReport {
+            harness: "claude-code".into(),
+            harness_version: Some("1.2.3".into()),
+            model_fixed_for_session: false,
+            gaps: vec!["synthetic".into()],
+            applied_controls: vec![],
+        },
         session_host: None,
         session_ref: None,
         state: crate::task::TaskState::Exited,
@@ -186,16 +204,16 @@ fn onboarding_confirmation_registration_and_removal_preserve_native_file_and_ind
 }
 
 #[test]
-fn onboarding_rejects_missing_unknown_and_blocked_models_before_confirmation() {
+fn onboarding_rejects_missing_and_invalid_models_before_confirmation() {
     let (_root, repo) = repository();
     let native = repo.root.join(".claude/agents/reviewer.md");
     std::fs::create_dir_all(native.parent().unwrap()).unwrap();
     for (text, expected) in [
-        ("---\nmodel: inherit\n---\nReview", "needs an explicit one"),
         (
-            "---\nmodel: nonexistent-model\n---\nReview",
-            "cannot register",
+            "---\nmodel: inherit\n---\nReview",
+            "needs an explicit --model",
         ),
+        ("---\nmodel: bad model\n---\nReview", "model"),
     ] {
         std::fs::write(&native, text).unwrap();
         let (result, output) = scripted("y\n", |c| {
@@ -876,7 +894,7 @@ fn doctor_work_mode_checks_headless_prerequisites_without_native_or_session_host
     assert!(result.is_ok(), "{text}");
     assert!(text.contains("explicit headless work mode"), "{text}");
     assert!(
-        text.contains("work mode    claude-code: ahu adapter supports explicit headless work mode"),
+        text.contains("work mode    claude-code: installed runtime declares headless mode"),
         "{text}"
     );
     assert!(text.contains("native compatibility unverified"), "{text}");
@@ -917,7 +935,7 @@ fn indexed_headless_task_refuses_a_different_repository_before_lookup() {
         error.contains("task index repository identity mismatch"),
         "{error}"
     );
-    assert!(!repo.root.join(".ahu").exists());
+    assert!(!repo.root.join(".ahu/tasks").exists());
 }
 
 #[test]

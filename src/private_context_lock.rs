@@ -183,6 +183,21 @@ impl Drop for AcceptanceLock {
     }
 }
 
+fn valid_fingerprint_key(key: &str) -> bool {
+    if key.len() > 4096 {
+        return false;
+    }
+    crate::plugin_binding::plain_relative(key)
+        || (key.len() <= 256
+            && key.contains(':')
+            && key.split(':').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            }))
+}
+
 fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -212,10 +227,8 @@ fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
         || acceptance.repo_identity != identity
         || acceptance.fingerprints.len() > 64
         || acceptance.fingerprints.iter().any(|(path, digest)| {
-            !matches!(
-                path.as_str(),
-                ".claude/settings.local.json" | crate::native_mcp::ANTIGRAVITY_KEY
-            ) || digest.len() != 64
+            !valid_fingerprint_key(path)
+                || digest.len() != 64
                 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     {
@@ -360,6 +373,26 @@ mod tests {
     }
 
     #[test]
+    fn private_keys_accept_generic_legacy_namespaces_without_path_escape() {
+        for key in [
+            "user:invented-config",
+            "native:invented:0",
+            ".invented/local.json",
+        ] {
+            assert!(valid_fingerprint_key(key));
+        }
+        for key in [
+            "/absolute",
+            "../escape",
+            "native:../escape",
+            "native::empty",
+            "native:bad\n",
+        ] {
+            assert!(!valid_fingerprint_key(key));
+        }
+    }
+
+    #[test]
     fn users_accept_local_context_independently_without_touching_the_shared_checkout() {
         let checkout = tempfile::tempdir().unwrap();
         git_cmd(checkout.path(), &["init", "-q", "-b", "main"]);
@@ -377,8 +410,8 @@ mod tests {
         let bob_state = tempfile::tempdir().unwrap();
         let alice_home = alice_state.path().canonicalize().unwrap();
         let bob_home = bob_state.path().canonicalize().unwrap();
-        let alice = BTreeMap::from([(".claude/settings.local.json".into(), "a".repeat(64))]);
-        let bob = BTreeMap::from([(".claude/settings.local.json".into(), "b".repeat(64))]);
+        let alice = BTreeMap::from([(".invented/settings.local.json".into(), "a".repeat(64))]);
+        let bob = BTreeMap::from([(".invented/settings.local.json".into(), "b".repeat(64))]);
 
         assert!(!is_current(&repo, &alice, Some(&alice_home)).unwrap());
         accept(&repo, &alice, Some(&alice_home)).unwrap();
@@ -436,8 +469,8 @@ mod tests {
         let repo = crate::git::discover(checkout.path()).unwrap();
         let state = tempfile::tempdir().unwrap();
         let home = state.path().canonicalize().unwrap();
-        let initial = BTreeMap::from([(".claude/settings.local.json".into(), "a".repeat(64))]);
-        let changed = BTreeMap::from([(".claude/settings.local.json".into(), "b".repeat(64))]);
+        let initial = BTreeMap::from([(".invented/settings.local.json".into(), "a".repeat(64))]);
+        let changed = BTreeMap::from([(".invented/settings.local.json".into(), "b".repeat(64))]);
 
         initialize_if_missing_at(&repo, &initial, &home).unwrap();
         assert!(is_current(&repo, &initial, Some(&home)).unwrap());

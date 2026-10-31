@@ -78,7 +78,7 @@ fn the_overview_embeds_the_diagrams_and_the_standing_warnings() {
     assert!(!text.contains(ahu::harness::RELIABILITY_WARNING));
     assert!(text.contains("normal harness capabilities"));
     assert!(text.contains(ahu::hooks::NON_PROJECT_HOOK_WARNING));
-    assert!(text.contains(ahu::catalog::CATALOG_VERSION));
+    assert!(text.contains("installed Rust plugins"));
     assert!(text.contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -99,15 +99,10 @@ fn the_overview_states_the_load_bearing_invariants() {
 }
 
 #[test]
-fn every_harness_in_the_catalog_is_listed_with_its_status() {
+fn installed_behavior_is_described_without_a_builtin_provider_registry() {
     for text in [explain::overview(), explain::markdown()] {
-        for harness in ahu::catalog::HARNESSES {
-            assert!(text.contains(harness.id), "{} missing", harness.id);
-        }
-        // Each harness shows its observed behavior evidence; it is not a gate.
-        for version in ["2.1.269", "0.154.0", "1.2.2"] {
-            assert!(text.contains(version), "{version} missing from {text}");
-        }
+        assert!(text.contains("installed Rust plugins"), "{text}");
+        assert!(text.contains("ahu doctor"), "{text}");
     }
 }
 
@@ -122,14 +117,17 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
         // The hard dependencies have to be stated, not implied.
         assert!(
             text.contains("cmux"),
-            "interactive cmux dependency must be named"
+            "optional cmux integration must be named"
         );
         assert!(
-            text.contains("A supported harness"),
+            text.contains("installed harness runtime plugin"),
             "the harness dependency must be named: {text}"
         );
         assert!(
-            text.contains("installed and signed in by you"),
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("installed and signed in by you"),
             "who installs it must be explicit: {text}"
         );
         assert!(text.contains("Harness installation and sign-in remain separate"));
@@ -166,12 +164,8 @@ fn the_markdown_render_is_a_real_markdown_document() {
         !text.contains("  !! "),
         "terminal warning gutters leaked in"
     );
-    // The catalog becomes a table.
-    assert!(
-        text.contains("| harness | ahu adapter | behavior checked on |"),
-        "{text}"
-    );
-    assert!(text.contains("| --- | --- | --- |"), "{text}");
+    assert!(text.contains("installed Rust plugins"));
+    assert!(!text.contains("| harness | ahu adapter | behavior checked on |"));
 }
 
 #[test]
@@ -198,14 +192,14 @@ fn the_overview_distinguishes_headless_results_from_interactive_state() {
             "no automatic replay",
             "not orchestrator acceptance",
             "An interactive task's record",
-            "Bounded supports Claude Code 2.1.270 only",
+            "The installed runtime decides whether its",
             "--allow-child-widened @name",
-            "outside the worker sandbox",
-            "the entire owner and helpers have read-only model tools",
+            "as a separate process",
+            "Read-only profiles also restrict the owner",
             "A child cannot resume after its owning parent attempt terminates",
             "Child resume does not use the launch broker",
-            "does not prove hooks cannot write",
-            "total helper count is not capped",
+            "native hook, model-tool and helper limitations",
+            "a plugin must refuse",
             "Provider-side cleanup stays unknown",
         ] {
             assert!(text.contains(claim), "missing backend boundary: {claim}");

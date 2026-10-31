@@ -2,13 +2,12 @@
 //! Process and harness outcomes are evidence, never work acceptance.
 mod accounting;
 mod admission;
+mod decoder;
 pub(crate) mod identity;
 #[cfg(test)]
 mod invocation_tests;
 mod journal;
-mod kiro;
 pub(crate) mod review;
-mod skills;
 pub(crate) mod work_mode;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
@@ -180,268 +179,45 @@ pub fn batch_command(
     request: &LaunchRequest<'_>,
     spec: &Spec,
 ) -> Result<LaunchCommand> {
-    use crate::agent::Permissions;
-    if spec.options.work_mode && request.permissions != Permissions::Auto {
+    if spec.options.work_mode && request.permissions != crate::agent::Permissions::Auto {
         bail!("work mode requires frozen permissions=auto");
     }
-    if request.model.is_empty() || request.model.starts_with('-') {
-        bail!("an exact model is required");
-    }
-    if !spec.options.work_mode
-        && spec.options.native_helpers != "disabled"
-        && spec.native_profile.is_none()
-    {
-        bail!(
-            "bounded native helpers are unavailable: headless join, model/tool limits, and provider-owned cancellation have not been validated for this harness version. Use disabled or validate the adapter; ahu will not substitute a helper backend."
-        );
-    }
-    let native_profile = if spec.options.work_mode {
-        None
-    } else if let Some(frozen) = &spec.native_profile {
-        let rebuilt = build_native_profile(harness, request.model, spec)?;
-        if &rebuilt != frozen {
-            bail!("native policy differs from the frozen profile");
-        }
-        Some(rebuilt)
-    } else {
-        None
-    };
-    let isolation = isolation_profile(harness, spec);
-    if let Some(profile) = isolation
-        && !spec.native_controls.iter().any(|id| id == profile.id)
-    {
-        bail!("headless isolation profile is missing or differs from the frozen controls");
-    }
-    let mut args: Vec<String> = Vec::new();
-    let mut add = |values: &[&str]| args.extend(values.iter().map(|v| v.to_string()));
-    let program = match harness {
-        "codex" => {
-            add(&["exec"]);
-            if spec.session.is_some() {
-                add(&["resume"]);
-            }
-            add(&["--model", request.model, "--json"]);
-            if !spec.options.work_mode {
-                add(&["-c", "agents.enabled=false"]);
-            }
-            add(&["-c", "approval_policy=\"never\""]);
-            match request.permissions {
-                Permissions::Prompt => add(&["-c", "sandbox_mode=\"read-only\""]),
-                Permissions::Auto => {
-                    let sandbox = if spec.options.work_mode {
-                        "sandbox_mode=\"danger-full-access\""
-                    } else {
-                        "sandbox_mode=\"workspace-write\""
-                    };
-                    add(&["-c", sandbox]);
-                    // The project's Codex MCP config approves only ahu's
-                    // bounded local coordination tools. Provider-backed
-                    // tools remain approval-gated and require eval opt-in.
-                }
-                Permissions::AcceptEdits if spec.session.is_none() => add(&["--approve-for-me"]),
-                Permissions::AcceptEdits => bail!(
-                    "Codex exec resume has no validated accept-edits mapping; submit a new assignment instead"
-                ),
-            }
-            if spec.session.is_none() {
-                add(&["--color", "never"]);
-            }
-            if let Some(profile) = isolation {
-                add(profile.args);
-            }
-            if let Some(dir) = &spec.broker_dir {
-                let paths = toml::Value::Array(vec![toml::Value::String(
-                    dir.to_string_lossy().into_owned(),
-                )]);
-                add(&[
-                    "-c",
-                    &format!("sandbox_workspace_write.writable_roots={paths}"),
-                ]);
-            }
-            add(&["--"]);
-            if let Some(session) = &spec.session {
-                add(&[session]);
-            }
-            "codex"
-        }
-        "claude-code" => {
-            add(&[
-                "--print",
-                "--model",
-                request.model,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-prompts",
-                "none",
-            ]);
-            if let Some(profile) = isolation {
-                add(profile.args);
-            }
-            if let Some(profile) = &native_profile {
-                add(&profile.args.iter().map(String::as_str).collect::<Vec<_>>());
-            } else if !spec.options.work_mode {
-                add(&["--disallowedTools", "Agent,Task,TeamCreate,TeamDelete"]);
-            }
-            match request.permissions {
-                Permissions::Prompt => (),
-                Permissions::Auto => add(&["--permission-mode", "auto"]),
-                Permissions::AcceptEdits => add(&["--permission-mode", "acceptEdits"]),
-            }
-            if let Some(session) = &spec.session {
-                add(&["--resume", session]);
-            }
-            add(&["--"]);
-            "claude"
-        }
-        "antigravity" => {
-            add(&[
-                "--model",
-                request.model,
-                "--output-format",
-                "stream-json",
-                "--print-timeout",
-                &format!("{}s", spec.options.timeout_seconds),
-            ]);
-            match request.permissions {
-                Permissions::Prompt => (),
-                Permissions::AcceptEdits => add(&["--mode", "accept-edits"]),
-                Permissions::Auto => add(&["--dangerously-skip-permissions"]),
-            }
-            if let Some(session) = &spec.session {
-                add(&["--conversation", session]);
-            }
-            add(&["--print"]);
-            "agy"
-        }
-        // Verified against OpenCode 1.18.30 on 2026-09-14 by running
-        // `opencode run --format json` against a local Ollama-served model.
-        // `run` is the non-interactive form: it takes the message as a
-        // positional argument, streams one JSON event per line on stdout, and
-        // exits without a listening port. `-i/--interactive` is the flag that
-        // would make it a session, and this path never passes it.
-        "kiro" => {
-            if request.prompt.is_empty() || request.prompt.starts_with('-') {
-                bail!("Kiro requires a nonempty, non-option-shaped prompt");
-            }
-            add(&[
-                "chat",
-                "--v3",
-                "--model",
-                request.model,
-                "--no-interactive",
-                "--output-format",
-                "stream-json",
-                "--require-mcp-startup",
-            ]);
-            match request.permissions {
-                Permissions::Prompt => (),
-                Permissions::Auto => add(&["--trust-all-tools"]),
-                Permissions::AcceptEdits => bail!("Kiro has no validated accept-edits mapping"),
-            }
-            if let Some(session) = &spec.session {
-                if !kiro::valid_session(session) {
-                    bail!("invalid Kiro native session identifier");
-                }
-                add(&["--resume-id", session]);
-            }
-            // Kiro V3 2.28.0 discards the positional prompt after `--`.
-            "kiro-cli"
-        }
-        "opencode" => {
-            // A private server avoids attaching the task to OpenCode's shared
-            // background service, whose post-wait event catch-up can omit the
-            // terminal step from the JSON stream. Ahu requires that explicit
-            // terminal evidence before accepting a headless result.
-            add(&["run"]);
-            let standalone =
-                crate::harness::opencode::supports_standalone_run(&spec.harness_version);
-            if standalone {
-                add(&["--standalone"]);
-            }
-            add(&["--format", "json", "--model", request.model]);
-            // OpenCode resolves a git-worktree cwd to its registered project
-            // and can place the session in a previously-used project directory
-            // instead of the process cwd, so `--dir` pins the session to the
-            // task worktree. Verified on OpenCode 1.18.5 on 2026-10-14:
-            // without it a worktree launch recorded directory=<repo root>;
-            // with it the session recorded directory=<worktree>.
-            // The 2.0.32 run declaration removed --dir. Its directory comes
-            // from PWD, pinned alongside cwd by configure_task_directory.
-            if !standalone {
-                let Some(dir) = request.cwd.to_str() else {
-                    bail!("OpenCode requires a UTF-8 task worktree path for --dir");
-                };
-                add(&["--dir", dir]);
-            }
-            match request.permissions {
-                // As in the interactive adapter: OpenCode's permission actions
-                // are static configuration, its only permission flag widens,
-                // and there is no accept-edits equivalent to map onto.
-                Permissions::Prompt => (),
-                Permissions::Auto => add(&["--auto"]),
-                Permissions::AcceptEdits => bail!(
-                    "OpenCode has no accept-edits mode, so the headless path refuses it for the \
-                     same reason the interactive adapter does: --auto would widen the request to \
-                     every permission OpenCode does not explicitly deny, and passing nothing \
-                     while reporting accept-edits would misdescribe the launch. Declare \
-                     permissions = \"prompt\" or permissions = \"auto\"."
-                ),
-            }
-            // `--session <id>` continues a recorded session; observed to keep
-            // the same `sessionID` and the prior turns' context. `--fork` would
-            // branch it instead, which would break the identity ahu recorded.
-            if let Some(session) = &spec.session {
-                add(&["--session", session]);
-            }
-            // Verified: `opencode run --format json -m <model> -- --version`
-            // treated `--version` as the message rather than printing the
-            // version, so `--` ends the option list here as it does elsewhere.
-            add(&["--"]);
-            "opencode"
-        }
-        _ => bail!("no headless adapter for {harness}; no fallback selected"),
-    };
-    let prompt_arg = Some(args.len());
-    args.push(request.prompt.to_string());
-    Ok(LaunchCommand {
-        program: program.into(),
-        args,
-        prompt_arg,
-    })
+    let repo = crate::git::discover(request.cwd)?;
+    crate::harness::task_command(&repo, harness, request, Some(spec))
 }
 
-fn isolation_profile(harness: &str, spec: &Spec) -> Option<crate::harness::isolation::Profile> {
-    if spec.options.work_mode {
-        None
-    } else {
-        crate::harness::isolation::profile(harness, &spec.harness_version)
-    }
-}
-
-fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate::native::Profile> {
+fn build_native_profile(
+    repo: &crate::git::Repo,
+    harness: &str,
+    model: &str,
+    spec: &Spec,
+) -> Result<crate::native::Profile> {
     let version = spec
         .harness_version
         .split_whitespace()
         .find(|v| crate::util::is_semver(v))
         .unwrap_or(&spec.harness_version);
-    crate::native::profile(&crate::native::Request {
-        harness,
-        harness_version: version,
-        policy: &spec.options.native_helpers,
-        session_model: model,
-        helper_model: None,
-        helper_role: "ahu-reader",
-        max_concurrent: 1,
-        max_depth: 1,
-        budget_usd: Some(5.0),
-        assignment_writes: false,
-    })
+    crate::native::profile_at(
+        repo,
+        &crate::native::Request {
+            harness,
+            harness_version: version,
+            policy: &spec.options.native_helpers,
+            session_model: model,
+            helper_model: None,
+            helper_role: "ahu-reader",
+            max_concurrent: 1,
+            max_depth: 1,
+            budget_usd: Some(5.0),
+            assignment_writes: false,
+        },
+    )
 }
 
 // Only called after fresh native admission. The old attempt stays immutable;
 // retain helper policy and approvals while freezing this version's isolation.
 fn refresh_resume_profile(
+    repo: &crate::git::Repo,
     spec: &mut Spec,
     harness: &str,
     model: &str,
@@ -455,29 +231,19 @@ fn refresh_resume_profile(
         *spec = next;
         return Ok(());
     }
-    if let Some(previous) = isolation_profile(harness, spec)
-        && !spec.native_controls.iter().any(|id| id == previous.id)
-    {
-        bail!(
-            "previous headless isolation profile differs from frozen controls; submit a new assignment"
-        );
-    }
     let mut next = spec.clone();
     next.harness_version = version.into();
-    let profile = build_native_profile(harness, model, &next)?;
+    let profile = build_native_profile(repo, harness, model, &next)?;
     if spec
         .native_profile
         .as_ref()
-        .is_some_and(|previous| previous != &profile)
+        .is_some_and(|previous| !previous.helper_policy_matches(&profile))
     {
         bail!(
             "native helper policy changed across harness versions; previous attempt preserved, submit a new assignment"
         );
     }
     next.native_controls = profile.control_ids();
-    if let Some(isolation) = isolation_profile(harness, &next) {
-        next.native_controls.push(isolation.id.into());
-    }
     next.native_profile = Some(profile);
     *spec = next;
     Ok(())
@@ -973,17 +739,6 @@ pub fn launch(
         options.native_helpers = policy;
     }
 
-    if contract.output.is_some()
-        && !options.work_mode
-        && pair.harness == "codex"
-        && agent
-            .as_ref()
-            .is_some_and(|a| a.manifest.permissions == crate::agent::Permissions::Prompt)
-    {
-        bail!(
-            "structured output is unavailable with Codex read-only permissions; choose a registered agent already authorized to write results"
-        );
-    }
     if contract.output.is_some() && options.native_helpers == "bounded" && !options.work_mode {
         bail!("structured output requires write tools; bounded native helpers are read-only");
     }
@@ -998,21 +753,8 @@ pub fn launch(
     // The committed agent manifest is the explicit, reviewable permission
     // choice for unattended worktree launches. Do not require an extra human
     // approval flag before the harness can start.
-    // The catalog is the one table of which harnesses have a validated batch
-    // profile and which executable to probe for them. A harness with an
-    // interactive adapter still needs its batch argument surface and event
-    // stream validated separately before it can run here, so the refusal below
-    // is named: the caller's next question is always "which one?", and the only
-    // correct answer to it is to report the refusal.
-    let entry = crate::catalog::harness(&pair.harness)
-        .filter(|h| h.supports(crate::catalog::Feature::HeadlessLaunch))
-        .ok_or_else(|| {
-            crate::util::Error::new(format!(
-                "unsupported headless harness {:?}; ahu has no validated batch profile for it and selected no fallback.",
-                pair.harness
-            ))
-        })?;
-    let program = entry.executable;
+    let runtime = crate::harness_runtime::load(repo, &pair.harness)?;
+    let program = &runtime.descriptor().program;
     let candidate = crate::selection::resolve_executable(program)
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
@@ -1031,7 +773,18 @@ pub fn launch(
         .clone()
         .or_else(|| options.work_mode.then(|| "unknown".into()))
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
+    if contract.output.is_some()
+        && !crate::native::execution_capabilities(
+            repo,
+            &plan.pair.harness,
+            &version,
+            permissions,
+            options.work_mode,
+        )?
+        .structured_output
+    {
+        bail!("structured output is unavailable under the selected runtime permission controls");
+    }
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let mut parent_release = None;
     let mut frozen_parent_spec = None;
@@ -1114,11 +867,7 @@ pub fn launch(
         parent_task, depth, attempt: 1, session: None,
         broker_dir: Some(store(repo)?.join(&plan.task_id).join("requests")),
         native_profile: None,
-        native_controls: match plan.pair.harness.as_str() {
-            "codex" => vec!["agents.enabled=false".into()],
-            "claude-code" => vec!["deny Agent, Task, TeamCreate, TeamDelete".into()],
-            _ => vec!["disabled by prompt guidance only; no validated native tool switch".into()],
-        },
+        native_controls: Vec::new(),
         gaps: vec!["CLI argument profiles are inspected; authenticated end-to-end and provider-managed child lifecycle probes remain opt-in.".into(),
             "Native tools cannot prevent delegation through arbitrary shell tools, plugins or external services; no global token/concurrency cap is claimed.".into(),
             "Agent reports and same-user editable runtime records are untrusted evidence. Orchestrator acceptance is separate.".into(),
@@ -1134,6 +883,7 @@ pub fn launch(
         None
     } else {
         Some(build_native_profile(
+            repo,
             &plan.pair.harness,
             &plan.pair.model,
             &spec,
@@ -1143,19 +893,6 @@ pub fn launch(
         .as_ref()
         .map(crate::native::Profile::control_ids)
         .unwrap_or_default();
-    let trust_opencode_native_state = !spec.options.work_mode
-        && loaded.config.headless.trust_opencode_native_state
-        && plan.pair.harness == "opencode";
-    if trust_opencode_native_state {
-        spec.native_controls
-            .push("opencode.native-account-state=project-trusted".into());
-        spec.gaps.push(
-            "Project policy trusts OpenCode native account/authentication state for this headless task. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
-        );
-    }
-    if let Some(isolation) = isolation_profile(&plan.pair.harness, &spec) {
-        spec.native_controls.push(isolation.id.into());
-    }
     if let Some(profile) = &profile {
         spec.gaps.extend(profile.gaps.clone());
     }
@@ -1163,12 +900,9 @@ pub fn launch(
         spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. Arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     }
     if !spec.child_grants.is_empty() {
-        spec.gaps.push("Broker grants approve only frozen registered identities and profiles. Codex workspace-write receives the task's requests directory as a narrow additional write root; read-only Codex transport is refused. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
+        spec.gaps.push("Broker grants approve only frozen registered identities and profiles. The selected runtime must explicitly admit broker transport under the task's frozen permission controls. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
     }
 
-    if spec.options.native_helpers == "bounded" && !spec.options.work_mode {
-        spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
-    }
     spec.native_profile = profile;
     let native_admission = validate_environment(
         repo,
@@ -1176,16 +910,17 @@ pub fn launch(
         &plan.pair.harness,
         &spec.harness_version,
         &plan.harness_executable,
-        trust_opencode_native_state,
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility(
-            &plan.harness_executable,
+        crate::native_admission::validate_launch(
+            &repo.root,
             &plan.pair.harness,
             &plan.pair.model,
             permissions,
-            &repo.root,
+            "headless",
+            &spec.harness_version,
+            &plan.harness_executable,
         )?;
     }
     plan.native_admission = native_admission.clone();
@@ -1215,7 +950,8 @@ pub fn launch(
         },
     )?;
     plan.delivery = delivery;
-    plan.command = batch_command(
+    plan.command = crate::harness::task_command(
+        repo,
         &plan.pair.harness,
         &LaunchRequest {
             model: &plan.pair.model,
@@ -1223,7 +959,7 @@ pub fn launch(
             cwd: &plan.worktree,
             permissions,
         },
-        &spec,
+        Some(&spec),
     )?;
     plan.harness_executable = executable;
     plan.task_dir = store(repo)?.join(&plan.task_id);
@@ -1412,7 +1148,6 @@ fn validate_environment(
     harness: &str,
     version: &str,
     executable: &Path,
-    trust_opencode_native_state: bool,
     work_mode: bool,
 ) -> Result<crate::native_admission::Status> {
     for variable in [
@@ -1443,23 +1178,18 @@ fn validate_environment(
             }
         }
     }
-    crate::catalog::check_headless_version(harness, version)?;
     let loaded = crate::config::load(config_root)?
         .ok_or_else(|| Error::new("missing project configuration"))?;
-    let check_version = if work_mode {
-        work_mode::check_version
-    } else {
-        crate::catalog::check_harness_version
-    };
-    check_version(
-        harness,
-        version,
-        loaded
-            .config
-            .harness_version_pins
-            .get(harness)
-            .map(String::as_str),
-    )?;
+    if !work_mode {
+        crate::catalog::check_version(
+            version,
+            loaded
+                .config
+                .harness_version_pins
+                .get(harness)
+                .map(String::as_str),
+        )?;
+    }
     if work_mode {
         return Ok(work_mode::integration(
             harness,
@@ -1471,12 +1201,18 @@ fn validate_environment(
                 .map(String::as_str),
         ));
     }
-    crate::native_admission::enforce_headless_executable_with_opencode_state(
+    crate::native_admission::enforce_with_settings(
         config_root,
         harness,
         version,
         executable,
-        trust_opencode_native_state,
+        loaded
+            .config
+            .headless
+            .native_settings
+            .get(harness)
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     )
 }
 
@@ -1527,6 +1263,25 @@ fn sanitize(command: &mut Command) {
     command.env_remove("AHU_EXPECTED_DIGEST");
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorReady {
+    pid: u32,
+    attempt: u32,
+    frozen_digest: String,
+}
+fn supervisor_ready(attempt: &Path, pid: u32, number: u32, digest: &str) -> Result<bool> {
+    let path = attempt.join("supervisor-ready.json");
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    let ready: SupervisorReady = read_json(&path)?;
+    if ready.pid != pid || ready.attempt != number || ready.frozen_digest != digest {
+        bail!("supervisor acknowledgement does not match the submitted attempt");
+    }
+    Ok(true)
+}
+
 fn start(dir: &Path, spec: &Spec) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let attempt = attempt_dir(dir, spec);
@@ -1542,8 +1297,9 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     sanitize(&mut command);
     crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
     crate::telemetry::configure_supervisor_parent(&mut command, spec);
+    let expected = frozen_digest(dir)?;
     command
-        .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
+        .env("AHU_EXPECTED_DIGEST", &expected)
         .env_remove("AHU_RUNTIME_DIR")
         .env_remove("AHU_TASK_INDEX_DIR");
     // SAFETY: setsid is async-signal-safe and accesses no Rust state after fork.
@@ -1558,7 +1314,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     let mut child = command.spawn()?;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if attempt.join("started.json").exists() {
+        if supervisor_ready(&attempt, child.id(), spec.attempt, &expected)? {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -1643,154 +1399,80 @@ impl TokenUsage {
             ("ahu.tokens.total", self.total),
         ]
     }
+}
 
-    fn observe(&mut self, event: &Value) {
-        fn max_slot(slot: &mut Option<u64>, value: Option<u64>) {
-            if let Some(value) = value {
-                *slot = Some(slot.unwrap_or(0).max(value));
-            }
-        }
-        for usage in [
-            event.get("usage"),
-            event.pointer("/part/usage"),
-            event.pointer("/result/usage"),
-            event.pointer("/response/usage"),
-            event.pointer("/step_update/usage"),
-            event.pointer("/result/result/usage"),
-            event.pointer("/step_update/tool_info/usage"),
-            event.get("tokens"),
-            event.pointer("/part/tokens"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
+fn skill_catalog(worktree: &Path, plugin_roots: &[String]) -> Result<Vec<SkillCatalogEntry>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Component;
+    let mut roots = std::collections::BTreeSet::from([".agents/skills".to_owned()]);
+    if plugin_roots.len() > 128 {
+        bail!("runtime skill root limit exceeded");
+    }
+    for root in plugin_roots {
+        if root.is_empty()
+            || root.len() > 1024
+            || Path::new(root)
+                .components()
+                .any(|c| !matches!(c, Component::Normal(name) if name != ".git"))
         {
-            let number = |keys: &[&str]| {
-                keys.iter()
-                    .find_map(|key| usage.get(*key).and_then(Value::as_u64))
-            };
-            max_slot(&mut self.input, number(&["input_tokens", "prompt_tokens"]));
-            max_slot(
-                &mut self.output,
-                number(&["output_tokens", "completion_tokens"]),
-            );
-            max_slot(
-                &mut self.cached,
-                number(&[
-                    "cached_tokens",
-                    "cache_read_input_tokens",
-                    "cached_input_tokens",
-                ])
-                .or_else(|| {
-                    usage
-                        .get("cache")
-                        .and_then(|cache| cache.get("read"))
-                        .and_then(Value::as_u64)
-                }),
-            );
-            max_slot(
-                &mut self.cache_write,
-                number(&["cache_write_input_tokens", "cache_creation_input_tokens"]).or_else(
-                    || {
-                        usage
-                            .get("cache")
-                            .and_then(|cache| cache.get("write"))
-                            .and_then(Value::as_u64)
-                    },
-                ),
-            );
-            max_slot(
-                &mut self.reasoning,
-                number(&["reasoning_output_tokens", "thinking_tokens", "reasoning"]),
-            );
-            max_slot(&mut self.total, number(&["total_tokens"]));
+            bail!("invalid runtime skill root");
         }
+        roots.insert(root.trim_end_matches('/').into());
     }
-}
-
-impl ReportedCost {
-    fn observe_claude_result(&mut self, event: &Value) {
-        if event.get("type").and_then(Value::as_str) != Some("result") {
-            return;
-        }
-        let Some(value) = Self::valid_amount(event.get("total_cost_usd")) else {
-            return;
-        };
-        // Result totals are cumulative observations, including on resume. A
-        // duplicate or older snapshot must not increase the reported amount.
-        self.usd = Some(self.usd.map_or(value, |prior| prior.max(value)));
-        self.source = Some("claude_code_result_total".into());
-    }
-
-    fn observe_opencode_step(
-        &mut self,
-        event: &Value,
-        seen: &mut std::collections::BTreeSet<String>,
-        tracking_limited: &mut bool,
-    ) {
-        if event.get("type").and_then(Value::as_str) != Some("step_finish") {
-            return;
-        }
-        let part = match event.get("part") {
-            Some(part) => part,
-            None => return,
-        };
-        let Some(id) = part.get("id").and_then(Value::as_str) else {
-            return;
-        };
-        if id.is_empty() || id.len() > 1024 {
-            *tracking_limited = true;
-            return;
-        }
-        if seen.contains(id) {
-            return;
-        }
-        if seen.len() >= 4096 {
-            *tracking_limited = true;
-            return;
-        }
-        let Some(value) = Self::valid_amount(part.get("cost")) else {
-            return;
-        };
-        let total = self.usd.unwrap_or(0.0) + value;
-        if !total.is_finite() {
-            *tracking_limited = true;
-            return;
-        }
-        // Missing/invalid observations must not consume the part's identity.
-        seen.insert(id.to_owned());
-        self.usd = Some(total);
-        self.source = Some("opencode_step_finish_sum".into());
-    }
-
-    fn valid_amount(value: Option<&Value>) -> Option<f64> {
-        value
-            .and_then(Value::as_f64)
-            .filter(|value| value.is_finite() && *value >= 0.0)
-    }
-}
-
-fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
-    let roots = [
-        ".agents/skills",
-        ".claude/skills",
-        ".gemini/antigravity-cli/skills",
-    ];
     let mut entries = Vec::new();
     for root in roots {
-        let path = worktree.join(root);
+        let path = worktree.join(&root);
+        // Descriptor paths are relative metadata, never authority to follow links outside the task.
+        let mut current = worktree.to_path_buf();
+        if Path::new(&root).components().any(|c| {
+            current.push(c);
+            std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
+        }) {
+            continue;
+        }
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
-        for child in children.flatten() {
+        for (index, child) in children.enumerate() {
+            if index >= 1024 {
+                bail!("skill directory entry limit exceeded");
+            }
+            let Ok(child) = child else {
+                continue;
+            };
             let name = child.file_name().to_string_lossy().into_owned();
-            if name.is_empty() || name.starts_with('.') {
+            if name.is_empty()
+                || name.starts_with('.')
+                || !child.file_type().is_ok_and(|t| t.is_dir())
+            {
                 continue;
             }
             let file = child.path().join("SKILL.md");
-            let Ok(bytes) = std::fs::read(&file) else {
+            let Ok(metadata) = std::fs::symlink_metadata(&file) else {
                 continue;
             };
+            if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+                continue;
+            }
+            let Ok(opened) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&file)
+            else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            if opened
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() > 1024 * 1024
+            {
+                continue;
+            }
+            if entries.len() >= 1024 {
+                bail!("skill catalog limit exceeded");
+            }
             entries.push(SkillCatalogEntry {
                 name,
                 source: format!("{root}/{}/SKILL.md", child.file_name().to_string_lossy()),
@@ -1799,7 +1481,7 @@ fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
         }
     }
     entries.sort_by(|left, right| left.source.cmp(&right.source));
-    entries
+    Ok(entries)
 }
 
 /// Attribute an observed invocation only to exact local catalog entries.
@@ -1855,16 +1537,12 @@ pub struct Events {
     pub cost: ReportedCost,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(skip)]
-    model_evidence: identity::ModelEvidence,
+    #[serde(default)]
+    pub(crate) model_attributes: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
     #[serde(default)]
     pub skill_unknown_events: u64,
-    #[serde(skip)]
-    skill_calls: Vec<skills::Call>,
-    #[serde(skip)]
-    kiro: kiro::State,
     #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
     pub skill_observation: crate::telemetry::SkillEvidence,
     #[serde(skip_serializing)]
@@ -1875,513 +1553,30 @@ pub struct Events {
     #[serde(default, skip_serializing)]
     pub writes_outside_worktree: Vec<String>,
     #[serde(skip)]
-    native_event_count: usize,
-    #[serde(skip)]
-    cost_step_ids: std::collections::BTreeSet<String>,
-    #[serde(skip)]
     cost_tracking_limited: bool,
 }
 impl Events {
-    fn observe_stderr(&mut self, line: &[u8]) {
-        let text = String::from_utf8_lossy(line);
-        let text = text.trim();
-        if text.is_empty() {
-            return;
-        }
-        // Exact native stdin progress messages carry no failure or private data.
-        // Keep their count without making every noninteractive Codex run unknown.
-        if matches!(
-            text,
-            "Reading prompt from stdin..." | "Reading additional input from stdin..."
-        ) {
-            self.stderr_informational_lines += 1;
-            return;
-        }
-        let lower = text.to_ascii_lowercase();
-        let category = if [
-            "permission denied",
-            "permission_denied",
-            "tool denied",
-            "tool execution denied",
-            "not authorized",
-            "access denied",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            Some("permission denial")
-        } else if [
-            "resource_exhausted",
-            "quota exhausted",
-            "quota exceeded",
-            "quota reached",
-            "rate limit exceeded",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            Some("quota/rate limit failure")
-        } else if [
-            "authentication failed",
-            "unauthenticated",
-            "invalid api key",
-            "invalid_api_key",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            Some("authentication failure")
-        } else {
-            None
-        };
-        if let Some(category) = category {
-            self.failed = true;
-            if self.stderr_diagnostics.len() < 32 {
-                self.stderr_diagnostics.push(category.into());
-            }
-        } else {
-            self.stderr_unclassified_lines += 1;
-        }
-    }
-
-    pub fn observe(&mut self, harness: &str, line: &[u8]) {
-        let event: Value = match serde_json::from_slice(line) {
-            Ok(v) => v,
-            Err(_) => {
-                self.trajectory.malformed();
-                self.failed = true;
-                self.blockers.push("malformed or truncated event".into());
-                return;
-            }
-        };
-        if harness == "kiro" {
-            self.observe_kiro(&event);
-            return;
-        }
-        self.model_evidence.observe(
-            ["/model", "/model_name", "/part/model", "/message/model"]
-                .into_iter()
-                .filter_map(|pointer| event.pointer(pointer)),
+    fn incomplete(&mut self, diagnostic: &str) {
+        self.failed = true;
+        self.trajectory.incomplete();
+        self.native.incomplete();
+        self.model_attributes.insert(
+            "ahu.harness.model.reported.coverage".into(),
+            "partial".into(),
         );
-        self.usage.observe(&event);
-        self.trajectory.observe(harness, &event);
-        match harness {
-            "claude-code" => self.cost.observe_claude_result(&event),
-            "opencode" => self.cost.observe_opencode_step(
-                &event,
-                &mut self.cost_step_ids,
-                &mut self.cost_tracking_limited,
-            ),
-            _ => (),
-        }
-        self.observe_skill(harness, &event);
-        if self.model.is_none() {
-            self.model = event
-                .get("model")
-                .or_else(|| event.get("model_name"))
-                .or_else(|| event.pointer("/part/model"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        }
-        let metadata = native_metadata(harness, &event);
-        let helper_event = metadata["type"] == "system" || metadata["type"] == "collab";
-        if helper_event && self.native_event_count >= 256 {
-            self.failed = true;
-            self.blockers
-                .push("native helper evaluation limit exceeded".into());
-        } else if bounded_native_metadata(&metadata) {
-            self.native.observe(harness, &metadata);
-        } else {
-            self.failed = true;
-            self.blockers
-                .push("native metadata evaluation bound exceeded".into());
-        }
-        if helper_event {
-            self.native_event_count += 1;
-        }
-        let kind = event
-            .get("type")
-            .or_else(|| event.get("event"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let session = event
-            .get("session_id")
-            .or_else(|| event.get("thread_id"))
-            .or_else(|| event.get("conversation_id"))
-            // OpenCode spells it `sessionID`, on every event including its
-            // error events, which is what makes its errors resumable at all.
-            .or_else(|| event.get("sessionID"))
-            .or_else(|| event.pointer("/step_update/conversation_id"))
-            .and_then(Value::as_str);
-        if let Some(session) = session.filter(|s| valid_session(s)) {
-            if let Some(previous) = &self.session {
-                if previous != session {
-                    self.failed = true;
-                    self.blockers
-                        .push("session identity changed within attempt".into());
-                }
-            } else {
-                self.session = Some(session.into());
-            }
-        }
-        if event
-            .get("errors")
-            .and_then(Value::as_array)
-            .is_some_and(|v| !v.is_empty())
-            || event.get("error").is_some_and(|v| !v.is_null())
-        {
-            self.blockers.push("harness reported an error".into());
-            self.failed = true;
-        }
-        if kind.contains("denied")
-            || event
-                .get("permission_denials")
-                .and_then(Value::as_array)
-                .is_some_and(|v| !v.is_empty())
-        {
-            self.failed = true;
-            self.blockers
-                .push("harness reported permission denials".into());
-        }
-        match (harness, kind) {
-            ("codex", "thread.started") | ("claude-code", "system") | ("antigravity", "init") => (),
-            ("codex", "turn.completed") => self.finish(false),
-            (_, "turn.failed" | "error") => {
-                self.failed = true;
-                self.blockers.push("harness emitted an error".into());
-            }
-            ("codex", "item.completed") => {
-                if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") {
-                    self.summary = event
-                        .pointer("/item/text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into();
-                }
-            }
-            ("claude-code" | "antigravity", "result") => {
-                let result = event.get("result").filter(|value| value.is_object());
-                let status = result
-                    .and_then(|value| value.get("status"))
-                    .or_else(|| event.get("status"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let subtype = result
-                    .and_then(|value| value.get("subtype"))
-                    .or_else(|| event.get("subtype"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let recognized_success = if harness == "claude-code" {
-                    subtype == "success"
-                        && event.get("is_error").and_then(Value::as_bool) == Some(false)
-                        && event.get("result").and_then(Value::as_str).is_some()
-                } else {
-                    matches!(status.as_str(), "success" | "succeeded" | "ok")
-                        && result
-                            .and_then(|value| value.get("response"))
-                            .or_else(|| event.get("response"))
-                            .and_then(Value::as_str)
-                            .is_some()
-                };
-                let failed = !recognized_success
-                    || event
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    || matches!(
-                        status.as_str(),
-                        "error" | "failed" | "cancelled" | "timeout"
-                    )
-                    || subtype.starts_with("error")
-                    || event.get("error").is_some_and(|v| !v.is_null());
-                self.summary = event
-                    .get("response")
-                    .or_else(|| result.and_then(|value| value.get("response")))
-                    .or_else(|| event.get("result"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into();
-                self.finish(failed);
-            }
-            ("antigravity", "step_update") => (),
-            // OpenCode's `run --format json` stream, observed on 1.18.30. Every
-            // event is `{type, timestamp, sessionID, part}`; the work of a turn
-            // is a sequence of steps, and only the reason on a step's finish
-            // says whether the turn ended or another step follows.
-            ("opencode", "step_start") => self.terminal = false,
-            // OpenCode 2.0.32 also streams reasoning. It is nonterminal
-            // metadata; never retain its text as an answer or native payload.
-            ("opencode", "reasoning") => self.terminal = false,
-            ("opencode", "text") => {
-                self.terminal = false;
-                if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
-                    self.summary = text.into();
-                }
-            }
-            ("opencode", "tool_use") => {
-                self.terminal = false;
-                // A refused tool call is reported as an ordinary tool error:
-                // `state.status: "error"` with the refusal as `state.error`.
-                // Observed with a `write` call on a launch that passed no
-                // --auto — and the run then ended with no terminal step and
-                // still exited 0, which is exactly why the exit status is not
-                // allowed to stand in for a result anywhere in this file.
-                let refused = event
-                    .pointer("/part/state/error")
-                    .and_then(Value::as_str)
-                    .is_some_and(|error| {
-                        error.to_ascii_lowercase().contains("rejected permission")
-                    });
-                if refused {
-                    self.failed = true;
-                    self.blockers
-                        .push("harness reported permission denials".into());
-                }
-            }
-            (_, "tool_use") | ("antigravity", "tool_result") => (),
-            ("opencode", "step_finish") => {
-                match event.pointer("/part/reason").and_then(Value::as_str) {
-                    // OpenCode may finish several assistant messages with
-                    // `stop` during one `run` (for example, after a tool
-                    // result and again after the final answer). These are
-                    // step boundaries, not duplicate task-level results.
-                    Some("stop") => self.terminal = true,
-                    // The model is about to run tools and another step follows.
-                    // Treating this as terminal would score an assignment
-                    // complete at its first tool call.
-                    Some("tool-calls") | None => self.terminal = false,
-                    // Anything else — a token ceiling, an abort — ends the turn
-                    // without the model having said it is done. Recorded as a
-                    // terminal failure rather than left to look like silence.
-                    Some(_) => {
-                        self.blockers
-                            .push("harness ended the step without a stop reason".into());
-                        self.terminal = true;
-                        self.failed = true;
-                    }
-                }
-            }
-            ("opencode", "user") => self.terminal = false,
-            (
-                _,
-                "assistant" | "user" | "step_update" | "turn.started" | "item.started"
-                | "item.updated" | "stream_event",
-            ) => (),
-            _ => self.unknown_events += 1,
+        if self.blockers.len() < 128 && !self.blockers.iter().any(|b| b == diagnostic) {
+            self.blockers.push(diagnostic.into());
         }
     }
-    fn finish(&mut self, failed: bool) {
-        if self.terminal {
-            self.failed = true;
-            self.blockers.push("multiple terminal events".into());
-        }
-        self.terminal = true;
-        self.failed |= failed;
-    }
-
-    /// Called after stdout drain; process success cannot supply a missing result.
-    fn require_terminal_result(&mut self, harness: &str) {
+    fn require_terminal_result(&mut self) {
         if !self.terminal {
-            self.failed = true;
-            self.blockers.push("no terminal harness result".into());
-            if harness == "opencode" {
-                self.blockers.push(
-                    "OpenCode stdout has no final stop step; completed tool calls and a zero exit \
-                     do not establish completion. Review task changes before explicitly resuming \
-                     or retrying."
-                        .into(),
-                );
-            }
-        }
-    }
-}
-
-/// What the OpenCode recorded-session fallback needs from the finished attempt.
-struct RecordedCompletion<'a> {
-    harness: &'a str,
-    harness_version: &'a str,
-    executable: &'a Path,
-    expected_executable_digest: Option<&'a str>,
-    worktree: &'a Path,
-    /// The attempt created this session itself: ahu passed no `--session`.
-    fresh_session: bool,
-    exited_zero: bool,
-    attempt_started_ms: u64,
-    timeout: std::time::Duration,
-}
-
-/// OpenCode 2's `run --format json` can finish a turn without emitting the
-/// final stop step: after its session wait returns, the event consumer filters
-/// out everything but session execution events, and the execution-success
-/// event itself emits no JSON completion event. The same completion is in
-/// OpenCode's own session projection, which `session export --sanitize` prints
-/// with transcript and file data redacted.
-///
-/// This consults that projection once, before the missing-terminal failure is
-/// finalized, and only where the recovered evidence can be unambiguous: the
-/// attempt created the session, the stream named exactly that session, nothing
-/// else about the attempt failed, and the process exited 0. An observed
-/// failure, permission denial, blocker, nonzero exit or resumed session is
-/// never rescued — the export is not consulted at all in those cases.
-fn recover_opencode_terminal_result(events: &mut Events, attempt: &RecordedCompletion<'_>) {
-    if attempt.harness != "opencode"
-        || events.terminal
-        || events.failed
-        // Anything already recorded about this attempt — a stderr diagnostic,
-        // an unclassified line, a drain that did not finish — leaves the run
-        // unexplained, and a recorded stop does not explain it.
-        || !events.blockers.is_empty()
-        || events.unknown_events > 0
-        || !attempt.exited_zero
-        || !attempt.fresh_session
-        || !crate::harness::opencode::supports_session_export_evidence(attempt.harness_version)
-    {
-        return;
-    }
-    let Some(session) = events.session.clone() else {
-        return;
-    };
-    match opencode_recorded_completion(attempt, &session) {
-        Ok(()) => {
-            events.terminal = true;
-            events.terminal_evidence = Some("opencode recorded session export".into());
-        }
-        Err(reason) => events
-            .blockers
-            .push(format!("OpenCode recorded session: {reason}")),
-    }
-}
-
-/// Read the sanitized projection for exactly `session` and decide whether it
-/// establishes completion. The subprocess is bounded in time and in captured
-/// bytes, its stdout is consumed in memory and dropped with this call, and
-/// only a fixed reason string can reach a record, a log or telemetry.
-fn opencode_recorded_completion(
-    attempt: &RecordedCompletion<'_>,
-    session: &str,
-) -> std::result::Result<(), String> {
-    use crate::harness::opencode;
-    if !opencode::valid_session_id(session) {
-        return Err("the stream's session identifier is not an OpenCode session id".into());
-    }
-    if let Some(expected) = attempt.expected_executable_digest {
-        let bytes = std::fs::read(attempt.executable)
-            .map_err(|_| "the OpenCode executable could not be rechecked")?;
-        if digest_bytes(&bytes) != expected {
-            return Err("the OpenCode executable changed during the attempt".into());
-        }
-    }
-    let deadline = Instant::now() + attempt.timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(
-                "the OpenCode session export did not become valid before its bounded retry deadline"
-                    .into(),
-            );
-        }
-
-        let mut command = Command::new(attempt.executable);
-        // `--standalone` reads through a private server, as the run itself did,
-        // instead of attaching to the user's background service. `--sanitize`
-        // redacts transcript and file data inside OpenCode, before any of it can
-        // reach this process.
-        // `opencode session export [flags] [<session>]`: the flags precede the
-        // positional, as its own usage line declares. The identifier was checked
-        // above, so it can never be read as an option.
-        command.args(["session", "export", "--sanitize", "--standalone", session]);
-        crate::harness::configure_task_directory(&mut command, "opencode", attempt.worktree);
-        sanitize(&mut command);
-        // This process only verifies completion; it must not create a second
-        // Ahu or native telemetry observation using the supervisor's environment.
-        command
-            .env("OTEL_SDK_DISABLED", "true")
-            .env_remove("AHU_EVAL_OTEL_ENDPOINT")
-            .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
-            .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
-            .env_remove("OTEL_RESOURCE_ATTRIBUTES")
-            .env_remove("OTEL_SERVICE_NAME")
-            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-            .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-            .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-            .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
-            .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
-            .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
-            .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
-            .env_remove("OTEL_TRACES_EXPORTER")
-            .env_remove("OTEL_METRICS_EXPORTER")
-            .env_remove("OTEL_LOGS_EXPORTER");
-        let Some(export) = crate::selection::bounded_config_probe(&mut command, true, remaining)
-        else {
-            return Err(
-                "the bounded `opencode session export` read failed, timed out, exited nonzero, \
-                 or passed its output bound"
-                    .into(),
-            );
-        };
-
-        match opencode::export_establishes_completion(&export, session, attempt.attempt_started_ms)
-        {
-            Ok(()) => return Ok(()),
-            // OpenCode can return a successful process exit before its session
-            // projection is ready. Retry only the unparseable snapshot; every
-            // valid export, including one that proves a failure or mismatch, is
-            // evaluated once and remains authoritative.
-            Err("the export is not JSON") => {
-                let pause = deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(100));
-                if pause.is_zero() {
-                    return Err(
-                        "the OpenCode session export did not become valid before its bounded retry deadline"
-                            .into(),
-                    );
-                }
-                std::thread::sleep(pause);
-            }
-            Err(reason) => return Err(reason.into()),
+            self.incomplete("no terminal harness result");
         }
     }
 }
 
 const STREAM_EVALUATION_LIMIT: u64 = 64 * 1024 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
-
-const MAX_EVENT_JSON_DEPTH: usize = 64;
-const WRITE_LIKE_TOOLS: [&str; 10] = [
-    "write",
-    "edit",
-    "multiedit",
-    "notebookedit",
-    "applypatch",
-    "editfile",
-    "writefile",
-    "createfile",
-    "strreplaceeditor",
-    "strreplacebasededit",
-];
-const WRITE_PATH_KEYS: [&str; 6] = [
-    "filepath",
-    "file",
-    "path",
-    "notebookpath",
-    "abspath",
-    "targetfile",
-];
-const WRITE_NAME_KEYS: [&str; 3] = ["tool", "name", "toolname"];
-const WRITE_INPUT_KEYS: [&str; 2] = ["input", "arguments"];
-
-/// Lowercase ASCII alphanumerics only: `file_path` and `filePath` both
-/// normalize to `filepath`, `_` separators vanish.
-fn normalize_token(token: &str) -> String {
-    token
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
 
 /// Resolve existing prefixes before applying `..`: a symlink followed by a
 /// parent component must retain filesystem traversal semantics, including when
@@ -2431,188 +1626,7 @@ fn resolve_write_path(candidate: &str) -> Option<PathBuf> {
 /// Walk a write-tool call's subtree, collecting path candidates and decoding
 /// string `input`/`arguments` payloads that embed JSON. Recursion is bounded
 /// by `MAX_EVENT_JSON_DEPTH`.
-fn collect_write_paths_within(value: &Value, depth: usize, candidates: &mut Vec<String>) {
-    if depth >= MAX_EVENT_JSON_DEPTH {
-        return;
-    }
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map.iter() {
-                let key = normalize_token(key);
-                if WRITE_PATH_KEYS.contains(&key.as_str())
-                    && let Some(path) = child.as_str()
-                {
-                    candidates.push(path.to_string());
-                }
-                if WRITE_INPUT_KEYS.contains(&key.as_str())
-                    && let Some(embedded) = child.as_str()
-                    && let Ok(decoded) = serde_json::from_str::<Value>(embedded)
-                {
-                    collect_write_paths_within(&decoded, depth + 1, candidates);
-                }
-                collect_write_paths_within(child, depth + 1, candidates);
-            }
-        }
-        Value::Array(items) => {
-            for child in items.iter() {
-                collect_write_paths_within(child, depth + 1, candidates);
-            }
-        }
-        _ => (),
-    }
-}
-
-/// Walk one event, collecting write-path candidates from any object whose
-/// name-ish key names a write-like tool. The main walk does not decode
-/// embedded JSON in string `input`/`arguments` values; the within-walk
-/// triggered by a matching tool name does.
-fn collect_write_paths(event: &Value) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let mut stack: Vec<(&Value, usize)> = vec![(event, 0)];
-    while let Some((value, depth)) = stack.pop() {
-        if depth >= MAX_EVENT_JSON_DEPTH {
-            continue;
-        }
-        match value {
-            Value::Object(map) => {
-                let is_write_tool = map.iter().any(|(key, child)| {
-                    WRITE_NAME_KEYS.contains(&normalize_token(key).as_str())
-                        && child
-                            .as_str()
-                            .map(normalize_token)
-                            .is_some_and(|tool| WRITE_LIKE_TOOLS.contains(&tool.as_str()))
-                });
-                if is_write_tool {
-                    collect_write_paths_within(value, depth, &mut candidates);
-                }
-                for (_, child) in map.iter() {
-                    stack.push((child, depth + 1));
-                }
-            }
-            Value::Array(items) => {
-                for child in items.iter() {
-                    stack.push((child, depth + 1));
-                }
-            }
-            _ => (),
-        }
-    }
-    candidates
-}
-
-/// Project exactly the fields consumed by helper accounting. Ordinary tool
-/// payloads and native text use the stream bounds, not helper metadata bounds.
-fn native_metadata(harness: &str, event: &Value) -> Value {
-    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
-    if harness != "claude-code" {
-        // Retain only known completion or collaboration markers, never payloads.
-        return if kind.contains("collab")
-            || event
-                .pointer("/item/type")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.contains("collab"))
-        {
-            json!({"type":"collab"})
-        } else if harness == "codex" && kind == "turn.completed" {
-            json!({"type":"turn.completed"})
-        } else {
-            json!({})
-        };
-    }
-    let mut out = json!({});
-    let fields: &[&str] = match (kind, subtype) {
-        ("system", "task_started") => &[
-            "task_id",
-            "task_type",
-            "subagent_type",
-            "spawn_depth",
-            "is_backgrounded",
-        ],
-        ("system", "task_progress") => &["task_id"],
-        ("system", "task_notification") => &["task_id", "status", "output_file"],
-        ("result", _) => &[],
-        _ => return out,
-    };
-    out["type"] = json!(kind);
-    // Only the three known system subtypes are consumed; terminal subtypes
-    // and arbitrary payload strings must not enter helper accounting.
-    if kind == "system" {
-        out["subtype"] = json!(subtype);
-    }
-    for field in fields {
-        let value = event.get(field).filter(|v| match *field {
-            "spawn_depth" => v.is_u64(),
-            "is_backgrounded" => v.is_boolean(),
-            _ => v.is_string(),
-        });
-        if let Some(value) = value {
-            out[field] = value.clone();
-        }
-    }
-    if matches!(
-        (kind, subtype),
-        ("system", "task_progress" | "task_notification")
-    ) && let Some(tokens) = event.pointer("/usage/total_tokens").and_then(Value::as_u64)
-    {
-        out["usage"] = json!({"total_tokens":tokens});
-    }
-    if kind == "result"
-        && let Some(stats) = event.get("subagent_stats")
-    {
-        let mut selected = json!({});
-        for field in ["spawned", "completed", "max_depth"] {
-            if let Some(value) = stats.get(field).and_then(Value::as_u64) {
-                selected[field] = json!(value);
-            }
-        }
-        for field in ["depth_limit", "concurrency_limit", "budget"] {
-            if let Some(value) = stats
-                .get("refused")
-                .and_then(|v| v.get(field))
-                .and_then(Value::as_u64)
-            {
-                if selected["refused"].is_null() {
-                    selected["refused"] = json!({});
-                }
-                selected["refused"][field] = json!(value);
-            }
-        }
-        if let Some(roles) = stats.get("by_type").and_then(Value::as_object) {
-            selected["by_type"] = Value::Object(
-                roles
-                    .iter()
-                    .filter(|(_, count)| count.is_u64())
-                    .map(|(role, count)| (role.clone(), count.clone()))
-                    .collect(),
-            );
-        }
-        out["subagent_stats"] = selected;
-    }
-    out
-}
-
-fn bounded_native_metadata(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => {
-            map.len() <= 256
-                && map
-                    .iter()
-                    .all(|(key, value)| key.len() <= 4096 && bounded_native_metadata(value))
-        }
-        Value::Array(items) => items.len() <= 256 && items.iter().all(bounded_native_metadata),
-        Value::String(text) => text.len() <= 4096,
-        // Native refusal accounting adds three provider-supplied counters.
-        // Reject values outside the safe evaluation range before that parser.
-        Value::Number(number) => number.as_u64().is_none_or(|n| n <= u64::MAX / 3),
-        _ => true,
-    }
-}
-
-fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
-    let Ok(event) = serde_json::from_slice::<Value>(line) else {
-        return;
-    };
+fn observe_writes(events: &mut Events, candidates: &[String], worktree: &Path) {
     let worktree = match real_path(worktree) {
         Ok(worktree) => worktree,
         Err(_) => {
@@ -2623,15 +1637,12 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
             return;
         }
     };
-    for candidate in collect_write_paths(&event)
-        .into_iter()
-        .chain(kiro::write_paths(&event))
-    {
+    for candidate in candidates {
         if candidate.len() > 4096 {
             events.failed = true;
             continue;
         }
-        let Some(resolved) = resolve_write_path(&candidate) else {
+        let Some(resolved) = resolve_write_path(candidate) else {
             continue;
         };
         let real = match real_path(&resolved) {
@@ -2730,14 +1741,20 @@ struct SessionOwner {
 /// polls process completion independently and bounds the final drain.
 fn capture(
     mut pipe: impl Read + Send + 'static,
-    checkpoint: PathBuf,
-    worktree: PathBuf,
-    owner: Option<SessionOwner>,
-    events: std::sync::Arc<std::sync::Mutex<Events>>,
+    stream: &'static str,
+    input: decoder::Sender,
     tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) {
     std::thread::spawn(move || {
         let run = || -> Result<()> {
+            let send_line = |line: &[u8]| -> Result<()> {
+                let line = std::str::from_utf8(line)
+                    .map_err(|_| Error::new("non-UTF-8 native stream"))?
+                    .to_owned();
+                input
+                    .send(decoder::Input::Line { stream, line })
+                    .map_err(|_| Error::new("runtime decoder queue full or disconnected"))
+            };
             let mut total = 0u64;
             let mut chunk = [0u8; 8192];
             let mut line = Vec::new();
@@ -2746,40 +1763,14 @@ fn capture(
                 if n == 0 {
                     break;
                 }
-                total += n as u64;
+                total = total.saturating_add(n as u64);
                 if total > STREAM_EVALUATION_LIMIT {
                     bail!("stream evaluation exceeded 64 MiB");
                 }
                 for byte in &chunk[..n] {
                     if *byte == b'\n' {
                         if !line.is_empty() {
-                            let mut events = events
-                                .lock()
-                                .map_err(|_| Error::new("stream evaluator unavailable"))?;
-                            if let Some(owner) = &owner {
-                                let had_session = events.session.is_some();
-                                events.observe(&owner.harness, &line);
-                                observe_writes(&mut events, &line, &worktree);
-                                if !had_session && events.session.is_some() {
-                                    durable_json(
-                                        &checkpoint,
-                                        &SessionCheckpoint {
-                                            schema_version: 2,
-                                            task_id: owner.task_id.clone(),
-                                            attempt: owner.attempt,
-                                            harness: owner.harness.clone(),
-                                            session: events
-                                                .session
-                                                .clone()
-                                                .expect("session was just observed"),
-                                            native_data_location: None,
-                                        },
-                                    )?;
-                                }
-                            } else {
-                                events.observe_stderr(&line);
-                            }
-                            events.blockers.truncate(128);
+                            send_line(&line)?;
                         }
                         line.clear();
                     } else {
@@ -2791,21 +1782,19 @@ fn capture(
                 }
             }
             if !line.is_empty() {
-                let mut events = events
-                    .lock()
-                    .map_err(|_| Error::new("stream evaluator unavailable"))?;
-                if owner.is_none() {
-                    events.observe_stderr(&line);
-                } else {
-                    events.failed = true;
-                    events.blockers.push("unterminated event stream".into());
-                    events.trajectory.incomplete();
+                if stream == "stdout" {
+                    bail!("unterminated event stream");
                 }
+                send_line(&line)?;
             }
+            input
+                .send(decoder::Input::End(stream))
+                .map_err(|_| Error::new("runtime decoder queue full or disconnected"))?;
             Ok(())
         };
         let mut run = run;
-        let _ = tx.send(run().map_err(|_| "stream evaluation failed or exceeded its bound".into()));
+        let _ =
+            tx.send(run().map_err(|_| "native stream drain failed or exceeded its bound".into()));
     });
 }
 
@@ -2877,6 +1866,16 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
     if attempt.join("result.json").exists() || attempt.join("started.json").exists() {
         bail!("attempt already started; implicit replay refused");
     }
+    // Acknowledge exclusive supervisor ownership before potentially slow native
+    // inspection. This is submission acceptance, not proof an agent has started.
+    durable_json(
+        &attempt.join("supervisor-ready.json"),
+        &SupervisorReady {
+            pid: std::process::id(),
+            attempt: spec.attempt,
+            frozen_digest: expected.into(),
+        },
+    )?;
     let mut phase = "frozen_execution_validation";
     let outcome = task::load(dir).and_then(|record| {
         observe_attempt(&record, &spec, &mut phase, |span, phase| {
@@ -2926,6 +1925,26 @@ fn observe_attempt(
     outcome.map(|status| if status == "succeeded" { 0 } else { 5 })
 }
 
+/// Cancellation acknowledged before native spawn is a terminal cancellation,
+/// not a supervisor failure. No process or native completion is invented.
+fn cancel_before_spawn(dir: &Path, attempt: &Path, spec: &Spec) -> Result<&'static str> {
+    durable_json(
+        &attempt.join("result.json"),
+        &json!({
+            "schema_version":2,"backend":"headless",
+            "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),
+            "attempt":spec.attempt,"outcome":"cancelled",
+            "finished_at":task::now_rfc3339(),
+            "process":{"exit_code":null,"signal":null},
+            "harness":{"terminal":false,"failed":false,"blockers":[]},
+            "blockers":["cancelled before native worker spawn"],
+            "acceptance":"not assessed","worktree_preserved":true
+        }),
+    )?;
+    task::set_state(dir, task::TaskState::Cancelled)?;
+    Ok("cancelled")
+}
+
 fn run_attempt(
     dir: &Path,
     attempt: &Path,
@@ -2934,6 +1953,9 @@ fn run_attempt(
     telemetry_span: &mut crate::telemetry::SpanGuard,
 ) -> Result<&'static str> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
+    if dir.join("cancel.json").exists() {
+        return cancel_before_spawn(dir, attempt, spec);
+    }
     let (record, rebuilt, executable) = crate::launch::verify_task(dir, Some(spec))?;
     if record.delivery.layout_version != 3 {
         bail!("primary-owned execution requires delivery layout 3; submit a new assignment");
@@ -2945,7 +1967,6 @@ fn run_attempt(
     {
         bail!("harness executable changed since submission; refusing execution");
     }
-    crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record, spec.options.work_mode)?;
     validate_environment(
@@ -2954,19 +1975,30 @@ fn run_attempt(
         &record.identity.harness,
         &spec.harness_version,
         &real,
-        spec.native_controls
-            .iter()
-            .any(|control| control == "opencode.native-account-state=project-trusted"),
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility(
-            &real,
+        crate::native_admission::validate_launch(
+            &record.worktree,
             &record.identity.harness,
             &record.identity.model,
             record.identity.permissions,
-            &record.worktree,
+            "headless",
+            &spec.harness_version,
+            &real,
         )?;
+    }
+    if spec.contract.output.is_some()
+        && !crate::native::execution_capabilities(
+            &repo,
+            &record.identity.harness,
+            &spec.harness_version,
+            record.identity.permissions,
+            spec.options.work_mode,
+        )?
+        .structured_output
+    {
+        bail!("structured output is unavailable under the selected runtime permission controls");
     }
     if spec.options.work_mode {
         crate::auth_binding::capture_unverified_task(dir)?;
@@ -3020,6 +2052,7 @@ fn run_attempt(
         Some(&record.task_id),
         Some(spec.attempt),
     );
+    crate::telemetry::configure_native_export(&mut command, rebuilt.native_eval_otlp);
     crate::telemetry::configure_task_identity(&mut command, &record, Some(spec));
     telemetry_span.configure_child_context(&mut command);
     command
@@ -3050,20 +2083,48 @@ fn run_attempt(
         }
     }
     pin.configure_command(&mut command)?;
+    let runtime = crate::harness_runtime::load(&repo, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!("runtime binding differs from the frozen launch; refusing decoder startup");
+    }
+    let structured_result_target = if spec.contract.output.is_some() {
+        Some(
+            real_path(&dir.join("requests"))?
+                .join(format!("structured-result-{}.json", spec.attempt)),
+        )
+    } else {
+        None
+    };
+    let stdout_events = std::sync::Arc::new(std::sync::Mutex::new(Events {
+        structured_result_target,
+        ..Default::default()
+    }));
+    let decoder = decoder::start(
+        &runtime,
+        SessionOwner {
+            task_id: record.task_id.clone(),
+            attempt: spec.attempt,
+            harness: record.identity.harness.clone(),
+        },
+        attempt.join("native-session.json"),
+        record.worktree.clone(),
+        stdout_events.clone(),
+    )?;
     // Serialize the final parent/cancellation check with admission and explicit cancellation.
     let spawn_admission = Lock::acquire(&store(&repo)?.join("launch.lock"))?;
     validate_parent_attempt(&repo, spec)?;
     if dir.join("cancel.json").exists() {
-        bail!("task was cancelled before worker spawn");
+        return cancel_before_spawn(dir, attempt, spec);
     }
     durable_json(
         &attempt.join("spawn-intent.json"),
         &json!({"at":task::now_rfc3339(),"attempt":spec.attempt}),
     )?;
     *phase = "worker_spawn";
-    // OpenCode records its session creation time in epoch milliseconds. Taking
-    // this from the same clock immediately before the spawn is what lets a
-    // later recorded-session read prove the session is this attempt's.
+    // Native recovery receives a host timestamp taken immediately before spawn.
+    // A runtime must match exported completion evidence to this attempt.
     let attempt_started_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(u64::MAX, |since| {
@@ -3090,19 +2151,6 @@ fn run_attempt(
     }
     let mut guard = Guard(pid);
     *phase = "stream_evaluation_and_lifecycle";
-    let structured_result_target = if spec.contract.output.is_some() {
-        Some(
-            real_path(&dir.join("requests"))?
-                .join(format!("structured-result-{}.json", spec.attempt)),
-        )
-    } else {
-        None
-    };
-    let stdout_events = std::sync::Arc::new(std::sync::Mutex::new(Events {
-        structured_result_target,
-        ..Default::default()
-    }));
-    let stderr_events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let (err_tx, err_rx) = std::sync::mpsc::channel();
     capture(
@@ -3110,14 +2158,8 @@ fn run_attempt(
             .stdout
             .take()
             .ok_or_else(|| Error::new("missing stdout"))?,
-        attempt.join("native-session.json"),
-        record.worktree.clone(),
-        Some(SessionOwner {
-            task_id: record.task_id.clone(),
-            attempt: spec.attempt,
-            harness: record.identity.harness.clone(),
-        }),
-        stdout_events.clone(),
+        "stdout",
+        decoder.input.clone(),
         out_tx,
     );
     capture(
@@ -3125,10 +2167,8 @@ fn run_attempt(
             .stderr
             .take()
             .ok_or_else(|| Error::new("missing stderr"))?,
-        attempt.join("native-session.json"),
-        record.worktree.clone(),
-        None,
-        stderr_events.clone(),
+        "stderr",
+        decoder.input.clone(),
         err_tx,
     );
     durable_json(
@@ -3141,6 +2181,7 @@ fn run_attempt(
     let mut stop: Option<(&str, Instant)> = None;
     let mut output = None;
     let mut errors = None;
+    let mut decoded = None;
     let mut broker_failure = None;
     let mut cancelled_tasks = Vec::new();
     loop {
@@ -3150,7 +2191,11 @@ fn run_attempt(
         if errors.is_none() {
             errors = err_rx.try_recv().ok();
         }
-        let storage_failed = output.as_ref().is_some_and(|r| r.is_err())
+        if decoded.is_none() {
+            decoded = decoder.poll();
+        }
+        let storage_failed = decoded.as_ref().is_some_and(|r| r.is_err())
+            || output.as_ref().is_some_and(|r| r.is_err())
             || errors.as_ref().is_some_and(|r| r.is_err());
         if stop.is_none() {
             let reason = if dir.join("cancel.json").exists() {
@@ -3176,6 +2221,7 @@ fn run_attempt(
                         "harness reported a write target outside the task worktree; process stopped after observing the event".into(),
                     );
                 }
+                decoder.cancel();
                 cancelled_tasks = cancel_tree(&repo, dir, reason)?;
                 signal_group(pid, libc::SIGTERM);
                 stop = Some((reason, Instant::now()));
@@ -3223,13 +2269,21 @@ fn run_attempt(
     if errors.is_none() {
         errors = err_rx.recv_timeout(Duration::from_secs(2)).ok();
     }
+    if decoded.is_none() {
+        decoded = decoder.outcome.recv_timeout(Duration::from_secs(2)).ok();
+    }
+    if !matches!(decoded, Some(Ok(()))) {
+        decoder.cancel();
+    }
+    // Join the owned peer before taking its final cumulative observation.
+    drop(decoder);
     let mut events = std::mem::take(
         &mut *stdout_events
             .lock()
             .map_err(|_| Error::new("stdout evaluator unavailable"))?,
     );
     if !matches!(&output, Some(Ok(()))) {
-        events.trajectory.incomplete();
+        events.incomplete("stdout evidence incomplete");
     }
     match output {
         Some(Ok(())) => (),
@@ -3244,19 +2298,16 @@ fn run_attempt(
                 .push("stdout drain incomplete; escaped descendant cleanup unknown".into());
         }
     }
-    let stderr = std::mem::take(
-        &mut *stderr_events
-            .lock()
-            .map_err(|_| Error::new("stderr evaluator unavailable"))?,
-    );
-    events.failed |= stderr.failed;
-    events.stderr_diagnostics = stderr.stderr_diagnostics;
-    events.stderr_unclassified_lines = stderr.stderr_unclassified_lines;
-    events.stderr_informational_lines = stderr.stderr_informational_lines;
+    if !matches!(decoded, Some(Ok(()))) {
+        events.incomplete("runtime decoder did not finish successfully; evidence incomplete");
+    }
     if !events.stderr_diagnostics.is_empty() {
         events
             .blockers
             .push("recognized failure diagnostic on stderr".into());
+    }
+    if !matches!(&errors, Some(Ok(()))) {
+        events.incomplete("stderr evidence incomplete");
     }
     match errors {
         Some(Ok(())) => (),
@@ -3274,21 +2325,39 @@ fn run_attempt(
             .blockers
             .push("stderr contained unclassified diagnostics; effect on completion unknown".into());
     }
-    recover_opencode_terminal_result(
-        &mut events,
-        &RecordedCompletion {
-            harness: &record.identity.harness,
-            harness_version: &spec.harness_version,
-            executable: &real,
-            expected_executable_digest: Some(&spec.executable_digest),
-            worktree: &record.worktree,
-            fresh_session: spec.session.is_none(),
-            exited_zero: status.success(),
-            attempt_started_ms,
-            timeout: crate::harness::opencode::EXPORT_TIMEOUT,
-        },
-    );
-    events.require_terminal_result(&record.identity.harness);
+    if stop.is_none()
+        && status.success()
+        && spec.session.is_none()
+        && !events.terminal
+        && !events.failed
+        && events.blockers.is_empty()
+        && events.unknown_events == 0
+        && let Some(session) = &events.session
+        && runtime
+            .descriptor()
+            .operations
+            .contains(&crate::harness_runtime::Operation::Recover)
+    {
+        // Runtime owns native retrieval and format/version semantics. No builtin fallback.
+        let recovered = (|| -> Result<Value> {
+            let native = crate::harness_runtime::native_params(&repo, runtime.descriptor())?;
+            runtime.call("recover", json!({
+                "harness":record.identity.harness, "native_version":spec.harness_version,
+                "native_executable":real, "expected_executable_digest":spec.executable_digest,
+                "worktree":record.worktree, "session":session, "attempt_started_ms":attempt_started_ms,
+                "home":native["home"], "environment":native["environment"],
+            }))
+        })();
+        match recovered.and_then(decoder::validate_recovery) {
+            Ok(true) => {
+                events.terminal = true;
+                events.terminal_evidence = Some("runtime recorded session recovery".into());
+            }
+            Ok(false) => (),
+            Err(_) => events.incomplete("runtime recorded session recovery failed"),
+        }
+    }
+    events.require_terminal_result();
     if events.session.is_none() {
         events
             .blockers
@@ -3315,7 +2384,10 @@ fn run_attempt(
             .any(|helper| helper.status != crate::native::HelperStatus::Completed);
         if (!completeness.complete
             && (bounded
-                || record.identity.harness == "claude-code"
+                || !events.native.helpers().is_empty()
+                || !completeness.violations.is_empty()
+                || !completeness.unobserved.is_empty()
+                || events.native.stream_incomplete
                 || completeness.unknown_events > 0))
             || (bounded && failed_helper)
         {
@@ -3348,14 +2420,16 @@ fn run_attempt(
             let value = result(&child_dir).unwrap_or_else(
                 |_| json!({"outcome":"unknown","error":"child result unavailable"}),
             );
-            if value["outcome"] != "running" || Instant::now() >= reconcile_deadline {
+            if !matches!(value["outcome"].as_str(), Some("starting" | "running"))
+                || Instant::now() >= reconcile_deadline
+            {
                 break value;
             }
             std::thread::sleep(Duration::from_millis(50));
         };
         if matches!(
             value["outcome"].as_str(),
-            Some("running" | "unknown" | "interrupted")
+            Some("starting" | "running" | "unknown" | "interrupted")
         ) {
             events.blockers.push(format!(
                 "registered descendant {id} cancellation is unconfirmed; inspect its result"
@@ -3400,7 +2474,7 @@ fn run_attempt(
     } else {
         None
     };
-    let skill_catalog = skill_catalog(&record.worktree);
+    let skill_catalog = skill_catalog(&record.worktree, &runtime.descriptor().skill_paths)?;
     attribute_skill_provenance(&mut events.skills, &skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
         reason
@@ -3590,11 +2664,11 @@ pub(crate) fn private_attempt_metrics(
         {
             bail!("headless result identity unavailable or inconsistent");
         }
-        let source = match expected_harness {
-            "claude-code" if cost_usd.is_some() => Some("claude_code_result_total".to_owned()),
-            "opencode" if cost_usd.is_some() => Some("opencode_step_finish_sum".to_owned()),
-            _ => None,
-        };
+        let source = value
+            .pointer("/harness/cost/source")
+            .and_then(Value::as_str)
+            .filter(|source| matches!(*source, "native_cumulative_usd" | "native_step_sum_usd"))
+            .map(str::to_owned);
         if cost_usd.is_some() != source.is_some() {
             bail!("harness cost source does not match frozen identity");
         }
@@ -3699,7 +2773,7 @@ fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     })?;
     Ok(json!({"schema_version":spec.schema_version,
         "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
-        "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
+        "outcome":if active { if attempt_dir(dir,spec).join("started.json").is_file() {"running"} else {"starting"} } else {"interrupted"},"acceptance":"not assessed",
         "completion_verified":false,
         "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}}))
 }
@@ -3737,7 +2811,7 @@ fn review_attempt(
                 ))
             })?;
             json!({"schema_version":spec.schema_version,"task_id":id,"attempt":spec.attempt,
-                "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
+                "outcome":if active { if attempt_dir(dir,spec).join("started.json").is_file() {"running"} else {"starting"} } else {"interrupted"},"acceptance":"not assessed",
                 "completion_verified":false,
                 "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}})
         }
@@ -3754,7 +2828,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
         let value = review_attempt(dir, &spec, |path| review::read_result(path, None))?;
-        if value["outcome"] != "running" {
+        if !matches!(value["outcome"].as_str(), Some("starting" | "running")) {
             let code = if value["outcome"] == "succeeded" {
                 0
             } else {
@@ -3976,13 +3050,8 @@ pub fn control(
                     "harness executable path changed; previous attempt preserved, resume refused"
                 );
             }
-            let version = crate::selection::probe_version(
-                real.to_str()
-                    .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
-            )
-            .ok_or_else(|| {
-                Error::new("cannot determine installed harness version before resume")
-            })?;
+            let runtime = crate::harness_runtime::load(repo, &record.identity.harness)?;
+            let version = crate::selection::probe_runtime(repo, &runtime)?;
             let loaded = crate::config::load(&record.worktree)?
                 .ok_or_else(|| Error::new("missing task configuration"))?;
             let pin = loaded
@@ -3993,7 +3062,7 @@ pub fn control(
             if spec.options.work_mode {
                 work_mode::check_version(&record.identity.harness, &version, pin)?;
             } else {
-                crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+                crate::catalog::check_version(&version, pin)?;
             }
             let current_digest = digest_bytes(&std::fs::read(&real)?);
             if pin.is_some() && current_digest != spec.executable_digest {
@@ -4007,9 +3076,6 @@ pub fn control(
                 &record.identity.harness,
                 &version,
                 &real,
-                spec.native_controls
-                    .iter()
-                    .any(|control| control == "opencode.native-account-state=project-trusted"),
                 spec.options.work_mode,
             )?;
             // Keep the finished attempt's provenance immutable. A floating
@@ -4019,6 +3085,7 @@ pub fn control(
             let previous_spec = spec.clone();
             let previous_record = record.clone();
             refresh_resume_profile(
+                repo,
                 &mut spec,
                 &record.identity.harness,
                 &record.identity.model,
@@ -4060,7 +3127,10 @@ pub fn control(
                     state: Some(spec.coordination_state()),
                 },
             )?;
-            let command = batch_command(
+            // Resume must use the same dispatch boundary as initial launch and
+            // frozen-command validation, including an installed harness planner.
+            let command = crate::harness::task_command(
+                repo,
                 &record.identity.harness,
                 &LaunchRequest {
                     model: &record.identity.model,
@@ -4068,8 +3138,13 @@ pub fn control(
                     cwd: &record.worktree,
                     permissions: record.identity.permissions,
                 },
-                &spec,
+                Some(&spec),
             )?;
+            if command.planner_binding_digest != record.launch_command.planner_binding_digest {
+                bail!(
+                    "harness planner identity changed; previous attempt preserved, resume refused"
+                );
+            }
             let approval_lease =
                 crate::approval::retire_for_resume(&dir, &record.task_id, previous_spec.attempt)?;
             let old_attempt = attempt_dir(&dir, &previous_spec);
@@ -4162,49 +3237,7 @@ pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
 
 #[cfg(test)]
 mod telemetry_usage_tests {
-    use super::Events;
     use crate::state;
-
-    #[test]
-    fn usage_normalization_keeps_common_cumulative_snapshot_fields() {
-        let mut events = Events::default();
-        events.observe(
-            "codex",
-            br#"{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":7,"cached_tokens":3,"total_tokens":19}}"#,
-        );
-        events.observe(
-            "codex",
-            br#"{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":9,"cached_tokens":5,"total_tokens":29}}"#,
-        );
-        assert_eq!(events.usage.input, Some(20));
-        assert_eq!(events.usage.output, Some(9));
-        assert_eq!(events.usage.cached, Some(5));
-        assert_eq!(events.usage.total, Some(29));
-        assert!(events.terminal);
-        let profile = crate::native::profile(&crate::native::Request {
-            harness: "codex",
-            harness_version: "0.157.1",
-            policy: crate::native::DISABLED,
-            session_model: "test-model",
-            helper_model: None,
-            helper_role: "unused",
-            max_concurrent: 1,
-            max_depth: 1,
-            budget_usd: None,
-            assignment_writes: true,
-        })
-        .unwrap();
-        assert!(events.native.completeness(&profile).complete);
-        assert_eq!(
-            super::native_metadata(
-                "codex",
-                &serde_json::json!({
-                    "type":"turn.completed", "message":"private", "usage":{"input_tokens":29}
-                })
-            ),
-            serde_json::json!({"type":"turn.completed"})
-        );
-    }
 
     #[test]
     fn private_attempt_reader_extracts_only_opted_in_numeric_projections() {
@@ -4248,7 +3281,7 @@ mod telemetry_usage_tests {
             "outcome":"succeeded",
             "identity":{"harness":"claude-code"},
             "process":{"exit_code":0},
-            "harness":{"terminal":true,"failed":false,"summary":"private-payload"},
+            "harness":{"terminal":true,"failed":false,"summary":"private-payload","cost":{"source":"native_cumulative_usd","usd":0.0125}},
             "metrics":{"schema_version":2,"elapsed_ms":{"kind":"observed","value":314},"values":{
                 "ahu.tokens.input":{"kind":"observed","value":0},
                 "ahu.tokens.output":{"kind":"unavailable"},
@@ -4312,7 +3345,7 @@ mod telemetry_usage_tests {
         assert_eq!(observations[0].cost.usd, Some(0.0125));
         assert_eq!(
             observations[0].cost.source.as_deref(),
-            Some("claude_code_result_total")
+            Some("native_cumulative_usd")
         );
         assert!(!format!("{:?}", observations[0].outcome).contains("private-payload"));
         assert!(observations[1].metrics_observed);
@@ -4328,55 +3361,6 @@ mod telemetry_usage_tests {
 
         std::fs::write(dir.join("headless.json"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
         assert!(super::private_attempt_metrics(&dir, "claude-code", 3).is_err());
-    }
-
-    #[test]
-    fn reported_cost_is_normalized_without_claiming_billing() {
-        let mut claude = Events::default();
-        claude.observe(
-            "claude-code",
-            br#"{"type":"result","subtype":"success","total_cost_usd":0.0125,"usage":{"input_tokens":10}}"#,
-        );
-        assert_eq!(claude.cost.usd, Some(0.0125));
-        assert_eq!(
-            claude.cost.source.as_deref(),
-            Some("claude_code_result_total")
-        );
-
-        let mut opencode = Events::default();
-        let step =
-            br#"{"type":"step_finish","part":{"id":"step-1","cost":0.003,"reason":"tool-calls"}}"#;
-        opencode.observe("opencode", step);
-        opencode.observe("opencode", step);
-        opencode.observe(
-            "opencode",
-            br#"{"type":"step_finish","part":{"id":"step-2","cost":0.002,"reason":"stop"}}"#,
-        );
-        assert_eq!(opencode.cost.usd, Some(0.005));
-        assert_eq!(
-            opencode.cost.source.as_deref(),
-            Some("opencode_step_finish_sum")
-        );
-
-        let mut unsupported = Events::default();
-        unsupported.observe(
-            "codex",
-            br#"{"type":"turn.completed","usage":{"input_tokens":10},"total_cost_usd":99}"#,
-        );
-        assert_eq!(unsupported.cost.usd, None);
-        unsupported.observe(
-            "antigravity",
-            br#"{"type":"result","status":"success","response":"ok","total_cost_usd":99}"#,
-        );
-        assert_eq!(unsupported.cost.usd, None);
-
-        let mut invalid = Events::default();
-        invalid.observe("claude-code", br#"{"type":"result","total_cost_usd":-1}"#);
-        assert_eq!(invalid.cost.usd, None);
-
-        let encoded = serde_json::to_value(&opencode.cost).unwrap();
-        assert_eq!(encoded["usd"], 0.005);
-        assert_eq!(encoded["source"], "opencode_step_finish_sum");
     }
 }
 
@@ -4462,7 +3446,6 @@ mod child_grant_tests {
 #[cfg(test)]
 mod write_tracking_tests {
     use super::*;
-
     #[test]
     fn sanitation_preserves_provider_controls_and_removes_only_ahu_launch_digest() {
         const CASE: &str = "headless::write_tracking_tests::sanitation_preserves_provider_controls_and_removes_only_ahu_launch_digest";
@@ -4500,7 +3483,6 @@ mod write_tracking_tests {
         }
         assert_eq!(env[std::ffi::OsStr::new("AHU_EXPECTED_DIGEST")], None);
     }
-
     #[test]
     fn structured_result_write_exemption_is_exact_and_not_serialized() {
         let temp = tempfile::tempdir().unwrap();
@@ -4512,9 +3494,7 @@ mod write_tracking_tests {
             structured_result_target: Some(target.clone()),
             ..Default::default()
         };
-        let event = |path: &Path| {
-            serde_json::to_vec(&json!({"tool":"Write","input":{"path":path}})).unwrap()
-        };
+        let event = |path: &Path| vec![path.to_string_lossy().into_owned()];
         observe_writes(&mut events, &event(&target), &worktree);
         assert!(events.writes_outside_worktree.is_empty());
         assert!(
@@ -4532,68 +3512,6 @@ mod write_tracking_tests {
         observe_writes(&mut events, &event(&target), &worktree);
         assert_eq!(events.writes_outside_worktree.len(), 2);
     }
-
-    #[test]
-    fn write_path_discovery_handles_normalized_keys_nested_tools_and_embedded_json() {
-        let event = serde_json::json!({
-            "outer": [{
-                "tool_name": "WriteFile",
-                "arguments": r#"{"file_path":"/tmp/project/../outside/new.txt"}"#
-            }],
-            "tool": "Read",
-            "path": "/tmp/not-a-write.txt"
-        });
-        let paths = collect_write_paths(&event);
-        assert!(
-            paths
-                .iter()
-                .any(|path| path == "/tmp/project/../outside/new.txt")
-        );
-        assert!(!paths.iter().any(|path| path == "/tmp/not-a-write.txt"));
-        assert_eq!(
-            resolve_write_path("/tmp/project/../outside/new.txt").unwrap(),
-            PathBuf::from("/tmp/project/../outside/new.txt")
-        );
-        assert!(resolve_write_path("").is_none());
-        assert!(resolve_write_path("relative/file.txt").is_none());
-    }
-
-    #[test]
-    fn final_stream_drain_cannot_accept_a_reported_outside_write() {
-        let worktree = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let stream = format!(
-            "{}\n{}\n",
-            json!({"tool":"Write", "input":{"path":outside.path().join("new.txt")}}),
-            json!({"type":"turn.completed"})
-        );
-        capture(
-            std::io::Cursor::new(stream.into_bytes()),
-            worktree.path().join("unused.json"),
-            worktree.path().to_path_buf(),
-            Some(SessionOwner {
-                task_id: "synthetic".into(),
-                attempt: 1,
-                harness: "codex".into(),
-            }),
-            shared.clone(),
-            tx,
-        );
-        // The process-exit poll has already completed with no stop reason.
-        let mut stop = None;
-        rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
-        let mut events = shared.lock().unwrap();
-        assert!(events.terminal);
-        assert!(boundary_after_drain(&mut events, &mut stop));
-        assert_eq!(stop.unwrap().0, "boundary_violation");
-        assert!(!boundary_after_drain(&mut events, &mut stop));
-        let mut cancelled = Some(("cancelled", Instant::now()));
-        assert!(!boundary_after_drain(&mut events, &mut cancelled));
-        assert_eq!(cancelled.unwrap().0, "cancelled");
-    }
-
     #[test]
     fn dangling_write_symlinks_are_classified_and_cycles_fail_closed() {
         let worktree = tempfile::tempdir().unwrap();
@@ -4601,7 +3519,7 @@ mod write_tracking_tests {
         let target = outside.path().join("not-created.txt");
         let link = worktree.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let event = serde_json::to_vec(&json!({"tool":"Write", "input":{"path":link}})).unwrap();
+        let event = vec![link.to_string_lossy().into_owned()];
         let mut events = Events::default();
         observe_writes(&mut events, &event, worktree.path());
         assert_eq!(
@@ -4628,7 +3546,6 @@ mod write_tracking_tests {
                 .any(|blocker| blocker.contains("symlink traversal bound"))
         );
     }
-
     #[test]
     fn missing_write_targets_resolve_symlinks_before_parent_components() {
         let worktree = tempfile::tempdir().unwrap();
@@ -4637,13 +3554,9 @@ mod write_tracking_tests {
         std::os::unix::fs::symlink(outside.path().join("child"), worktree.path().join("link"))
             .unwrap();
         let target = worktree.path().join("link/../new/file.txt");
-        let event = json!({"tool":"Write", "input":{"path":target}});
+        let event = vec![target.to_string_lossy().into_owned()];
         let mut events = Events::default();
-        observe_writes(
-            &mut events,
-            &serde_json::to_vec(&event).unwrap(),
-            worktree.path(),
-        );
+        observe_writes(&mut events, &event, worktree.path());
         assert_eq!(
             events.writes_outside_worktree,
             vec![
@@ -4661,742 +3574,47 @@ mod write_tracking_tests {
         std::fs::create_dir(worktree.path().join("child")).unwrap();
         std::os::unix::fs::symlink(worktree.path().join("child"), outside.path().join("link"))
             .unwrap();
-        let event =
-            json!({"tool":"Write", "input":{"path":outside.path().join("link/../new.txt")}});
+        let event = vec![
+            outside
+                .path()
+                .join("link/../new.txt")
+                .to_string_lossy()
+                .into_owned(),
+        ];
         let mut events = Events::default();
-        observe_writes(
-            &mut events,
-            &serde_json::to_vec(&event).unwrap(),
-            worktree.path(),
-        );
+        observe_writes(&mut events, &event, worktree.path());
         assert!(events.writes_outside_worktree.is_empty());
     }
-
     #[test]
     fn observed_write_events_record_only_unique_paths_outside_the_worktree() {
         let worktree = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let inside_path = worktree.path().join("edited.txt");
         let outside_path = outside.path().join("edited.txt");
-        let event = serde_json::json!({
-            "tool": "Write",
-            "input": {"filePath": inside_path, "targetFile": outside_path}
-        });
-        let encoded = serde_json::to_vec(&event).unwrap();
+        let encoded = vec![
+            inside_path.to_string_lossy().into_owned(),
+            outside_path.to_string_lossy().into_owned(),
+        ];
         let mut events = Events::default();
         observe_writes(&mut events, &encoded, worktree.path());
         observe_writes(&mut events, &encoded, worktree.path());
         assert_eq!(events.writes_outside_worktree.len(), 1);
         assert!(events.writes_outside_worktree[0].ends_with("edited.txt"));
 
-        observe_writes(&mut events, b"not json", worktree.path());
+        observe_writes(&mut events, &[], worktree.path());
         assert_eq!(events.writes_outside_worktree.len(), 1);
     }
-
     #[test]
-    fn native_metadata_is_projected_to_only_supported_helper_fields() {
-        let progress = native_metadata(
-            "claude-code",
-            &serde_json::json!({
-                "type":"system", "subtype":"task_progress", "task_id":"child",
-                "usage":{"total_tokens":12}, "secret":"ignore"
-            }),
-        );
-        assert_eq!(progress["task_id"], "child");
-        assert_eq!(progress["usage"]["total_tokens"], 12);
-        assert!(progress.get("secret").is_none());
-
-        let result = native_metadata(
-            "claude-code",
-            &serde_json::json!({
-                "type":"result", "subagent_stats":{
-                    "spawned":2, "completed":1, "max_depth":3,
-                    "refused":{"budget":4, "secret":9},
-                    "by_type":{"worker":1, "invalid":"x"}
-                }, "huge_payload":"ignored"
-            }),
-        );
-        assert_eq!(result["subagent_stats"]["spawned"], 2);
-        assert_eq!(result["subagent_stats"]["refused"]["budget"], 4);
-        assert!(result["subagent_stats"]["refused"].get("secret").is_none());
-        assert!(result.get("huge_payload").is_none());
-
-        assert_eq!(
-            native_metadata("codex", &serde_json::json!({"type":"item.started"})),
-            serde_json::json!({})
-        );
-        assert_eq!(
-            native_metadata("codex", &serde_json::json!({"type":"collab.started"})),
-            serde_json::json!({"type":"collab"})
-        );
-    }
-
-    #[test]
-    fn native_metadata_bounds_and_session_validation_fail_closed() {
-        assert!(bounded_native_metadata(
-            &serde_json::json!({"a": [1, true, null]})
-        ));
-        assert!(!bounded_native_metadata(&serde_json::json!(
-            "x".repeat(4097)
-        )));
-        assert!(!bounded_native_metadata(&serde_json::json!(vec![0; 257])));
-        assert!(!bounded_native_metadata(&serde_json::json!(u64::MAX)));
-        assert!(valid_session("session-1"));
-        assert!(!valid_session(" \n"));
-        assert!(!valid_session("bad\nlocator"));
-        assert!(!valid_session(&"x".repeat(4097)));
-    }
-
-    #[test]
-    fn stream_capture_checkpoints_sessions_and_classifies_incomplete_streams() {
-        let dir = tempfile::tempdir().unwrap();
-        let init = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        assert!(init.success());
-        let repo = crate::git::discover(dir.path()).unwrap();
-        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
-        let checkpoint = store.directory.join("task-1/attempt-2/session.json");
-        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        capture(
-            std::io::Cursor::new(
-                b"{\"type\":\"step_start\",\"sessionID\":\"opencode-session\"}\n".to_vec(),
-            ),
-            checkpoint.clone(),
-            dir.path().to_path_buf(),
-            Some(SessionOwner {
-                task_id: "task-1".into(),
-                attempt: 2,
-                harness: "opencode".into(),
-            }),
-            shared.clone(),
-            tx,
-        );
-        rx.recv().unwrap().unwrap();
-        assert_eq!(
-            shared.lock().unwrap().session.as_deref(),
-            Some("opencode-session")
-        );
-        let saved: SessionCheckpoint =
-            serde_json::from_slice(&std::fs::read(checkpoint).unwrap()).unwrap();
-        assert_eq!(saved.task_id, "task-1");
-        assert_eq!(saved.attempt, 2);
-
-        let incomplete = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        capture(
-            std::io::Cursor::new(b"{\"type\":\"turn.started\"}".to_vec()),
-            dir.path().join("unused.json"),
-            dir.path().to_path_buf(),
-            Some(SessionOwner {
-                task_id: "task-1".into(),
-                attempt: 2,
-                harness: "codex".into(),
-            }),
-            incomplete.clone(),
-            tx,
-        );
-        rx.recv().unwrap().unwrap();
-        assert!(incomplete.lock().unwrap().failed);
-        assert!(
-            incomplete
-                .lock()
-                .unwrap()
-                .trajectory
-                .observation
-                .stream_incomplete
-        );
-        assert!(
-            incomplete
-                .lock()
-                .unwrap()
-                .blockers
-                .contains(&"unterminated event stream".into())
-        );
-    }
-
-    const RECORDED_SESSION: &str = "ses_f5cc153b6ffeNq1dwHoZGMECKw";
-    const RECORDED_START: u64 = 1_760_000_000_000;
-
-    fn reasoning_event() -> Vec<u8> {
-        serde_json::to_vec(&json!({
-            "type": "reasoning", "timestamp": 3, "sessionID": RECORDED_SESSION,
-            "part": {"type": "reasoning", "text": "synthetic reasoning payload"}
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn opencode_reasoning_is_nonterminal_metadata_without_retaining_text() {
-        for terminal in [false, true] {
-            let mut events = Events {
-                terminal,
-                summary: "existing answer".into(),
-                unknown_events: 2,
-                ..Default::default()
-            };
-            events.observe("opencode", &reasoning_event());
-            assert_eq!(events.unknown_events, 2);
-            assert!(!events.terminal);
-            assert!(!events.failed);
-            assert!(events.blockers.is_empty());
-            assert_eq!(events.terminal_evidence, None);
-            assert_eq!(events.summary, "existing answer");
-            assert!(!format!("{events:?}").contains("synthetic reasoning payload"));
-            assert!(
-                !serde_json::to_string(&events)
-                    .unwrap()
-                    .contains("synthetic reasoning payload")
-            );
-        }
-        for kind in ["reasoning_delta", "reasoning.completed", "unknown"] {
-            let mut events = Events::default();
-            events.observe(
-                "opencode",
-                &serde_json::to_vec(&json!({"type": kind})).unwrap(),
-            );
-            assert_eq!(events.unknown_events, 1, "{kind}");
-            assert!(!events.terminal, "{kind}");
-        }
-    }
-
-    /// A stand-in `opencode` whose `session export` prints `body` after
-    /// `preamble` shell. It records its own argv so a test can prove the exact
-    /// read ahu asked for, and prove it never ran at all when the attempt was
-    /// not eligible.
-    fn fake_opencode(root: &Path, preamble: &str, body: &str) -> PathBuf {
-        let path = root.join("opencode");
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {argv}\nprintf '%s|%s|%s\\n' \"${{OTEL_SDK_DISABLED-unset}}\" \"${{AHU_EVAL_OTEL_ENDPOINT-unset}}\" \"${{OTEL_EXPORTER_OTLP_ENDPOINT-unset}}\" >> {environment}\n{preamble}\ncat <<'EXPORT_BODY'\n{body}\nEXPORT_BODY\n",
-                argv = root.join("argv").display(),
-                environment = root.join("environment").display(),
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
-        path
-    }
-
-    fn recorded_export(messages: Value) -> String {
-        json!({
-            "info": {
-                "id": RECORDED_SESSION,
-                "projectID": "prj_synthetic",
-                "outcome": "succeeded",
-                "cost": 0,
-                "tokens": {"input": 12, "output": 4, "reasoning": 0,
-                           "cache": {"read": 0, "write": 0}},
-                "time": {"created": RECORDED_START + 10, "updated": RECORDED_START + 900,
-                         "idle": RECORDED_START + 900},
-                "title": format!("[redacted:session-title:{RECORDED_SESSION}]"),
-                "location": {"directory": format!("/[redacted:session-directory:{RECORDED_SESSION}]")},
-            },
-            "messages": messages,
-        })
-        .to_string()
-    }
-
-    fn completed_export() -> String {
-        recorded_export(json!([
-            {"id":"msg_prompt","type":"user","text":"[redacted:text:msg_prompt]",
-             "time":{"created":RECORDED_START + 11}},
-            {"id":"msg_turn","type":"assistant","agent":"build",
-             "model":{"providerID":"ollama","modelID":"glm-5.3:cloud"},
-             "content":[{"type":"text","id":"prt_text","text":"[redacted:text:msg_turn]"}],
-             "finish":"stop",
-             "time":{"created":RECORDED_START + 12,"completed":RECORDED_START + 800}},
-            {"id":"msg_idle","type":"idle","outcome":"succeeded",
-             "time":{"created":RECORDED_START + 900}},
-        ]))
-    }
-
-    /// Tool-only stdout, exactly the gap this fallback covers: OpenCode 2
-    /// reported completed work and exited 0 without a final stop step.
-    fn tool_only_events() -> Events {
-        let mut events = Events::default();
-        for line in [
-            format!(
-                r#"{{"type":"step_start","timestamp":1,"sessionID":"{RECORDED_SESSION}","part":{{"type":"step-start"}}}}"#
-            ),
-            format!(
-                r#"{{"type":"tool_use","timestamp":2,"sessionID":"{RECORDED_SESSION}","part":{{"type":"tool","tool":"read","state":{{"status":"completed"}}}}}}"#
-            ),
-        ] {
-            events.observe("opencode", line.as_bytes());
-        }
-        assert!(!events.terminal && !events.failed);
-        events
-    }
-
-    fn attempt<'a>(
-        executable: &'a Path,
-        worktree: &'a Path,
-        timeout: Duration,
-    ) -> RecordedCompletion<'a> {
-        RecordedCompletion {
-            harness: "opencode",
-            harness_version: "2.0.32",
-            executable,
-            expected_executable_digest: None,
-            worktree,
-            fresh_session: true,
-            exited_zero: true,
-            attempt_started_ms: RECORDED_START,
-            timeout,
-        }
-    }
-
-    /// The recorded session can supply the stop the JSON stream omitted, and
-    /// only through the bounded read ahu asked for.
-    #[test]
-    fn an_opencode_recorded_session_can_supply_an_omitted_stop_step() {
-        let root = tempfile::tempdir().unwrap();
-        let executable = fake_opencode(root.path(), "", &completed_export());
-        let mut events = tool_only_events();
-        recover_opencode_terminal_result(
-            &mut events,
-            &attempt(&executable, root.path(), Duration::from_secs(20)),
-        );
-        assert!(events.terminal, "{:?}", events.blockers);
-        assert!(!events.failed, "{:?}", events.blockers);
-        assert_eq!(
-            events.terminal_evidence.as_deref(),
-            Some("opencode recorded session export"),
-            "a recovered result is labelled as one"
-        );
-        let argv = std::fs::read_to_string(root.path().join("argv")).unwrap();
-        assert_eq!(
-            argv.trim(),
-            format!("session export --sanitize --standalone {RECORDED_SESSION}"),
-            "the read is sanitized, standalone and scoped to this attempt's session"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("environment"))
-                .unwrap()
-                .trim(),
-            "true|unset|unset",
-            "the read neither inherits an Ahu collector endpoint nor exports its own telemetry"
-        );
-        // The recovered evidence is a boolean: no transcript reaches the record.
-        let encoded = serde_json::to_string(&events).unwrap();
-        assert!(!encoded.contains("redacted"), "{encoded}");
-        assert!(!encoded.contains("msg_turn"), "{encoded}");
-    }
-
-    #[test]
-    fn an_opencode_recorded_session_retries_an_unready_export_until_it_is_valid() {
-        let root = tempfile::tempdir().unwrap();
-        let marker = root.path().join("export-not-ready");
-        let preamble = format!(
-            "if [ ! -f '{}' ]; then touch '{}'; printf 'pending\\n'; exit 0; fi",
-            marker.display(),
-            marker.display()
-        );
-        let executable = fake_opencode(root.path(), &preamble, &completed_export());
-        let mut events = tool_only_events();
-
-        recover_opencode_terminal_result(
-            &mut events,
-            &attempt(&executable, root.path(), Duration::from_secs(2)),
-        );
-
-        assert!(events.terminal, "{:?}", events.blockers);
-        assert!(!events.failed, "{:?}", events.blockers);
-        assert_eq!(
-            events.terminal_evidence.as_deref(),
-            Some("opencode recorded session export")
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("argv"))
-                .unwrap()
-                .lines()
-                .count(),
-            2,
-            "the export is retried only after an unparseable snapshot"
-        );
-        let encoded = serde_json::to_string(&events).unwrap();
-        assert!(!encoded.contains("pending"));
-        assert!(!encoded.contains("redacted"));
-    }
-
-    #[test]
-    fn an_opencode_recorded_session_can_recover_after_reasoning() {
-        let root = tempfile::tempdir().unwrap();
-        let executable = fake_opencode(root.path(), "", &completed_export());
-        let mut events = tool_only_events();
-        events.observe("opencode", &reasoning_event());
-        assert!(!events.terminal);
-        recover_opencode_terminal_result(
-            &mut events,
-            &attempt(&executable, root.path(), Duration::from_secs(20)),
-        );
-        assert!(events.terminal, "{:?}", events.blockers);
-        assert!(!events.failed, "{:?}", events.blockers);
-        assert_eq!(events.unknown_events, 0);
-        assert_eq!(
-            events.terminal_evidence.as_deref(),
-            Some("opencode recorded session export")
-        );
-    }
-
-    /// Every way the read itself can fail leaves the attempt without a result.
-    #[test]
-    fn a_failed_oversized_or_slow_recorded_session_read_is_not_completion() {
-        let unreadable: [(&str, &str, &str); 5] = [
-            ("a nonzero export exit", "exit 1", &completed_export()),
-            ("malformed output", "", "{\"info\": "),
-            (
-                "output past the capture bound",
-                "head -c 1100000 /dev/zero | tr '\\0' 'a'",
-                "{}",
-            ),
-            (
-                "an export of a different session",
-                "",
-                &completed_export().replace(RECORDED_SESSION, "ses_someoneElsesSession0001"),
-            ),
-            (
-                "an export with no final idle message",
-                "",
-                &recorded_export(json!([
-                    {"id":"msg_prompt","type":"user","text":"[redacted:text:msg_prompt]",
-                     "time":{"created":RECORDED_START + 11}},
-                    {"id":"msg_turn","type":"assistant","agent":"build",
-                     "model":{"providerID":"ollama","modelID":"glm-5.3:cloud"},
-                     "content":[], "finish":"stop",
-                     "time":{"created":RECORDED_START + 12,"completed":RECORDED_START + 800}},
-                ])),
-            ),
-        ];
-        for (case, preamble, body) in unreadable {
-            let root = tempfile::tempdir().unwrap();
-            let executable = fake_opencode(root.path(), preamble, body);
-            let mut events = tool_only_events();
-            let timeout = if matches!(
-                case,
-                "a nonzero export exit" | "malformed output" | "output past the capture bound"
-            ) {
-                Duration::from_millis(150)
-            } else {
-                Duration::from_secs(20)
-            };
-            recover_opencode_terminal_result(
-                &mut events,
-                &attempt(&executable, root.path(), timeout),
-            );
-            events.require_terminal_result("opencode");
-            assert!(!events.terminal, "{case}");
-            assert!(events.failed, "{case}");
-            assert_eq!(events.terminal_evidence, None, "{case}");
-            assert!(
-                events
-                    .blockers
-                    .iter()
-                    .any(|blocker| {
-                        blocker.starts_with("OpenCode recorded session:")
-                            || blocker
-                                == "the OpenCode session export did not become valid before its bounded retry deadline"
-                    }),
-                "{case}: {:?}",
-                events.blockers
-            );
-        }
-
-        // A read that outlives its bound is a failed read, and the deadline is
-        // the caller's, not the stand-in harness's.
-        let root = tempfile::tempdir().unwrap();
-        let executable = fake_opencode(root.path(), "sleep 30", &completed_export());
-        let mut events = tool_only_events();
-        let started = Instant::now();
-        recover_opencode_terminal_result(
-            &mut events,
-            &attempt(&executable, root.path(), Duration::from_millis(750)),
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the read is bounded in time"
-        );
-        assert!(!events.terminal);
-        assert_eq!(events.terminal_evidence, None);
-    }
-
-    /// The recorded session is never consulted for an attempt that already
-    /// reported something, and can never overturn it.
-    #[test]
-    fn an_observed_failure_or_ineligible_attempt_is_never_rescued_by_an_export() {
-        let denial = format!(
-            r#"{{"type":"tool_use","timestamp":3,"sessionID":"{RECORDED_SESSION}","part":{{"type":"tool","tool":"write","state":{{"status":"error","error":"The user rejected permission to use this specific tool call."}}}}}}"#
-        );
-        /// A case: what the attempt already observed, and how it was
-        /// ineligible for a recorded-session read.
-        type Ineligible = (&'static str, Events, fn(&mut RecordedCompletion<'_>));
-        let cases: Vec<Ineligible> = vec![
-            (
-                "a permission denial on the event stream",
-                {
-                    let mut events = Events::default();
-                    events.observe("opencode", denial.as_bytes());
-                    events
-                },
-                |_| (),
-            ),
-            (
-                "a blocker recorded before the terminal check",
-                {
-                    let mut events = tool_only_events();
-                    events
-                        .blockers
-                        .push("stderr contained unclassified diagnostics".into());
-                    events
-                },
-                |_| (),
-            ),
-            ("a nonzero harness exit", tool_only_events(), |attempt| {
-                attempt.exited_zero = false
-            }),
-            (
-                "a resumed session, whose history is not this attempt's",
-                tool_only_events(),
-                |attempt| attempt.fresh_session = false,
-            ),
-            (
-                "an OpenCode 1.x CLI, which has no such projection",
-                tool_only_events(),
-                |attempt| attempt.harness_version = "1.18.30",
-            ),
-            ("another harness entirely", tool_only_events(), |attempt| {
-                attempt.harness = "codex"
-            }),
-            (
-                "an unknown event on the stream",
-                {
-                    let mut events = tool_only_events();
-                    events.observe("opencode", &reasoning_event());
-                    events.observe("opencode", br#"{"type":"unknown"}"#);
-                    assert_eq!(events.unknown_events, 1);
-                    events
-                },
-                |_| (),
-            ),
-            (
-                "a replaced OpenCode executable",
-                tool_only_events(),
-                |attempt| attempt.expected_executable_digest = Some("changed"),
-            ),
-        ];
-        for (case, mut events, adjust) in cases {
-            let root = tempfile::tempdir().unwrap();
-            // A stand-in that would report success if it were ever asked.
-            let executable = fake_opencode(root.path(), "", &completed_export());
-            let mut recorded = attempt(&executable, root.path(), Duration::from_secs(20));
-            adjust(&mut recorded);
-            recover_opencode_terminal_result(&mut events, &recorded);
-            assert!(!events.terminal, "{case}");
-            assert_eq!(events.terminal_evidence, None, "{case}");
-            assert!(
-                !root.path().join("argv").exists(),
-                "{case}: the export was not even invoked"
-            );
-        }
-    }
-
-    #[test]
-    fn opencode_zero_exit_requires_a_terminal_part_in_drained_stdout() {
-        // Synthetic stdout fixtures, checked against the JSON event filter in
-        // the installed OpenCode 2.0.32 bundle. Its post-wait message catch-up
-        // can emit a completed tool without forwarding the assistant's finish
-        // reason or successful idle outcome. Native session success therefore
-        // cannot substitute for a stdout stop part.
-        // This models the contract; it does not replay a live provider run.
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        let repo = crate::git::discover(dir.path()).unwrap();
-        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
-        let tool = json!({
-            "type":"tool_use", "timestamp":3, "sessionID":"ses_synthetic",
-            "part":{
-                "sessionID":"ses_synthetic", "messageID":"msg_synthetic",
-                "partID":"prt_synthetic_tool-call_synthetic", "type":"tool",
-                "id":"call_synthetic", "tool":"ahu_ahu_tasks",
-                "state":{
-                    "status":"completed", "input":{}, "output":"synthetic result",
-                    "title":"ahu_ahu_tasks",
-                    "metadata":{"metadata":{}, "content":[{"type":"text", "text":"synthetic result"}]},
-                    "time":{"start":1, "end":2}
-                }
-            }
-        });
-        let finish = |reason| {
-            json!({
-                "type":"step_finish", "timestamp":2, "sessionID":"ses_synthetic",
-                "part":{
-                    "sessionID":"ses_synthetic", "messageID":"msg_synthetic",
-                    "id":"part_finish", "type":"step-finish", "reason":reason
-                }
-            })
+    fn final_boundary_observation_blocks_acceptance() {
+        let mut events = Events {
+            terminal: true,
+            writes_outside_worktree: vec!["/synthetic/outside".into()],
+            ..Default::default()
         };
-        let stop = finish("stop");
-        let tool_calls = finish("tool-calls");
-        let mut large_tool = tool.clone();
-        // Cross multiple pipe-reader chunks without approaching the line bound.
-        large_tool["part"]["state"]["output"] = json!("x".repeat(32768));
-        let many_tools = (0..32)
-            .map(|i| {
-                let mut part = tool.clone();
-                part["part"]["id"] = json!(format!("call_synthetic_{i}"));
-                part
-            })
-            .collect();
-        for (name, parts, terminal, failed) in [
-            ("tool_only", vec![tool.clone()], false, false),
-            ("many_completed_tools", many_tools, false, false),
-            (
-                "tool_call_boundary",
-                vec![tool.clone(), tool_calls.clone()],
-                false,
-                false,
-            ),
-            (
-                "explicit_stop",
-                vec![tool.clone(), tool_calls.clone(), stop.clone()],
-                true,
-                false,
-            ),
-            (
-                "large_tool_then_stop",
-                vec![large_tool, stop.clone()],
-                true,
-                false,
-            ),
-            (
-                "tool_after_stop",
-                vec![stop.clone(), tool.clone()],
-                false,
-                false,
-            ),
-            (
-                "tool_call_boundary_after_stop",
-                vec![stop, tool_calls],
-                false,
-                false,
-            ),
-            ("length_limit", vec![tool, finish("length")], true, true),
-        ] {
-            let stream = parts
-                .iter()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            // Arguments carry the fixture literally; no event payload is shell code.
-            let mut child = std::process::Command::new("/bin/sh")
-                .args(["-c", "printf '%s\\n' \"$1\"", "synthetic-opencode", &stream])
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
-            let (tx, rx) = std::sync::mpsc::channel();
-            capture(
-                child.stdout.take().unwrap(),
-                store.directory.join(format!("{name}/session.json")),
-                dir.path().to_path_buf(),
-                Some(SessionOwner {
-                    task_id: name.into(),
-                    attempt: 1,
-                    harness: "opencode".into(),
-                }),
-                shared.clone(),
-                tx,
-            );
-            assert_eq!(child.wait().unwrap().code(), Some(0), "{name}");
-            rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
-            let mut events = shared.lock().unwrap();
-            assert_eq!(events.terminal, terminal, "{name}: {events:?}");
-            assert_eq!(events.failed, failed, "{name}: {events:?}");
-            assert_eq!(events.session.as_deref(), Some("ses_synthetic"), "{name}");
-            assert_eq!(events.unknown_events, 0, "{name}");
-            assert_eq!(
-                events.trajectory.observation.completed_tool_calls,
-                Some(
-                    parts
-                        .iter()
-                        .filter(|part| part["type"] == "tool_use")
-                        .count() as u64
-                ),
-                "{name}"
-            );
-            // Apply the same post-drain requirement as the supervisor, after
-            // observing a real zero exit from the synthetic stream producer.
-            events.require_terminal_result("opencode");
-            assert_eq!(events.failed, failed || !terminal, "{name}: {events:?}");
-            assert_eq!(
-                events
-                    .blockers
-                    .contains(&"no terminal harness result".into()),
-                !terminal,
-                "{name}"
-            );
-            assert_eq!(
-                events.blockers.iter().any(|blocker| {
-                    blocker.starts_with("OpenCode stdout has no final stop step;")
-                        && blocker.contains("Review task changes")
-                }),
-                !terminal,
-                "{name}: {:?}",
-                events.blockers
-            );
-        }
-    }
-
-    #[test]
-    fn stderr_capture_keeps_only_categories_or_a_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        capture(
-            std::io::Cursor::new(b"permission denied\nordinary diagnostic\n\n".to_vec()),
-            dir.path().join("unused.json"),
-            dir.path().to_path_buf(),
-            None,
-            events.clone(),
-            tx,
-        );
-        rx.recv().unwrap().unwrap();
-        let events = events.lock().unwrap();
-        assert!(events.failed);
-        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
-        assert_eq!(events.stderr_unclassified_lines, 1);
-    }
-
-    #[test]
-    fn stdin_progress_is_informational_but_nearby_diagnostics_are_not_suppressed() {
-        let mut events = Events::default();
-        events.observe_stderr(b"Reading prompt from stdin...");
-        events.observe_stderr(b"Reading additional input from stdin...\n");
-        assert_eq!(events.stderr_informational_lines, 2);
-        assert_eq!(events.stderr_unclassified_lines, 0);
-        assert!(!events.failed);
-        events.observe_stderr(b"Reading prompt from stdin... warning");
-        events.observe_stderr(
-            b"Could not create otel exporter: failed to build OTLP metrics exporter",
-        );
-        assert_eq!(events.stderr_unclassified_lines, 2);
-        events.observe_stderr(b"Reading prompt from stdin... permission denied");
-        assert!(events.failed);
-        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
+        let mut stop = None;
+        assert!(boundary_after_drain(&mut events, &mut stop));
+        assert_eq!(stop.unwrap().0, "boundary_violation");
+        assert!(!boundary_after_drain(&mut events, &mut stop));
     }
 }
 
@@ -5474,15 +3692,19 @@ mod profile_and_metadata_tests {
         for path in [
             ".agents/skills/zeta",
             ".agents/skills/alpha",
-            ".claude/skills/native",
+            ".fixture/skills/native",
         ] {
             std::fs::create_dir_all(root.path().join(path)).unwrap();
         }
         std::fs::create_dir_all(root.path().join(".agents/skills/.hidden")).unwrap();
         std::fs::write(root.path().join(".agents/skills/zeta/SKILL.md"), "zeta").unwrap();
         std::fs::write(root.path().join(".agents/skills/alpha/SKILL.md"), "alpha").unwrap();
-        std::fs::write(root.path().join(".claude/skills/native/SKILL.md"), "native").unwrap();
-        let catalog = skill_catalog(root.path());
+        std::fs::write(
+            root.path().join(".fixture/skills/native/SKILL.md"),
+            "native",
+        )
+        .unwrap();
+        let catalog = skill_catalog(root.path(), &[".fixture/skills".into()]).unwrap();
         assert_eq!(catalog.len(), 3);
         assert!(
             catalog
@@ -5498,6 +3720,23 @@ mod profile_and_metadata_tests {
                 .digest,
             digest_bytes(b"zeta")
         );
+    }
+
+    #[test]
+    fn descriptor_skill_roots_are_relative_bounded_and_do_not_follow_links() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(external.path().join("skill")).unwrap();
+        std::fs::write(external.path().join("skill/SKILL.md"), "external").unwrap();
+        std::os::unix::fs::symlink(external.path(), root.path().join("linked")).unwrap();
+        assert!(
+            skill_catalog(root.path(), &["linked".into()])
+                .unwrap()
+                .is_empty()
+        );
+        for path in ["../outside", "/absolute", ".git/skills", ""] {
+            assert!(skill_catalog(root.path(), &[path.into()]).is_err());
+        }
     }
 
     #[test]
@@ -5610,6 +3849,28 @@ mod profile_and_metadata_tests {
     }
 
     #[test]
+    fn supervisor_receipt_binds_process_attempt_and_frozen_inputs_without_claiming_agent_start() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let attempt = store(&repo).unwrap().join("receipt-fixture");
+        confined_in(&repo, &attempt, true).unwrap();
+        assert!(!supervisor_ready(&attempt, 42, 1, "digest").unwrap());
+        durable_json(
+            &attempt.join("supervisor-ready.json"),
+            &SupervisorReady {
+                pid: 42,
+                attempt: 1,
+                frozen_digest: "digest".into(),
+            },
+        )
+        .unwrap();
+        assert!(supervisor_ready(&attempt, 42, 1, "digest").unwrap());
+        assert!(!attempt.join("started.json").exists());
+        for (pid, number, digest) in [(43, 1, "digest"), (42, 2, "digest"), (42, 1, "changed")] {
+            assert!(supervisor_ready(&attempt, pid, number, digest).is_err());
+        }
+    }
+
+    #[test]
     fn missing_result_reports_supervisor_liveness_without_claiming_completion() {
         let root = tempfile::tempdir().unwrap();
         let task_dir = root.path().join("task-1");
@@ -5617,7 +3878,13 @@ mod profile_and_metadata_tests {
         std::fs::create_dir_all(&task_dir).unwrap();
         let owner = Lock::acquire(&task_dir.join("owner.lock")).unwrap();
         let running = result_attempt(&task_dir, &spec).unwrap();
-        assert_eq!(running["outcome"], "running");
+        assert_eq!(running["outcome"], "starting");
+        std::fs::create_dir_all(attempt_dir(&task_dir, &spec)).unwrap();
+        std::fs::write(attempt_dir(&task_dir, &spec).join("started.json"), "{}").unwrap();
+        assert_eq!(
+            result_attempt(&task_dir, &spec).unwrap()["outcome"],
+            "running"
+        );
         assert_eq!(running["acceptance"], "not assessed");
         assert_eq!(running["completion_verified"], false);
         drop(owner);
@@ -5800,307 +4067,6 @@ mod profile_and_metadata_tests {
         assert!(!root.path().join("owner.lock").exists());
     }
 
-    #[test]
-    fn batch_command_rebuilds_frozen_helper_profile_and_refuses_policy_drift() {
-        let root = tempfile::tempdir().unwrap();
-        let request = LaunchRequest {
-            model: "claude-sonnet-4-6",
-            prompt: "--literal prompt",
-            cwd: root.path(),
-            permissions: crate::agent::Permissions::Prompt,
-        };
-        let mut spec = sample_spec();
-        spec.options.native_helpers = "bounded".into();
-        spec.harness_version = "Claude Code 2.1.270".into();
-        assert!(
-            batch_command("claude-code", &request, &spec)
-                .unwrap_err()
-                .to_string()
-                .contains("bounded native helpers are unavailable")
-        );
-        let profile = build_native_profile("claude-code", request.model, &spec).unwrap();
-        spec.native_profile = Some(profile.clone());
-        let command = batch_command("claude-code", &request, &spec).unwrap();
-        assert_eq!(command.program, "claude");
-        assert_eq!(command.args[command.prompt_arg.unwrap()], request.prompt);
-        assert_eq!(command.args[command.args.len() - 2], "--");
-        assert!(
-            command
-                .args
-                .windows(profile.args.len())
-                .any(|args| args == profile.args)
-        );
-        spec.native_profile.as_mut().unwrap().helper_model = "different-model".into();
-        assert!(
-            batch_command("claude-code", &request, &spec)
-                .unwrap_err()
-                .to_string()
-                .contains("differs from the frozen profile")
-        );
-        spec.native_profile = Some(profile);
-        spec.harness_version = "2.1.269".into();
-        assert!(
-            batch_command("claude-code", &request, &spec)
-                .unwrap_err()
-                .to_string()
-                .contains("not validated")
-        );
-    }
-
-    #[test]
-    fn work_mode_passes_each_adapter_automatic_approval_flags_without_isolation_overrides() {
-        use crate::agent::Permissions;
-        let root = tempfile::tempdir().unwrap();
-        for (harness, version, model, required, forbidden) in [
-            (
-                "codex",
-                "0.163.0",
-                "gpt-6-astra",
-                vec![
-                    "approval_policy=\"never\"",
-                    "sandbox_mode=\"danger-full-access\"",
-                ],
-                vec!["agents.enabled=false", "--strict-config"],
-            ),
-            (
-                "claude-code",
-                "2.1.304",
-                "claude-opus-5",
-                vec!["--permission-prompts", "none", "--permission-mode", "auto"],
-                vec!["--disallowedTools", "--settings"],
-            ),
-            (
-                "antigravity",
-                "1.4.2",
-                "gemini-3.1-pro-high",
-                vec!["--dangerously-skip-permissions"],
-                vec!["--strict-config"],
-            ),
-            (
-                "opencode",
-                "2.0.32",
-                "ollama/glm-5.3:cloud",
-                vec!["--auto", "--standalone"],
-                vec!["--dir", "--strict-config"],
-            ),
-            (
-                "kiro",
-                "2.32.0",
-                "claude-sonnet-4.5",
-                vec!["--no-interactive", "--trust-all-tools"],
-                vec!["--strict-config"],
-            ),
-        ] {
-            let request = LaunchRequest {
-                model,
-                prompt: "bounded work-mode check",
-                cwd: root.path(),
-                permissions: Permissions::Auto,
-            };
-            let mut spec = sample_spec();
-            spec.harness_version = version.into();
-            spec.options.work_mode = true;
-            // Work mode leaves harness-native settings and delegation tools to
-            // the harness instead of applying reviewed Ahu override profiles.
-            spec.options.native_helpers = "bounded".into();
-            spec.native_profile = None;
-            spec.native_controls.clear();
-            let command = batch_command(harness, &request, &spec).unwrap();
-            let args = command.args.join("\n");
-            for expected in required {
-                assert!(
-                    args.contains(expected),
-                    "{harness} did not receive {expected:?}: {args}"
-                );
-            }
-            for forbidden in forbidden {
-                assert!(
-                    !args.contains(forbidden),
-                    "{harness} unexpectedly received Ahu isolation override {forbidden:?}: {args}"
-                );
-            }
-        }
-
-        let request = LaunchRequest {
-            model: "gpt-6-astra",
-            prompt: "bounded work-mode check",
-            cwd: root.path(),
-            permissions: Permissions::Prompt,
-        };
-        let mut spec = sample_spec();
-        spec.options.work_mode = true;
-        assert!(
-            batch_command("codex", &request, &spec)
-                .unwrap_err()
-                .to_string()
-                .contains("work mode requires frozen permissions=auto")
-        );
-    }
-
-    #[test]
-    fn batch_resume_preserves_permission_mapping_and_literal_prompt() {
-        use crate::agent::Permissions;
-        let root = tempfile::tempdir().unwrap();
-        let spec = Spec {
-            session: Some("session-123".into()),
-            ..sample_spec()
-        };
-        for (harness, permissions, program, expected) in [
-            (
-                "claude-code",
-                Permissions::Auto,
-                "claude",
-                vec![
-                    "--print",
-                    "--model",
-                    "synthetic-model",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--permission-prompts",
-                    "none",
-                    "--disallowedTools",
-                    "Agent,Task,TeamCreate,TeamDelete",
-                    "--permission-mode",
-                    "auto",
-                    "--resume",
-                    "session-123",
-                    "--",
-                ],
-            ),
-            (
-                "claude-code",
-                Permissions::AcceptEdits,
-                "claude",
-                vec![
-                    "--print",
-                    "--model",
-                    "synthetic-model",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--permission-prompts",
-                    "none",
-                    "--disallowedTools",
-                    "Agent,Task,TeamCreate,TeamDelete",
-                    "--permission-mode",
-                    "acceptEdits",
-                    "--resume",
-                    "session-123",
-                    "--",
-                ],
-            ),
-            (
-                "antigravity",
-                Permissions::AcceptEdits,
-                "agy",
-                vec![
-                    "--model",
-                    "synthetic-model",
-                    "--output-format",
-                    "stream-json",
-                    "--print-timeout",
-                    "1800s",
-                    "--mode",
-                    "accept-edits",
-                    "--conversation",
-                    "session-123",
-                    "--print",
-                ],
-            ),
-            (
-                "antigravity",
-                Permissions::Auto,
-                "agy",
-                vec![
-                    "--model",
-                    "synthetic-model",
-                    "--output-format",
-                    "stream-json",
-                    "--print-timeout",
-                    "1800s",
-                    "--dangerously-skip-permissions",
-                    "--conversation",
-                    "session-123",
-                    "--print",
-                ],
-            ),
-        ] {
-            let request = LaunchRequest {
-                model: "synthetic-model",
-                prompt: "--literal $(prompt)\nnext line",
-                cwd: root.path(),
-                permissions,
-            };
-            let command = batch_command(harness, &request, &spec).unwrap();
-            assert_eq!(command.program, program);
-            assert_eq!(command.prompt_arg, Some(expected.len()));
-            assert_eq!(&command.args[..expected.len()], expected.as_slice());
-            assert_eq!(command.args.last().unwrap(), request.prompt);
-            assert_eq!(command.args.len(), expected.len() + 1);
-        }
-        for (harness, model, permissions, message) in [
-            ("codex", "", Permissions::Prompt, "exact model is required"),
-            (
-                "codex",
-                "--model",
-                Permissions::Prompt,
-                "exact model is required",
-            ),
-            (
-                "codex",
-                "synthetic-model",
-                Permissions::AcceptEdits,
-                "resume has no validated accept-edits mapping",
-            ),
-            (
-                "unknown",
-                "synthetic-model",
-                Permissions::Prompt,
-                "no headless adapter",
-            ),
-        ] {
-            let request = LaunchRequest {
-                model,
-                prompt: "synthetic",
-                cwd: root.path(),
-                permissions,
-            };
-            assert!(
-                batch_command(harness, &request, &spec)
-                    .unwrap_err()
-                    .to_string()
-                    .contains(message)
-            );
-        }
-    }
-
-    #[test]
-    fn event_observation_enforces_helper_count_and_metadata_bounds() {
-        let mut events = Events::default();
-        let progress = br#"{"type":"system","subtype":"task_progress","task_id":"synthetic"}"#;
-        for _ in 0..256 {
-            events.observe("claude-code", progress);
-        }
-        assert!(!events.failed);
-        assert_eq!(events.native_event_count, 256);
-        events.observe("claude-code", progress);
-        assert!(events.failed);
-        assert_eq!(events.native_event_count, 257);
-        assert_eq!(events.blockers, ["native helper evaluation limit exceeded"]);
-
-        let mut events = Events::default();
-        let oversized =
-            json!({"type": "system", "subtype": "task_progress", "task_id": "x".repeat(4097)});
-        events.observe("claude-code", &serde_json::to_vec(&oversized).unwrap());
-        assert!(events.failed);
-        assert_eq!(
-            events.blockers,
-            ["native metadata evaluation bound exceeded"]
-        );
-        assert!(events.native.helpers().is_empty());
-    }
-
     fn saved_attempt(repo: &crate::git::Repo, id: &str, spec: &Spec) -> PathBuf {
         let dir = store(repo).unwrap().join(id);
         let record: task::TaskRecord = serde_json::from_value(json!({
@@ -6109,11 +4075,11 @@ mod profile_and_metadata_tests {
             "repo_root": repo.root, "branch": "ahu/synthetic", "worktree": repo.root,
             "identity": {"mode": "automatic", "agent": "auto", "permissions": "prompt",
                 "harness": "codex", "model": "synthetic-model"},
-            "policy_digest": "synthetic", "catalog_version": crate::catalog::CATALOG_VERSION,
+            "policy_digest": "synthetic",
             "config_snapshot": {"entries": [], "skipped_directories": []},
             "config_snapshot_digest": "synthetic",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
-            "launch_command": {"program": "synthetic-executable", "args": []},
+            "launch_command": {"native_eval_otlp":true,"program": "synthetic-executable", "args": []},
             "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
             "prompt_digest": digest_bytes(b"original prompt"),
             "enforcement": {"harness": "codex", "harness_version": null,
@@ -6468,159 +4434,6 @@ mod profile_and_metadata_tests {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-        }
-    }
-
-    #[test]
-    fn resume_profile_refresh_keeps_helper_policy_and_refuses_changed_controls() {
-        let root = tempfile::tempdir().unwrap();
-        let request = LaunchRequest {
-            model: "synthetic-model",
-            prompt: "literal prompt",
-            cwd: root.path(),
-            permissions: crate::agent::Permissions::Prompt,
-        };
-        for (harness, old, new) in [
-            ("codex", "0.157.1", "0.160.0"),
-            ("claude-code", "2.1.283", "2.1.288"),
-            ("claude-code", "2.1.288", "2.1.289"),
-            ("claude-code", "2.1.289", "2.1.302"),
-        ] {
-            let mut spec = sample_spec();
-            spec.harness_version = old.into();
-            spec.native_profile =
-                Some(super::build_native_profile(harness, request.model, &spec).unwrap());
-            let profile = spec.native_profile.as_ref().unwrap();
-            spec.native_controls = profile.control_ids();
-            spec.native_controls.push(
-                crate::harness::isolation::profile(harness, old)
-                    .unwrap()
-                    .id
-                    .into(),
-            );
-            spec.session = Some("synthetic-session".into());
-            let before = spec.clone();
-            super::refresh_resume_profile(&mut spec, harness, request.model, new).unwrap();
-            assert_eq!(spec.native_profile, before.native_profile);
-            assert_eq!(spec.options, before.options);
-            assert_eq!(spec.session, before.session);
-            assert_eq!(spec.harness_version, new);
-            assert!(batch_command(harness, &request, &spec).is_ok());
-            assert_ne!(spec.native_controls, before.native_controls);
-
-            let mut broken = before.clone();
-            broken.native_controls.clear();
-            assert!(
-                super::refresh_resume_profile(&mut broken, harness, request.model, new).is_err()
-            );
-            assert_eq!(broken.harness_version, old);
-            let mut changed = before.clone();
-            changed.native_profile.as_mut().unwrap().max_depth = 99;
-            assert!(
-                super::refresh_resume_profile(&mut changed, harness, request.model, new).is_err()
-            );
-            assert_eq!(changed.harness_version, old);
-        }
-    }
-
-    #[test]
-    fn isolation_profile_is_frozen_and_applies_on_resume_without_removing_context() {
-        let root = tempfile::tempdir().unwrap();
-        let request = LaunchRequest {
-            model: "synthetic-model",
-            prompt: "literal prompt",
-            cwd: root.path(),
-            permissions: crate::agent::Permissions::Prompt,
-        };
-        let mut spec = sample_spec();
-        spec.harness_version = "2.1.283 (Claude Code)".into();
-        assert!(batch_command("claude-code", &request, &spec).is_err());
-        let profile =
-            crate::harness::isolation::profile("claude-code", &spec.harness_version).unwrap();
-        spec.native_controls.push(profile.id.into());
-        for session in [None, Some("synthetic-session".into())] {
-            spec.session = session;
-            let command = batch_command("claude-code", &request, &spec).unwrap();
-            assert!(command.args.windows(2).any(|pair| pair == profile.args));
-            for forbidden in [
-                "--bare",
-                "--safe-mode",
-                "--strict-mcp-config",
-                "--disable-slash-commands",
-                "--setting-sources",
-            ] {
-                assert!(!command.args.iter().any(|arg| arg == forbidden));
-            }
-            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
-        }
-        assert!(crate::harness::isolation::profile("codex", "0.157.2").is_none());
-        assert!(crate::harness::isolation::profile("claude-code", "2.1.284").is_none());
-    }
-
-    #[test]
-    fn codex_effective_profile_is_frozen_on_launch_and_resume() {
-        let root = tempfile::tempdir().unwrap();
-        let request = LaunchRequest {
-            model: "synthetic-model",
-            prompt: "literal prompt",
-            cwd: root.path(),
-            permissions: crate::agent::Permissions::Prompt,
-        };
-        let mut spec = sample_spec();
-        spec.harness_version = "codex-cli 0.157.1".into();
-        assert!(batch_command("codex", &request, &spec).is_err());
-        let profile = crate::harness::isolation::profile("codex", &spec.harness_version).unwrap();
-        spec.native_controls.push(profile.id.into());
-        for session in [None, Some("synthetic-session".into())] {
-            spec.session = session;
-            let command = batch_command("codex", &request, &spec).unwrap();
-            assert!(
-                command
-                    .args
-                    .windows(profile.args.len())
-                    .any(|args| args == profile.args)
-            );
-            assert!(
-                !command
-                    .args
-                    .iter()
-                    .any(|v| v == "features.hooks=false" || v == "--dangerously-bypass-hook-trust")
-            );
-            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
-        }
-    }
-
-    #[test]
-    fn codex_auto_headless_approves_local_tools_and_checkpoint_request() {
-        use crate::agent::Permissions;
-
-        let root = tempfile::tempdir().unwrap();
-        let request = LaunchRequest {
-            model: "synthetic-model",
-            prompt: "literal prompt",
-            cwd: root.path(),
-            permissions: Permissions::Auto,
-        };
-        for session in [None, Some("session-123".to_string())] {
-            let spec = Spec {
-                harness_version: "codex-cli 0.155.1".into(),
-                session,
-                ..sample_spec()
-            };
-            let command = batch_command("codex", &request, &spec).unwrap();
-            assert!(
-                !command
-                    .args
-                    .iter()
-                    .any(|arg| arg.contains("mcp_servers.ahu.tools."))
-            );
-            for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
-                assert!(
-                    !command.args.iter().any(|arg| arg.contains(tool)),
-                    "provider-backed tool {tool} must retain its approval gate"
-                );
-            }
-            assert_eq!(command.args[command.prompt_arg.unwrap()], request.prompt);
         }
     }
 

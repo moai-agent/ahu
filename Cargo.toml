@@ -1,6 +1,6 @@
 [package]
 name = "ahu"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 description = "The moai-agent command-line interface"
 repository = "https://github.com/moai-agent/ahu"
@@ -16,7 +16,11 @@ path = "src/main.rs"
 name = "ahu"
 path = "src/lib.rs"
 
+[features]
+# Local architecture experiment; not a published harness compatibility claim.
+
 [dependencies]
+ahu-harness-api = { version = "0.1.0", path = "crates/ahu-harness-api" }
 ahu-host-api = { version = "0.1.0", path = "crates/ahu-host-api" }
 tempfile = "3"
 dotenvy = "0.15"
@@ -39,4 +43,9 @@ yaml_serde = "0.10"
 toml = "0.9"
 
 [workspace]
-members = ["crates/ahu-host-api"]
+members = ["crates/ahu-host-api", "crates/ahu-harness-api"]
+
+# Installed executable packages are rehashed at trust boundaries. Keep those
+# integrity checks practical in local debug/test runs without caching acceptance.
+[profile.dev.package.sha2]
+opt-level = 3

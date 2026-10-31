@@ -217,14 +217,14 @@ Configure the temporary project with:
 - an agent manifest pinned to the local model under test;
 - the same skill bundle the tested agents should receive;
 - a local MCP server entry that launches `ahu mcp serve` and sets
-  `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`;
+  `AHU_OLLAMA_MODEL` to an installed, compatible decision model;
 - the candidate agents and, optionally, an evaluator agent.
 
-Start Ollama and the decision service outside the checkout:
-
-```sh
-python3 examples/ollama_decision_service.py --model <installed-local-model>
-```
+Run Ollama 0.35+ outside the checkout and use ahu's Rust-native decision
+provider; no Python adapter is required. Set `AHU_OLLAMA_MODEL` in the MCP
+server environment to a compatible installed decision model, for example
+`tev1:0.8b`. Do not combine this with generic `AHU_DECISION_URL` or
+`AHU_DECISION_MODEL` settings. See the [native provider setup and limits](../docs/typed-decisions.md#native-ollama-provider).
 
 Compare two registered agent variants over the whole suite by repeating
 `--agent`. Each agent runs every case `--runs` times:

@@ -786,9 +786,7 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
             // tolerated -- it is simply not an amount -- but a number that is
             // not a count is bad input rather than a metric to average.
             || record.trajectory.as_ref().is_some_and(|o| {
-                o.kiro_metering.as_ref().is_some_and(|m| {
-                    o.source != trajectory::Source::KiroSessionUpdates || !m.valid()
-                })
+                o.metering.as_ref().is_some_and(|m| !m.valid())
             })
             || record.reported_tokens.as_ref().is_some_and(|tokens| {
                 tokens.values().any(|value| {
@@ -1429,19 +1427,23 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 group.runs
             ));
         }
-        if trajectory.sources.contains_key("kiro_session_updates") {
-            out.push_str("             Kiro metering is partial: prompt completions are not model steps; context is a window snapshot; credits are not USD\n");
+        if trajectory
+            .observations
+            .keys()
+            .any(|key| key.starts_with("metering_"))
+        {
+            out.push_str("             Native metering is partial: prompt completions are not model steps; context is a window snapshot; credits are not USD\n");
             for name in [
-                "kiro_context_usage_percent",
-                "kiro_peak_context_usage_percent",
-                "kiro_prompt_completions",
-                "kiro_observed_credits",
-                "kiro_credit_observations",
-                "kiro_observed_elapsed_ms",
-                "kiro_elapsed_observations",
-                "kiro_duplicate_completions",
-                "kiro_rejected_updates",
-                "kiro_unattributed_completions",
+                "metering_context_usage_percent",
+                "metering_peak_context_usage_percent",
+                "metering_prompt_completions",
+                "metering_observed_credits",
+                "metering_credit_observations",
+                "metering_observed_elapsed_ms",
+                "metering_elapsed_observations",
+                "metering_duplicate_completions",
+                "metering_rejected_updates",
+                "metering_unattributed_completions",
             ] {
                 out.push_str(&format!(
                     "             {name} mean {} ({}/{} observations)\n",
