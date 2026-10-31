@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: a0f3b3506008633caaa211c2dca30ff620fdc4293988ffef79da6ed388eb251f
+  digest: a041988a4a5c9e609000048cd84172c47b67f7d048b8860e0d28bc8976832fb6
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -99,11 +99,11 @@ ahu:
     executable: false
     path: .agents/ahu/config.md
   - bytes: 538
-    digest: 60577b1425f1db6b804dac9eaccba2a71c773ed8195886e596a9918e9a6f98bb
+    digest: ea146c22d1aa770d620a187207de3f410d6adf72f3253d1cc9bfd7d5c406f55c
     executable: false
     path: .agents/ahu/plugins/harness-antigravity.md
   - bytes: 538
-    digest: c0025bf6c453f209b91925daebf140b02273dc5a341cb0862c4922997653c807
+    digest: 9d839d153a3edf855aba5a777b95963b1aaef5bb4150ca7b2bc1aa73a5c712d3
     executable: false
     path: .agents/ahu/plugins/harness-claude-code.md
   - bytes: 117
