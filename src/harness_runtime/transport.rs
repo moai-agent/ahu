@@ -1,6 +1,6 @@
 use super::{Operation, Prepared};
 use crate::util::{Error, Result};
-use ahu_harness_api::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
+use ahu_harness_api::{MAX_FRAME_BYTES, PROTOCOL_VERSION, RemoteError, Request, Response};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -181,7 +181,15 @@ impl Session {
                             Response::Failure(error)
                                 if error.protocol_version == PROTOCOL_VERSION && error.id == id =>
                             {
-                                return Err(failure(&format!("operation refused ({operation:?})")));
+                                return Err(failure(&match error.error {
+                                    RemoteError::NeedsNativeTrust => format!(
+                                        "operation refused ({operation:?}): the native CLI is waiting for its folder-trust decision in this checkout; open it there interactively and review the prompt (ahu never approves native trust)"
+                                    ),
+                                    RemoteError::NotSignedIn => format!(
+                                        "operation refused ({operation:?}): the native CLI is not signed in"
+                                    ),
+                                    _ => format!("operation refused ({operation:?})"),
+                                }));
                             }
                             _ => return Err(failure("response sequence or version mismatch")),
                         };

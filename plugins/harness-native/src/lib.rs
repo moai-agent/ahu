@@ -29,16 +29,32 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub effects_unknown: bool,
+    /// Closed, fixed cause an operator can act on; never free text.
+    pub diagnostic: Option<Diagnostic>,
+}
+/// Actionable causes that cross the plugin boundary as fixed codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Diagnostic {
+    NeedsNativeTrust,
+    NotSignedIn,
 }
 impl Error {
     fn invalid() -> Self {
         Self {
             effects_unknown: false,
+            diagnostic: None,
         }
     }
     fn uncertain() -> Self {
         Self {
             effects_unknown: true,
+            diagnostic: None,
+        }
+    }
+    fn diagnosed(diagnostic: Diagnostic) -> Self {
+        Self {
+            effects_unknown: false,
+            diagnostic: Some(diagnostic),
         }
     }
     // Extracted implementations supply context, deliberately discarded at this boundary.
@@ -188,6 +204,7 @@ fn bound_output(result: Result<Value>, effects_possible: bool) -> Result<Value> 
     if serde_json::to_vec(&value)?.len() > 4 * files::LIMIT {
         return Err(Error {
             effects_unknown: effects_possible,
+            diagnostic: None,
         });
     }
     Ok(value)
@@ -230,7 +247,10 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
                 a.ollama_host.as_deref(),
                 a.requested_identity.as_deref(),
             )
-            .map_err(|_| Error::uncertain())
+            .map_err(|error| match error.diagnostic {
+                Some(_) => error,
+                None => Error::uncertain(),
+            })
         }
         "setup" => setup::call(harness, params),
         "native_sources" => sources::call(harness, params),

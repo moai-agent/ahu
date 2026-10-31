@@ -336,7 +336,11 @@ fn antigravity_account_banner_is_observed_without_input_or_approval() {
         "#!/bin/sh\nprintf 'Do you trust this folder?\\n'; sleep 5\n",
     )
     .unwrap();
-    assert!(call("antigravity", "auth", &f.probe()).is_err());
+    let error = call("antigravity", "auth", &f.probe()).unwrap_err();
+    assert_eq!(
+        error.diagnostic,
+        Some(ahu_harness_native::Diagnostic::NeedsNativeTrust)
+    );
 }
 #[test]
 fn codex_capacity_includes_account_fingerprint_and_rejects_partial_windows() {

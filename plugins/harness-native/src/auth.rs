@@ -134,7 +134,7 @@ fn probe_claude(
     let value: Value = serde_json::from_slice(&output)
         .map_err(|_| Error::new("Claude auth status returned invalid JSON"))?;
     if value.get("loggedIn").and_then(Value::as_bool) != Some(true) {
-        return Err(Error::new("Claude Code is not logged in"));
+        return Err(Error::diagnosed(crate::Diagnostic::NotSignedIn));
     }
     let principal = value
         .get("email")
@@ -241,10 +241,10 @@ fn antigravity_needs_folder_trust(output: &[u8]) -> bool {
         || visible.contains("Do you trust this folder?")
 }
 
+// Open agy in the checkout interactively and review its prompt; ahu never
+// approves native folder trust automatically.
 fn antigravity_folder_trust_error() -> Error {
-    Error::new(
-        "Antigravity is waiting for native folder trust in this checkout; open agy there interactively and review that prompt before retrying. ahu does not approve native folder trust automatically",
-    )
+    Error::diagnosed(crate::Diagnostic::NeedsNativeTrust)
 }
 
 fn antigravity_startup(

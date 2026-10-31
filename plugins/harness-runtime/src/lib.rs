@@ -152,12 +152,13 @@ impl State<'_> {
                     name.as_str().ok_or(RemoteError::InvalidInput)?,
                     &params,
                 )
-                .map_err(|error| {
-                    if error.effects_unknown {
-                        RemoteError::OutcomeUnknown
-                    } else {
-                        RemoteError::Failed
+                .map_err(|error| match error.diagnostic {
+                    Some(ahu_harness_native::Diagnostic::NeedsNativeTrust) => {
+                        RemoteError::NeedsNativeTrust
                     }
+                    Some(ahu_harness_native::Diagnostic::NotSignedIn) => RemoteError::NotSignedIn,
+                    None if error.effects_unknown => RemoteError::OutcomeUnknown,
+                    None => RemoteError::Failed,
                 })
             }
         }

@@ -51,7 +51,7 @@ Each request is one JSON line, including its terminating newline within the
 ```
 
 A failure has `error` instead of `result`, with exactly one fixed string:
-`failed`, `invalid_input`, `unsupported`, or `outcome_unknown`. Null is a valid
+`failed`, `invalid_input`, `unsupported`, `outcome_unknown`, `needs_native_trust` or `not_signed_in`. The last two are closed, actionable health causes, never free text. Null is a valid
 result. Unknown envelope fields, duplicate keys at any depth, incompatible
 versions, sequence mismatches, oversized or partial frames, and unsolicited
 frames fail the session. No diagnostic message field is accepted. Use

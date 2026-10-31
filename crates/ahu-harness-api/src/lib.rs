@@ -229,6 +229,10 @@ pub enum RemoteError {
     InvalidInput,
     Unsupported,
     OutcomeUnknown,
+    /// The native CLI is waiting for its own folder-trust decision.
+    NeedsNativeTrust,
+    /// The native CLI reports no signed-in account.
+    NotSignedIn,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
