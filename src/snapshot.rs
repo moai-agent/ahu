@@ -51,7 +51,11 @@ impl ContextPaths {
         Ok(paths)
     }
     fn recognizes(&self, relative: &Path) -> bool {
-        if relative == Path::new(crate::context_lock::LOCK_PATH) {
+        if relative == Path::new(crate::context_lock::LOCK_PATH)
+            || VOLATILE_RUNTIME_FILES
+                .iter()
+                .any(|file| relative == Path::new(file))
+        {
             return false;
         }
         self.directories.iter().any(|directory| {
@@ -68,6 +72,12 @@ impl ContextPaths {
         })
     }
 }
+
+/// Files a harness rewrites while it runs. They hold process identity, not
+/// configuration the harness loads, so counting them would make the context
+/// lock stale whenever a session is open. Exact paths only: anything broader
+/// could hide a planted configuration file from the lock.
+const VOLATILE_RUNTIME_FILES: &[&str] = &[".claude/scheduled_tasks.lock"];
 
 /// Directories never descended into while looking for configuration.
 ///
@@ -819,5 +829,27 @@ mod classification_tests {
                 .is_file(),
             "discarding a copy reached into the parent checkout"
         );
+    }
+}
+
+#[cfg(test)]
+mod volatile_runtime_tests {
+    use super::*;
+
+    fn with_claude_context() -> ContextPaths {
+        // Context directories come from installed harness plugins; declare the
+        // one a Claude Code plugin would.
+        ContextPaths {
+            directories: vec![".claude".into()],
+            files: vec![],
+        }
+    }
+
+    #[test]
+    fn a_live_session_lock_is_not_context_but_neighboring_files_still_are() {
+        let context = with_claude_context();
+        assert!(!context.recognizes(Path::new(".claude/scheduled_tasks.lock")));
+        assert!(context.recognizes(Path::new(".claude/settings.local.json")));
+        assert!(context.recognizes(Path::new(".claude/other.lock")));
     }
 }

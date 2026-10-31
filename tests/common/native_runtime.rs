@@ -200,9 +200,19 @@ pub fn install(root: &std::path::Path, harness: &str) {
     )
     .unwrap();
     let digest = ahu::plugin_install::digest(&package_root).unwrap();
+    // The binding must name the package's own version, which changes per release.
+    let version = std::fs::read_to_string(package_root.join("Cargo.toml"))
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("version = \"")?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .expect("plugin package declares a version");
     let binding = format!(".agents/ahu/plugins/{id}.md");
     std::fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
-    std::fs::write(root.join(&binding), format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: {id}\n  version: '0.1.0'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-runtime]\n---\nNative runtime integration fixture.\n", serde_json::json!(package_root), env!("CARGO_PKG_VERSION"))).unwrap();
+    std::fs::write(root.join(&binding), format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: {id}\n  version: '{version}'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-runtime]\n---\nNative runtime integration fixture.\n", serde_json::json!(package_root), env!("CARGO_PKG_VERSION"))).unwrap();
     for args in [
         vec!["add", "-f", &binding],
         vec![
