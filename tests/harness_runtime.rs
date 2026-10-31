@@ -660,3 +660,52 @@ fn generic_mcp_only_harness_is_driven_by_core_without_executing_package_code() {
     assert!(runtime.open_stream().is_err());
     assert!(!fixture.marker.exists(), "package code must never run");
 }
+
+#[test]
+fn generic_harness_runs_from_the_cli_and_shows_in_doctor() {
+    let fixture = Fixture::new("", |declaration| {
+        declaration.as_object_mut().unwrap().remove("path");
+        let descriptor = &mut declaration["descriptor"];
+        descriptor["aliases"] = json!([]);
+        descriptor["models"] = json!([]);
+        descriptor["modes"] = json!(["direct"]);
+        descriptor["operations"] = json!(["probe", "launch"]);
+        descriptor["capabilities"] = json!(["mcp-only"]);
+    });
+    // The native program lives outside the repository, as ahu requires.
+    let external = tempfile::tempdir().unwrap();
+    let bin = external.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let program = bin.join("sixth-native");
+    fs::write(&program, "#!/bin/sh\necho \"sixth-native 3.4.5 session\"\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let home = external.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let run = |args: &[&str]| {
+        common::ahu()
+            .arg("--repo")
+            .arg(&fixture.root)
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let launched = run(&["harness", "sixth"]);
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    assert!(String::from_utf8_lossy(&launched.stdout).contains("sixth-native 3.4.5 session"));
+    let doctor = String::from_utf8_lossy(&run(&["doctor"]).stdout).into_owned();
+    assert!(
+        doctor.contains("sixth installed (MCP-only, driven by core); no registered agent uses it"),
+        "{doctor}"
+    );
+}

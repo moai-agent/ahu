@@ -21,12 +21,20 @@ use crate::util::{Error, Result, digest_bytes, digest_file};
 struct ContextPaths {
     directories: Vec<String>,
     files: Vec<String>,
+    /// Checkout root and index paths when it is a Git checkout. A skipped
+    /// directory that Git ignores and that holds no tracked file is local state
+    /// (`target`, `.ahu`, `.worktrees`), not a coverage gap.
+    git: Option<(PathBuf, std::collections::BTreeSet<Vec<u8>>)>,
 }
 impl ContextPaths {
     fn load(root: &Path) -> Result<Self> {
         let mut paths = Self {
             directories: vec![".agents".into()],
             files: vec!["AGENTS.md".into(), "AGENTS.override.md".into()],
+            git: crate::git::discover(root).ok().and_then(|repo| {
+                let tracked = crate::git::tracked_paths(&repo).ok()?;
+                Some((repo.root.clone(), tracked))
+            }),
         };
         if root.join(crate::plugin_binding::DIRECTORY).exists() {
             let repo = crate::git::discover(root)?;
@@ -49,6 +57,35 @@ impl ContextPaths {
         paths.files.sort();
         paths.files.dedup();
         Ok(paths)
+    }
+    /// Conservative: without Git, or when Git cannot say, disclose the directory.
+    fn is_ignored_local_state(&self, relative: &Path) -> bool {
+        let Some((root, tracked)) = &self.git else {
+            return false;
+        };
+        let mut prefix = relative.as_os_str().as_encoded_bytes().to_vec();
+        prefix.push(b'/');
+        if tracked
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|path| path.starts_with(&prefix))
+        {
+            return false;
+        }
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            // Only the repository's own ignore rules count; a per-user global
+            // excludes file must not change a lock that is committed and shared.
+            .args(["-c", "core.excludesFile=/dev/null"])
+            .args(["check-ignore", "-q", "--"])
+            // A trailing slash names a directory even before it exists.
+            .arg(format!("{}/", relative.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
     fn recognizes(&self, relative: &Path) -> bool {
         if relative == Path::new(crate::context_lock::LOCK_PATH)
@@ -105,15 +142,17 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
-/// The one skipped directory that is not disclosed as a coverage gap.
+/// Skipped directories that are not disclosed as a coverage gap.
 ///
 /// Every other entry in `SKIP_DIR_NAMES` can hold committed files, which the
 /// base checkout carries into the task worktree whether or not the scan looked
 /// at them — that is exactly what the disclosure is for. `.git` cannot: Git
 /// does not track anything inside it, and no harness reads configuration from
-/// it. Listing it on every launch would be noise in the one place ahu needs the
-/// reader to actually read.
-const NEVER_DISCLOSED: &[&str] = &[".git"];
+/// it. `.ahu` is ahu's own local state: no harness loads it, and ahu creates it
+/// before it ignores it, so whether it appeared would depend on timing. Listing
+/// either on every launch would be noise in the one place ahu needs the reader
+/// to actually read.
+const NEVER_DISCLOSED: &[&str] = &[".git", ".ahu"];
 
 const MAX_DEPTH: usize = 12;
 
@@ -294,6 +333,13 @@ fn record_unscanned(
     if let Some(name) = &name
         && NEVER_DISCLOSED.contains(&name.as_str())
     {
+        return;
+    }
+    // Ignored directories with no tracked file (`target`, `.ahu`, `.worktrees`)
+    // are local state; listing them would make the committed lock depend on
+    // whichever of them exist. Untracked directories Git does not ignore stay
+    // disclosed, since a planted file there is exactly what this is for.
+    if context.is_ignored_local_state(relative) {
         return;
     }
     snapshot.skipped_directories.push(shown.clone());
@@ -842,6 +888,7 @@ mod volatile_runtime_tests {
         ContextPaths {
             directories: vec![".claude".into()],
             files: vec![],
+            git: None,
         }
     }
 
@@ -851,5 +898,31 @@ mod volatile_runtime_tests {
         assert!(!context.recognizes(Path::new(".claude/scheduled_tasks.lock")));
         assert!(context.recognizes(Path::new(".claude/settings.local.json")));
         assert!(context.recognizes(Path::new(".claude/other.lock")));
+    }
+
+    #[test]
+    fn only_skipped_directories_that_are_not_ignored_local_state_are_disclosed() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        for directory in ["vendor", "target", "dist", "build"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+            std::fs::write(root.path().join(directory).join("f"), "x").unwrap();
+        }
+        std::fs::write(root.path().join(".gitignore"), "/target/\n/dist/\n").unwrap();
+        // `dist` is ignored but holds a tracked file; `build` is untracked and
+        // not ignored; `vendor` is plainly tracked; `target` is ignored state.
+        git(&["add", "-f", "--", "vendor/f", "dist/f"]);
+        let snapshot = collect(root.path()).unwrap();
+        assert_eq!(snapshot.skipped_directories, ["build", "dist", "vendor"]);
     }
 }

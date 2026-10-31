@@ -208,12 +208,6 @@ impl Plan {
             entry.executable = false;
             snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
         }
-        // Apply creates ignored local journal storage. Predict its disclosed
-        // scan gap without making preview write anything.
-        if !snapshot.skipped_directories.iter().any(|p| p == ".ahu") {
-            snapshot.skipped_directories.push(".ahu".into());
-            snapshot.skipped_directories.sort();
-        }
         let lock = context_lock::LockFile::from_snapshot(&snapshot).render(before[3].as_deref())?;
         use std::os::unix::fs::PermissionsExt;
         let mut source_modes = [None; 4];
