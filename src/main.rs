@@ -444,9 +444,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         other => {
             let repo = commands::repo_from_cwd()?;
             commands::with_stdio(|console| match other {
-                Command::Interactive { focus, agent } => {
-                    commands::interactive(console, &repo, focus, agent.as_deref())
-                }
                 Command::Setup => ahu::setup::run(console, &repo),
                 Command::SetupHarnessPlugins => ahu::setup::list_harness_plugins(console, &repo),
                 Command::SetupHarnessPlugin { package } => ahu::setup::prepare_harness_plugin(

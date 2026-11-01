@@ -111,8 +111,6 @@ Options:
   --repo <path>         Select a repository checkout before the command.
                         Also accepts --repo=<path>; paths in the command are
                         relative to this checkout. No environment override.
-  --no-focus            Open the interactive launcher without switching to the new
-                        session after launch: `ahu --no-focus`. Select @name there.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -207,8 +205,6 @@ doctor options:
   --work-mode           Check explicit headless work mode; native configuration is not inspected
 
 agent assignment options:
-  Scripted assignments already leave focus unchanged; omit --no-focus.
-
   --name <name>        Reserve an immutable @name for this task in the repository.
                         By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
@@ -386,10 +382,6 @@ pub enum Command {
     Version,
     Explain {
         format: ExplainFormat,
-    },
-    Interactive {
-        focus: bool,
-        agent: Option<String>,
     },
     Setup,
     SetupHarnessPlugins,
@@ -581,10 +573,7 @@ where
 
 fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
     let Some(first) = args.first().map(String::as_str) else {
-        return Ok(Command::Interactive {
-            focus: true,
-            agent: None,
-        });
+        return Ok(Command::Help { topic: None });
     };
     if let Some(help) = help_request(&args)? {
         return Ok(help);
@@ -925,27 +914,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         },
         "knowledge" => parse_knowledge(&args[1..]),
         "eval" => parse_eval(&args[1..]),
-        direct if direct.starts_with('@') => {
-            if args.len() == 1 && !stdin_available {
-                let agent = direct.strip_prefix('@').unwrap_or_default();
-                validate_agent_name(agent)?;
-                Ok(Command::Interactive {
-                    focus: true,
-                    agent: Some(agent.to_string()),
-                })
-            } else {
-                parse_launch_backend(&args, stdin_available)
-            }
-        }
+        direct if direct.starts_with('@') => parse_launch_backend(&args, stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
-        "--no-focus" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Interactive {
-                focus: false,
-                agent: None,
-            })
-        }
         "launch" => bail!(
             "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
         ),
@@ -2788,42 +2759,6 @@ mod focused_help_tests {
     }
 
     #[test]
-    fn no_focus_help_matches_interactive_and_scripted_syntax() {
-        assert_eq!(
-            parse_args(&["--no-focus"]).unwrap(),
-            Command::Interactive {
-                focus: false,
-                agent: None,
-            }
-        );
-        assert!(HELP_ALL.contains("`ahu --no-focus`"));
-        let args = [
-            "@fixture",
-            "--prompt-file",
-            "fixture.txt",
-            "--allow-widened-approvals",
-            "--name",
-            "fixture-task",
-            "--dry-run",
-            "--output",
-            "json",
-        ];
-        assert!(matches!(
-            parse_args(&args).unwrap(),
-            Command::Launch { dry_run: true, .. }
-        ));
-        let mut unsupported = args.to_vec();
-        unsupported.push("--no-focus");
-        assert!(parse_args(&unsupported).is_err());
-        let help = help_for(Some("@agent")).unwrap();
-        assert!(help.contains("assignments already leave focus unchanged"));
-        assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
-        assert!(help_for(Some("auth")).unwrap().contains(
-            "Identity and readiness probes are supplied by installed harness runtime plugins."
-        ));
-    }
-
-    #[test]
     fn help_topics_and_slices_are_consistent() {
         for topic in ["--help", "-h", "ahu tasks"] {
             assert!(!help_for(Some(topic)).unwrap().is_empty());
@@ -2889,14 +2824,8 @@ mod direct_agent_tests {
     }
 
     #[test]
-    fn direct_agent_without_prompt_preselects_interactive_or_reads_piped_stdin() {
-        assert_eq!(
-            parse_with_stdin(["@dev-glm"], false).unwrap(),
-            Command::Interactive {
-                focus: true,
-                agent: Some("dev-glm".into()),
-            }
-        );
+    fn direct_agent_without_prompt_needs_one_and_piped_stdin_only_previews() {
+        assert!(parse_with_stdin(["@dev-glm"], false).is_err());
         // A piped prompt would start an interactive task session, which is
         // retired; only the preview remains.
         assert!(

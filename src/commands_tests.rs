@@ -283,7 +283,6 @@ fn commands_report_missing_setup_and_empty_agents_without_creating_config() {
     assert_eq!(result.unwrap(), 0);
     assert!(text.contains("No ahu agents"));
     for result in [
-        scripted("", |c| interactive(c, &repo, false, None)).0,
         scripted("", |c| knowledge_lint(c, &repo, false)).0,
         scripted("", |c| {
             launch_cmd(
@@ -764,20 +763,6 @@ fn task_without_a_launch_base_offers_a_quoted_branch_review() {
     assert!(text.contains("base      unknown"));
     assert!(text.contains(" log 'reviewer'\\''s-branch'"), "{text}");
     assert!(!text.contains(" diff "));
-}
-
-#[test]
-fn interactive_preselection_rejects_unknown_agent_before_reading_prompt() {
-    let (_root, repo) = repository();
-    configured(&repo);
-    let (result, text) = scripted("this must not become a task\n", |c| {
-        interactive(c, &repo, false, Some("absent"))
-    });
-    assert!(result.unwrap_err().to_string().contains("absent"));
-    assert!(text.contains("Preselected agent: @absent"));
-    assert!(!text.contains("Resolved for this task"));
-    assert!(task::list(&repo).unwrap().is_empty());
-    assert!(!repo.root.join(".worktrees").exists());
 }
 
 #[test]
