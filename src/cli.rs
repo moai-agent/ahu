@@ -244,7 +244,7 @@ pub const HELP: &str = "ahu — launch and coordinate repository agents
 
 Usage: ahu [--repo PATH] [COMMAND]
 
-Delegate to a registered agent with `ahu @agent --headless "task prompt"`,
+Delegate to a registered agent with `ahu @agent --headless --prompt TEXT`,
 or start a coordinator (`ahu claude`, `ahu codex`, `ahu agy`).
 
 Commands:
