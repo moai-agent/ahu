@@ -46,8 +46,7 @@ sources:
 ahu is a thin coordinator around harnesses. Keep external integrations in
 optional plugins and skills; see the integration ownership and review rules in `docs/plugin-architecture.md`.
 Core owns task execution and worktree lifecycle, not terminal workspace layouts
-or external issue state. Current-terminal and headless execution require no
-session-host or issue-tracker plugin.
+or external issue state. Headless execution requires no issue-tracker plugin.
 
 The core agent-task service V1, documented in `../agent-task-service.md`, defines an opt-in,
 provider-neutral task lifecycle interface for core-issued scoped sessions. Its

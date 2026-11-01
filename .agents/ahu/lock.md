@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: b6f37a8a8185b3e025ec0718d6b6160f1b8bcccc10520072c70ba33ad76e362b
+  digest: 6537e4b8177df5a0e6e5852631e1ab7e4ee527661a211210ea8cb922c145fed7
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -22,36 +22,36 @@ ahu:
     digest: eab704102ba283145e69774bd9a148371f931e0caf3c8226da64ea56f405cad6
     executable: false
     path: .agents/ahu/agents/defsec-agy.md
-  - bytes: 6476
-    digest: ae6f0e598b0b70d05e572c19f5e555f6885cfed8f5cc1bc8fa1150986c5a968f
+  - bytes: 6437
+    digest: c6685b948257ab7d403f24de51721bf97ed85da80cecd979b19f3b356c7b5cb8
     executable: false
     path: .agents/ahu/agents/defsec-astra.md
-  - bytes: 6480
-    digest: 3108a7a428baa280acdb9b3fb0d94470c605be178eff18b4bbfee0c891f917c5
+  - bytes: 6441
+    digest: 538ce335b5410eba61a4a4a9fa4e4c3297e01dd329a506473cd19f2a501894d0
     executable: false
     path: .agents/ahu/agents/defsec-glm.md
-  - bytes: 6480
-    digest: bba7b247b21730a31dc3acaca956e26a39a7bdc1dd31432517adc8ed4f8e0a9d
+  - bytes: 6441
+    digest: 65a41eb6d4a85b5e646cadb90931a58fbddc8f01cbb4f72c7938f6ec25e46a97
     executable: false
     path: .agents/ahu/agents/defsec-opus.md
-  - bytes: 5338
-    digest: 3ad4505f1cb76f8ad65be056e0cc2324a8e1c15a2248e2e1570d5f5b433ac78e
+  - bytes: 5299
+    digest: 323fa8bc0b47d1fecf45fed1289a791a99a4c9428153badd565ab1da3bb629e5
     executable: false
     path: .agents/ahu/agents/dev-agy.md
-  - bytes: 6387
-    digest: 35eb43b73db32f04a2d4e9f69567c084764f2d28dd4af41d07450d67f56b4fc2
+  - bytes: 6348
+    digest: cfab3a197c430490c8f225eea7798c3112a76d268d265a53b58b67a615c3d049
     executable: false
     path: .agents/ahu/agents/dev-astra.md
-  - bytes: 6391
-    digest: 984f6830378f3dda6429b84c9e8ba1a459e877dff55e4d7715668ad40ab185f8
+  - bytes: 6352
+    digest: 7d4de329dc34de9430b44c4bc6e3a468c36752b0b8f88c41e71fa8311ec959d1
     executable: false
     path: .agents/ahu/agents/dev-glm.md
   - bytes: 1262
     digest: 705e112d18e8aa0b5891cbc70f01a31413e201b080cec2aa71c1fb79d7955740
     executable: false
     path: .agents/ahu/agents/dev-kiro.md
-  - bytes: 3342
-    digest: d0cba8ce963c99be97fb61934c9f90df8df2919506b76f7b3ae77926d81ecf53
+  - bytes: 3328
+    digest: f8a9e21622bf12cc40b37d7745ad7c19ed2526337c9c434cdc1e7b4012480fbd
     executable: false
     path: .agents/ahu/agents/dev-opus.md
   - bytes: 1424
@@ -74,8 +74,8 @@ ahu:
     digest: 0422aa03b769fd524d2d2de445d4a854bc06b28bfae1a1cbef4422b538eb2b5f
     executable: false
     path: .agents/ahu/agents/eval-agy.md
-  - bytes: 5949
-    digest: 075fc4fed9e48de58e849ecd0d24e8bb766fbd68dfbee55da94e45cf25641279
+  - bytes: 5910
+    digest: d843a004ed0c61435069f7ab3a872a1a5059759a7ef4026f3cf2805d550c139b
     executable: false
     path: .agents/ahu/agents/offsec-astra.md
   - bytes: 1285
@@ -94,8 +94,8 @@ ahu:
     digest: b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8
     executable: false
     path: .agents/ahu/agents/test-kiro.md
-  - bytes: 722
-    digest: b4898ea8c56ba185f9b99731fcecca90effaf4088612cb7f42cf09f0f24f98b1
+  - bytes: 759
+    digest: b7b70f8ec9e2cd6b9f7f7dab370b2dba485c924d23b3c9f819291ebca2ca3b14
     executable: false
     path: .agents/ahu/config.md
   - bytes: 553
@@ -126,20 +126,20 @@ ahu:
     digest: b2f7e3285be8231d3329e77e455b0bbb0ea74e35ed5c76f95c9358d9485a3659
     executable: false
     path: .agents/skills/ahu-agent-context-critic/SKILL.md
-  - bytes: 27343
-    digest: efb5661d95b985989ef29278da1613985251656dfe18b48fc33cf04bc365c556
+  - bytes: 25223
+    digest: 1b6a9856693694653e1493c70a0967c753d855f87f9f9bbb0e1cf2006c1cf6bd
     executable: false
     path: .agents/skills/ahu-architecture/SKILL.md
-  - bytes: 13498
-    digest: 22ab8e299a70cab8a8b9817f120267e605c398e377c2b20fd72c253c714438fb
+  - bytes: 13228
+    digest: dda04c8e3ec98b38cb6c34304efe6efdd74af40302aa72d128884f9e172f7edc
     executable: false
     path: .agents/skills/ahu-direct-agents/SKILL.md
   - bytes: 4833
     digest: 4e6604b08eb811d2f957e19251426d8f8d0a9af0c10406e69696c2990c1c4abc
     executable: false
     path: .agents/skills/ahu-harness-upgrade/SKILL.md
-  - bytes: 15043
-    digest: c7d1f9694c0def8588bde9f6bc32c28ebfd79ad320a01bcddcac71eaccf93b1e
+  - bytes: 14391
+    digest: 69f0e41be07f16eee6e1db7d3f6bb30edf2812e66d22d3e4a6737d08ff8c762f
     executable: false
     path: .agents/skills/ahu-release/SKILL.md
   - bytes: 6771

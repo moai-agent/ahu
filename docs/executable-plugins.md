@@ -32,13 +32,10 @@ absolute paths, symlinks at every component, empty components, backslashes and
 
 Use the existing pinned package installation lifecycle. Invocation requires the
 current **committed** binding to match ahu's version and contain both
-`enabled: true` and `grants: [execute]`. An `interactive-backend` grant alone
-does not authorize this entrypoint. The invocation API uses the verified installed
+`enabled: true` and `grants: [execute]`. The legacy `interactive-backend` grant
+no longer authorizes anything; session hosts were removed. The invocation API uses the verified installed
 package, never `AHU_PLUGIN_PATH` or a remote source; it does not install missing
 packages. Discovery, installation and activation never invoke the entrypoint.
-An enabled binding with `execute` but no `interactive-backend` grant is excluded
-from default session-host selection. Explicit interactive selection still needs
-its separate host declaration and grant.
 
 ## Foreground CLI invocation
 

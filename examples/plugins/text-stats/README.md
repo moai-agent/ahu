@@ -2,8 +2,7 @@
 
 This independent authoring example uses the public [executable plugin V1
 protocol](../../../docs/executable-plugins.md). Build it with Rust and Cargo;
-the resulting executable needs no Python, credentials, network calls, `gh`, or
-`cmux`. It has no dependency on ahu's Rust implementation.
+the resulting executable needs no Python, credentials, network calls, or `gh`. It has no dependency on ahu's Rust implementation.
 
 ahu sends one JSON request on stdin, closes stdin, and expects one JSON response
 and a zero exit status. Only the executable is copied into the execution snapshot.

@@ -6,8 +6,8 @@ description: ahu architecture and workflow explanation
 
 ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
-and runs interactive sessions in the current terminal by default, through an
-explicitly selected session-host plugin, or as unattended headless attempts.
+and runs them as unattended headless attempts. The entry point is a coordinator
+session (`ahu claude`, `ahu codex`, `ahu agy`) that delegates to registered agents.
 
 ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI, OpenCode and Kiro CLI
 run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
@@ -26,13 +26,12 @@ optional executable plugin when ahu needs a machine-readable integration contrac
 Core owns task/attempt state, process supervision, worktrees, MCP coordination and
 bounded telemetry/evaluation. Installed Rust harness runtimes own native launch
 arguments, configuration, admission, account observations and event parsing.
-Terminal and tracker plugins own workspace mappings and external issue transitions.
-Core links only the harness data contract and has no built-in provider fallback. Neither cmux nor GitHub is a
-core dependency; headless and current-terminal execution require neither.
+Tracker plugins own external issue transitions.
+Core links only the harness data contract and has no built-in provider fallback.
+GitHub is not a core dependency; headless execution requires no tracker.
 
-The cmux package implements generic Host V2; GitHub workflows use skills and
-optional one-shot executable actions. These are distinct contracts, not a
-universal provider framework. Generic task observation does not grant task
+GitHub workflows use skills and optional one-shot executable actions. These are
+distinct contracts, not a universal provider framework. Generic task observation does not grant task
 mutation or automatic tracker synchronization. Do not add provider-name branches,
 a core tracker client, or a second built-in path for an optional plugin.
 See `docs/plugin-architecture.md` for the ownership and security boundaries.
@@ -42,12 +41,10 @@ See `docs/plugin-architecture.md` for the ownership and security boundaries.
 Outside ahu, sub-agents and fan out use the current harness's native
 sub-agent features. Inside ahu, registered assignments use registered ahu
 agents, each using its configured harness and model in a separate worktree.
-Headless children inherit that backend; interactive children use the selected
-session host or current terminal.
+Children inherit the headless backend.
 Use `ahu @name 'assignment text'` for a direct launch, or
 `ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
-The direct form also accepts `--prompt`; without a prompt, `ahu @name` opens
-the interactive launcher with that agent selected.
+The direct form also accepts `--prompt`; task sessions run headless.
 Headless native helpers follow the frozen policy described below. Every
 launch supplies its backend delegation contract as prompt text on every
 harness, inside a fence tagged with a per-launch nonce,
@@ -58,16 +55,11 @@ harness or its shell tools from starting other processes.
 
 ## What ahu needs
 
-- **A session host**, optional. Interactive work defaults to the current
-  terminal; cmux is available through an explicitly enabled plugin. Headless
-  execution needs no session host.
 - **An installed harness runtime plugin** and its native CLI, installed and signed
   in by you. Activate the reviewed package with a committed `harness-runtime`
   grant; see `docs/harness-plugins.md`. Descriptors define available harnesses.
 - **Git**: every task gets its own branch and worktree.
 
-When selected, the cmux plugin creates repository groups and per-task workspaces.
-Without a session-host plugin, interactive tasks run in the current terminal.
 Headless tasks and local inspection need no terminal plugin. The harness is what actually runs the
 agent. `ahu setup` detects installed harnesses, offers available models,
 registers development agents and installs supported skills/MCP configuration.
@@ -107,8 +99,8 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
    reports a diagnostic; it does not get different behaviour.
 3. Harness-native conventions win. Skills, memory, settings, and agent
    definitions stay where the harness wants them. ahu references them in place
-   and does not reorganise them. The narrow exception is native folder trust for
-   explicitly authorized interactive auto tasks, described below.
+   and does not reorganise them. The narrow exception is task-scoped native folder trust,
+   described below.
 4. Say what you cannot do. Where ahu cannot see a context source or cannot
    enforce an identity, it reports that rather than implying a guarantee.
 
@@ -118,30 +110,23 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
 flowchart TD
     A["ahu (in a Git repo)"] --> B{".agents/ahu/config.md?"}
     B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, runtime bindings"]
-    C --> D
-    B -- yes --> D["Launcher"]
-
-    D --> E{"@agent typed?"}
+    C --> E{"@agent named?"}
+    B -- yes --> E
     E -- "@chris" --> F["Named identity<br/>manifest pins harness + model"]
     E -- blank --> G["Automatic selection<br/>walk project rankings"]
-    F --> H["Show resolved harness + model<br/>BEFORE the prompt is typed"]
+    F --> H["Resolve harness + model"]
     G --> H
 
-    H --> I["Prompt composer<br/>paste never submits"]
-    I --> J["Plan: snapshot config, detect drift,<br/>read hooks, build argv"]
-    X["Scripted launch<br/>prompt file, inline or stdin"] --> J
-    J --> K["Submission preview<br/>identity, Git effects, hooks, warnings"]
-    K -- "no" --> L["Nothing created"]
-    K -- "yes" --> M["git worktree add<br/>branch ahu/&lt;agent&gt;/&lt;task-id&gt;"]
+    H --> X["Prompt file, inline or stdin"]
+    X --> J["Plan: snapshot config, detect drift,<br/>read hooks, build argv"]
+    J --> K["Preview<br/>identity, Git effects, hooks, warnings"]
+    K -- "--dry-run" --> L["Nothing created"]
+    K -- "--headless" --> M["git worktree add<br/>branch ahu/&lt;agent&gt;/&lt;task-id&gt;"]
 
     M --> N["Materialize parent agent config<br/>at native paths"]
     N --> O["Write task record + prompt.txt"]
-    O --> U{"Execution backend"}
-    U -- headless --> V["Supervisor: batch argv,<br/>primary-owned coordination"]
-    U -- interactive --> P["Current terminal or selected session-host plugin"]
-    P --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
-    R --> S["Re-derive argv, compare to record"]
-    S --> T["supervise configured harness<br/>model flags + one composed prompt argument"]
+    O --> V["Supervisor: batch argv,<br/>primary-owned coordination"]
+    V --> T["supervise configured harness<br/>model flags + one composed prompt argument"]
 ```
 
 ## Identity and selection
@@ -172,23 +157,17 @@ a diagnostic for that machine, never a different selection for that user.
 ```mermaid
 flowchart LR
     P["Pasted prompt<br/>$(...), backticks, newlines"] --> F["prompt.txt<br/>mode 0600"]
-    F -.->|"read at start"| R["ahu run-task"]
+    F -.->|"read at start"| R["headless supervisor"]
     D["ahu delegation contract"] --> N["Compose, fenced with<br/>a per-launch nonce"]
     A["Agent instructions<br/>manifest body or source.path"] --> N
     R --> N
     N -->|"one argv element"| C["configured harness<br/>contract + instructions + prompt"]
 
-    S["Session-host startup command<br/>(provider transport)"] --> R
-    Q["Only ahu's own exe path<br/>+ task dir, single-quoted"] --> S
-
     style F fill:#e8f4ea,stroke:#3a7d44
-    style Q fill:#e8f4ea,stroke:#3a7d44
     style N fill:#fdf1e7,stroke:#b5651d
 ```
 
-The session host receives a startup command string containing ahu’s executable
-path and task directory, each shell-quoted by core. A host that uses a shell must
-preserve that quoting; the provider transport belongs to the plugin. The prompt is written to a
+The prompt is written to a
 file and handed to the harness as one argument vector element. Shell syntax inside
 a prompt is therefore delivered literally and never evaluated.
 
@@ -276,10 +255,7 @@ travels into the task worktree with executable bits preserved; the harness
 decides whether and when hooks run. Local settings can travel without being
 shared policy. User and managed settings remain at their native locations.
 Hooks outside project policy raise the consistency warning below.
-Session-host installation and native terminal integrations belong to the selected
-external plugin and its documentation. Core has no `ahu cmux` command and does
-not install or inspect cmux integrations. Generic discovery, activation and live
-provider conformance are separate facts. Static inspection is not live testing.
+Generic discovery, activation and live harness conformance are separate facts. Static inspection is not live testing.
 
 ## Versions and drift
 
@@ -296,7 +272,7 @@ says so rather than reporting one number that could mean either.
 
 ## Headless attempts and results
 
-`ahu @name --headless` uses batch execution without cmux or a PTY. Add --background
+`ahu @name --headless` uses batch execution without a PTY. Add --background
 to return after supervisor startup; otherwise execution stays in the foreground.
 The preview names the observed CLI version, exact command, timeout and gaps.
 Installed versions float unless the project pins one. Unverified executable wrappers,
@@ -317,9 +293,8 @@ cannot prevent an already completed write, intercept shell writes, classify
 relative targets, or detect missing events. Final stream observations are checked before accepting success,
 including cancellation of registered descendants. This is not a sandbox.
 resume explicitly continues its recorded native session, and
-cancel requests termination of the task and its recorded ahu descendants; an
-interactive task is stopped by its run-task parent. Confirmed cancellation
-closes its workspace; an unconfirmed request leaves it open. Work and records stay.
+cancel requests termination of the task and its recorded ahu descendants.
+Work and records stay.
 Earlier attempt artifacts survive resume. Configuration or executable drift
 refuses resume. A child cannot resume after its owning parent attempt terminates;
 child/worker resume is also unsupported while its parent is live.
@@ -352,13 +327,13 @@ allowlist. Exact version requirements for native controls belong to the plugin.
 Admission does not establish live provider availability. See the installed
 plugin's documentation for native hook, model-tool and helper limitations.
 Same-user code is not isolated from broker state. Hooks and arbitrary shell
-commands require a vetted environment; ahu's backend itself does not use cmux.
+commands require a vetted environment.
 Explicit cleanup removes recognized old captures and bounded requests, retaining
 structured results, frozen inputs, native stores, branches and worktrees.
 
 ## Task-scoped native folder trust
 
-Interactive auto assignments authorize trust for their exact canonical ahu-owned
+Legacy interactive auto launches authorized trust for their exact canonical ahu-owned
 worktree in Claude Code, Codex and Antigravity. Preparation runs after task verification
 and before native startup probes. Preview, prompt, accept-edits and arbitrary
 checkouts never grant this trust. ahu does not grant parent or blanket trust,
@@ -390,12 +365,10 @@ checkpoint does not intercept arbitrary actions or expand harness permissions.
 ## State and records
 
 Task worktrees are siblings under `.worktrees/` in the primary checkout.
-An interactive task's record and prompt live in `.ahu/state/` in its worktree, chosen
-by ahu at launch and passed to the session, so removing that worktree removes
-them with it. `ahu tasks`, `task` and `focus` find them by looking through
-`.worktrees/`, from the primary checkout or from any sibling. The launch lock,
+A legacy interactive task's record and prompt live in `.ahu/state/` in its worktree,
+so removing that worktree removes them with it. `ahu tasks` and `task` find them
+by looking through `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
 headless coordination and task index belong to the primary; plugin-specific
-workspace/group mappings belong to the selected session-host plugin;
 `.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;
 coordination stays in the primary checkout. Legacy lookup reads the primary and
@@ -406,14 +379,12 @@ Old external stores are read in place; legacy-lookup.json names additional roots
 Migration and global task scope across unrelated repositories are unsupported.
 Task commands accept ahu:task:<id>, bare IDs and unique prefixes consistently.
 Message arguments after the task reference are literal inbox payload.
-The run-task owner supervises the child and lends/restores terminal foreground.
 Cancellation uses live ownership, preserves work, and reports unconfirmed outcomes.
 Terminal outcomes persist even if foreground restoration fails.
 Existing state symlinks are refused; path checks and mutable record
 digests do not protect against concurrent hostile host processes. Policy never lives
 there. Each record freezes the launched
-identity, digests, base commit, branch, worktree, and optional session-host
-identity with an opaque session reference, so editing an agent
+identity, digests, base commit, branch, and worktree, so editing an agent
 later changes the next launch while a running task keeps what it started with.
 Misplaced records in managed stores are reported as notes, not accepted or migrated.
 After legacy lookup, recordless worktrees are reported as incomplete. Failed launch
@@ -457,7 +428,6 @@ normal harness capabilities, not launch problems.
 
 Kiro CLI uses harness ID `kiro` and executable `kiro-cli`. The adapter selects
 V3 and passes the exact model and composed positional prompt. It supports
-interactive launches with native prompt approvals or explicit trust-all-tools;
 headless fresh runs and native resume are supported on 2.28.0 and 2.29.0. Accept-edits is
 refused. Headless admission requires absent unreviewed executable configuration
 and cloud sources. It admits an inspected subset of native JSON/Markdown agent

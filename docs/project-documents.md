@@ -156,7 +156,8 @@ HTTPS or absolute local Git `repository`, full lowercase hexadecimal Git
 and `host_api: 1`. Numeric prerelease identifiers in either version pin cannot
 have leading zeros (`1.0.0-01` is invalid); build metadata such as `1.0.0+01` is allowed.
 `enabled` defaults to false; `grants` defaults to empty. The
-schema recognizes `interactive-backend`, `execute`, and `read-project-context`
+schema recognizes `execute`, `read-project-context`, `harness-runtime` and the
+legacy `interactive-backend` (accepted so older bindings load; it grants nothing)
 grants; unknown or duplicate grants are errors. Grant settings remain inert during
 inspection. `execute` authorizes the generic entrypoint when the enabled,
 committed binding and installed package pass verification; it does not forward

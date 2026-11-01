@@ -55,7 +55,7 @@ that a task id grants no delivery into any other task's directory. A task
 never writes an inbox; ids locate work, they do not authorize it, as
 [Task identity](task-identity.md) records.[^orchestration]
 
-For interactive tasks and legacy headless contracts, two artifacts carry what a
+For legacy interactive tasks and headless contracts, two artifacts carry what a
 task wants to say back. The task writes its final
 report as `result.md` in its task directory; `ahu task` displays it under a
 `result` heading, refusing rather than truncating a report larger than the

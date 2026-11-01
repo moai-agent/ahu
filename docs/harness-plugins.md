@@ -112,8 +112,7 @@ matching instruction.
 
 `ahu harness ID` starts a direct coordinator session. Installed aliases provide
 shortcuts such as `ahu codex`, `ahu claude` and `ahu agy`. Headless agent execution
-requires no terminal-host or tracker plugin. cmux and GitHub are separate optional
-integrations.
+requires no tracker plugin. GitHub is a separate optional integration.
 
 The selected plugin receives the exact model, mode, permissions, native version,
 timeout and optional resume identity. Core inserts task prompts only after

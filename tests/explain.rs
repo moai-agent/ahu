@@ -116,10 +116,6 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
         );
         // The hard dependencies have to be stated, not implied.
         assert!(
-            text.contains("cmux"),
-            "optional cmux integration must be named"
-        );
-        assert!(
             text.contains("installed harness runtime plugin"),
             "the harness dependency must be named: {text}"
         );
@@ -191,7 +187,7 @@ fn the_overview_distinguishes_headless_results_from_interactive_state() {
             "AHU_RUNTIME_DIR",
             "no automatic replay",
             "not orchestrator acceptance",
-            "An interactive task's record",
+            "A legacy interactive task's record",
             "The installed runtime decides whether its",
             "--allow-child-widened @name",
             "as a separate process",

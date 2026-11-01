@@ -13,9 +13,8 @@ approval settings confine filesystem or process access. Agents must keep their
 changes inside the assigned worktree; this is an instruction, not enforcement.
 See `docs/agent-git-workflow.md` for the shared branch and release flow. Do not
 impersonate an agent with native harness delegation or silently substitute
-another harness. The workflow is tracker- and terminal-neutral. GitHub and cmux
-are supported integrations, not assumptions every project or machine must
-satisfy.
+another harness. The workflow is tracker-neutral. GitHub is a supported integration, not an
+assumption every project or machine must satisfy.
 
 ## Assign work
 
@@ -84,9 +83,7 @@ assignments. A process exit is not proof of completion: read the report provided
 through the task's contract and repository policy, inspect the diff and validation
 evidence, and review the actual commit before integrating. New headless tasks
 keep final answers in native harness stores rather than a copied `result.md`.
-For an interactive task, inspect its recorded terminal surface only when that
-surface is available. cmux uses `cmux read-screen --workspace <id> --scrollback`;
-headless tasks have no workspace to read. Do not make a terminal transcript the
+Headless tasks have no terminal surface to read; do not make a terminal transcript the
 durable task record. Keep prompts, task reports, and execution traces outside
 repositories. Store bounded eval records and derived eval summaries in the
 primary checkout's ignored `.ahu/evals/` by default; external record paths remain
@@ -136,14 +133,12 @@ and bounded requests after termination is known; it retains the task record,
 results, native sessions, branch, and worktree. Run `ahu remove` from another
 checkout after the worktree is clean and its branch is merged into the primary
 checkout's current HEAD (or already absent). A cherry-pick may not satisfy that
-ancestry check. Interactive tasks have no headless captures, so use `ahu remove`
-directly after these checks.
+ancestry check. Legacy interactive task records have no headless captures, so use `ahu remove`
+directly after these checks; ahu no longer manages their session-host workspaces
+and leaves any such workspace open.
 
-`ahu remove` asks the recorded session-host plugin to close its owned session.
-The plugin verifies provider-specific ownership; an unverifiable relationship
-blocks removal. Group
-anchors and native harness stores are not generally removed. Separately inspect
-any remaining fixture anchor against the inventory, its current members, and
+Native harness stores are not generally removed. Separately inspect
+any remaining fixture against the inventory, its current members, and
 session activity before closing it. Close only an owned, disposable fixture
 anchor with no needed session or unrelated members. A title or apparently empty
 group is not proof of ownership. Verify removal of owned task records,

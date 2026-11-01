@@ -94,9 +94,9 @@ Make CI prove the release boundary without paid services:
   invoke models.
 - Add release-branch triggers so the candidate receives the same checks as
   `main`.
-- Gate live integrations explicitly. A cmux probe may run only when the runner
-  provides a reachable cmux instance; otherwise emit a visible notice and skip
-  it. Never turn a missing optional terminal integration into a false pass.
+- Gate live integrations explicitly. A live harness probe may run only when the
+  runner has that harness installed and signed in; otherwise emit a visible notice
+  and skip it. Never turn a missing optional integration into a false pass.
 - Inspect security scans. Treat production findings as release blockers. A
   finding in a deterministic fixture or test-only diagnostic may be dismissed
   only after reviewing its exact location and recording why it cannot affect
@@ -179,28 +179,19 @@ coverage limits in the release handoff.
 Before handoff, reconcile the ahu tasks used to implement this release. Run
 `ahu tasks --all` from the repository and use provider-side task links, branch
 names, and commits to identify release tasks; do not guess from agent names or
-task titles alone. Inventory the exact owned task IDs, worktrees, branches, and
-recorded session-host identities and opaque session references before cleanup. Confirm each task is terminal,
+task titles alone. Inventory the exact owned task IDs, worktrees, branches
+before cleanup. Confirm each task is terminal,
 its result was reviewed, and its changes are integrated. For each completed
 headless release task, run `ahu cleanup <task>` and then `ahu remove <task>` from
 another checkout only when its worktree is clean and its branch is merged into
 the primary checkout's current HEAD (or already absent). A cherry-pick alone
 may not satisfy that ancestry check. Do not bypass a refusal by deleting work.
-Interactive tasks have no headless captures; run `ahu remove <task>` directly
-after the same checks.
-
-`ahu remove` asks the recorded session-host plugin to verify ownership and
-close its session; an unverifiable relationship blocks removal.
-It does not generally remove repository group anchors or native harness session
-stores. Empty fixture anchors can remain after task removal. Inspect remaining
-groups and their members against the inventory before separately closing an
-anchor: it must belong to this release's disposable fixture, contain no needed
-session, and have no unrelated members. Never close a group based on its title
-or apparent emptiness alone. Preserve unrelated sessions and anything whose
-ownership, terminal state, or integration is uncertain. Verify the owned tasks
-are absent from `ahu tasks --all`, their worktrees/branches and recorded cmux
-workspaces are gone, and unrelated sessions remain. Report partial cleanup and
-retained anchors with reasons; retain provider-side work items and acceptance
+Legacy interactive task records have no headless captures; run `ahu remove <task>`
+directly after the same checks. `ahu remove` does not remove native harness
+session stores. Preserve anything whose ownership, terminal state, or
+integration is uncertain. Verify the owned tasks are absent from
+`ahu tasks --all` and their worktrees/branches are gone. Report partial cleanup
+with reasons; retain provider-side work items and acceptance
 evidence according to project policy.
 
 Keep public release files free of private tracker material, local paths,
