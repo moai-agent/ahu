@@ -244,8 +244,8 @@ pub const HELP: &str = "ahu — launch and coordinate repository agents
 
 Usage: ahu [--repo PATH] [COMMAND]
 
-Start the launcher with `ahu`, or run a registered agent with
-`ahu @agent 'task prompt'`.
+Delegate to a registered agent with `ahu @agent --headless "task prompt"`,
+or start a coordinator (`ahu claude`, `ahu codex`, `ahu agy`).
 
 Commands:
   setup                 Configure this project for ahu
