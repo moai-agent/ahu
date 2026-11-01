@@ -8,7 +8,7 @@ Use this skill when coordinating work inside an ahu task. Registered agents are
 launched through ahu, with their configured harness, model, permissions, and
 fresh worktree. Do not impersonate an agent with native harness delegation or
 silently substitute another harness. The workflow is tracker- and terminal-
-neutral. GitHub and cmux are supported integrations, not assumptions every
+neutral. GitHub is a supported integration, not an assumption every
 project or machine must satisfy.
 
 ## Assign work
@@ -38,9 +38,7 @@ assignments. A process exit is not proof of completion: read the report provided
 through the task's contract and repository policy, inspect the diff and validation
 evidence, and review the actual commit before integrating. New headless tasks
 keep final answers in native harness stores rather than a copied `result.md`.
-For an interactive task, inspect its recorded terminal surface only when that
-surface is available. cmux uses `cmux read-screen --workspace <id> --scrollback`;
-headless tasks have no workspace to read. Do not make a terminal transcript the
+Headless tasks have no terminal surface to read. Do not make a terminal transcript the
 durable task record. Keep prompts, reports, and execution traces outside
 repositories.
 
@@ -84,10 +82,8 @@ checkout's current HEAD (or already absent). A cherry-pick may not satisfy that
 ancestry check. Interactive tasks have no headless captures, so use `ahu remove`
 directly after these checks.
 
-`ahu remove` also closes a recorded cmux workspace when its group/window
-ownership can be verified; an unverifiable relationship blocks removal. Group
-anchors and native harness stores are not generally removed. Separately inspect
-any remaining fixture anchor against the inventory, its current members, and
+Native harness stores are not generally removed. Separately inspect
+any remaining fixture against the inventory, its current members, and
 session activity before closing it. Close only an owned, disposable fixture
 anchor with no needed session or unrelated members. A title or apparently empty
 group is not proof of ownership. Verify removal of owned task records,

@@ -143,14 +143,30 @@ pub(crate) fn direct_command(
 ) -> Result<LaunchCommand> {
     let runtime = crate::harness_runtime::load(repo, harness)?;
     let version = probe_version(repo, &runtime)?;
-    let value = runtime.call(
-        "launch",
-        serde_json::json!({
-            "mode": "direct", "model": model, "permissions": "auto", "work_mode": false,
-            "session": null, "native_version": version, "timeout_seconds": 1800,
-            "cwd": repo.root, "broker_dir": null, "native_profile": null, "native_controls": [],
-        }),
-    )?;
+    let value = runtime
+        .call(
+            "launch",
+            serde_json::json!({
+                "mode": "direct", "model": model, "permissions": "auto", "work_mode": false,
+                "session": null, "native_version": version, "timeout_seconds": 1800,
+                "cwd": repo.root, "broker_dir": null, "native_profile": null, "native_controls": [],
+            }),
+        )
+        .map_err(|error| {
+            // A refusal carries no free text across the plugin boundary, so say
+            // what a direct coordinator launch asks for. Some harnesses have no
+            // unattended direct mode at their reviewed version; delegated tasks
+            // still run headless.
+            if crate::harness_runtime::HealthCause::of(&error).is_none() {
+                let kind = error.kind();
+                crate::util::Error::new(format!(
+                    "{error}. The coordinator shortcut starts {harness} in its automatic approval mode with model {model}; this plugin does not offer that for the installed version. Delegated tasks can still run headless (ahu @agent --headless), and `ahu doctor` shows the plugin's evidence."
+                ))
+                .with_kind(kind)
+            } else {
+                error
+            }
+        })?;
     decode_plan(
         value,
         runtime.descriptor().program.as_str(),

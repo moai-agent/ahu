@@ -90,11 +90,25 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         )?;
     }
     crate::state::ensure_checkout_state(&repo.root)?;
+    // cmux, when installed, contributes what it offers for this harness; a
+    // generic harness has nothing to offer and is never wrapped.
+    let cmux = if runtime.is_generic() {
+        crate::cmux::Launch::default()
+    } else {
+        crate::cmux::Integration::detect()
+            .map(|cmux| cmux.prepare(harness, Path::new(&executable)))
+            .unwrap_or_default()
+    };
+    for note in &cmux.notes {
+        eprintln!("ahu: {}", display_safe(note));
+    }
     // The whole argument list, model included, so the line names exactly what
     // was launched rather than only the approval flags.
     eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
-    let mut command = std::process::Command::new(executable);
+    let mut command =
+        std::process::Command::new(cmux.program.as_deref().unwrap_or(Path::new(&executable)));
     command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    command.envs(cmux.env.iter().map(|(name, value)| (*name, value)));
     crate::telemetry::configure_coordinator(
         &mut command,
         &loaded
@@ -2447,23 +2461,6 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
         }
     }
     Ok(0)
-}
-
-/// `ahu run-task --task-dir <dir>` — the fixed entrypoint the session provider starts.
-pub fn run_task(task_dir: &Path) -> Result<i32> {
-    let record = crate::task::load(task_dir)?;
-    if let Some(loaded) = crate::config::load(&record.worktree)? {
-        crate::telemetry::initialize_task(&loaded.config.telemetry, &record, None)?;
-    }
-    match launch::run_task(task_dir)? {
-        launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
-        launch::HarnessOutcome::Exited(status) => Err(crate::util::Error::new(format!(
-            "the harness exited unsuccessfully ({status})."
-        ))),
-        // The harness was terminated on request; the pane reports the
-        // cancellation itself rather than an unsuccessful exit.
-        launch::HarnessOutcome::Cancelled => Ok(1),
-    }
 }
 
 /// Resolve a launch identity from an optional `@name`.

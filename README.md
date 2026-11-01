@@ -292,7 +292,10 @@ approval. Native configuration can still deny tools, and automatic mode is not
 filesystem confinement. See [harness plugins](docs/harness-plugins.md) for evidence
 and version boundaries.
 
-Aliases accept no extra native flags. Coordinator sessions run in the current terminal.
+Aliases accept no extra native flags. Coordinator sessions run in the current terminal. When the `cmux` CLI is installed,
+the Claude Code and Codex shortcuts start through cmux's own wrappers, and the
+OpenCode, Kiro and Antigravity shortcuts first run cmux's hook installer; see
+[the cmux notes](docs/reference.md#cmux).
 See [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides

@@ -43,7 +43,6 @@ pub fn validate_runtime_descriptors<'a>(
         "explain",
         "onboard",
         "help",
-        "run-task",
         "supervise",
         "plugins",
         "task",

@@ -409,41 +409,6 @@ fn a_link_in_place_of_the_worktrees_directory_is_refused() {
     assert!(text.contains("symlink"), "{text}");
 }
 
-/// A record found in one task's worktree must belong to that task.
-#[test]
-fn a_record_held_by_another_tasks_worktree_does_not_start_a_session() {
-    let repo = fixture();
-    let owner = "006aa50000000000o1";
-    let other = "006aa50000000000o2";
-    prepare_task(&repo, repo.path(), owner);
-    prepare_task(&repo, repo.path(), other);
-
-    let discovered = git::discover(repo.path()).unwrap();
-    let owner_worktree = state::worktree_dir(repo.path(), owner).unwrap();
-    let other_worktree = state::worktree_dir(repo.path(), other).unwrap();
-    // `other`'s record, complete and self-consistent, sitting in `owner`'s
-    // store. Everything it says about itself is true; the only thing wrong is
-    // where it was read from.
-    let planted = state::worktree_task_dir(&owner_worktree, &discovered.identity(), other);
-    task::save(
-        &planted,
-        &record_for(&repo, other, &other_worktree),
-        "current work",
-    )
-    .unwrap();
-
-    let started = ahu_in(
-        repo.path(),
-        &["run-task", "--task-dir", &planted.to_string_lossy()],
-    );
-    let text = text_of(&started);
-    assert!(!started.status.success(), "{text}");
-    assert!(
-        text.contains("a different task's checkout"),
-        "the refusal must say why: {text}"
-    );
-}
-
 /// A link where a task directory should be is reported, not skipped.
 ///
 /// Skipping it would make `ahu tasks` show fewer tasks than the store has

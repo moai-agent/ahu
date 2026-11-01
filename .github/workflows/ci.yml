@@ -189,9 +189,3 @@ jobs:
               raise SystemExit(1)
           print(f'checked {len(files)} Markdown files')
 
-  cmux-boundary:
-    name: cmux plugin boundary
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Explain live integration coverage
-        run: echo '::notice::Ahu core has no compiled cmux adapter or live cmux test target. Generic session-host and plugin lifecycle tests run in the checks job; live provider conformance is not established by this repository.'
