@@ -7,20 +7,14 @@ use crate::util::Result;
 
 pub const HELP_ALL: &str = "ahu - The moai-agent command-line interface
 
-Launch repository-defined agents in fresh Git worktrees and run them in the
-current terminal or through an explicitly selected session-host plugin. Use
---headless for unattended execution with primary-owned coordination.
+Delegate work to repository-defined agents in fresh Git worktrees. Tasks run
+headless with primary-owned coordination; talk to a coordinator (`ahu claude`,
+`ahu codex`, `ahu agy`) and let it delegate.
 
 Usage: ahu [--repo <path>] [COMMAND]
 
-Start work directly with a registered agent using `ahu @agent [prompt]`.
-Use `ahu @agent` to open the interactive launcher with that agent selected.
-
-Running `ahu` with no command opens the interactive launcher: pick an agent with
-`@name` (or leave it blank for the project's automatic selection), paste a task,
-and submit it. Pasting never submits by itself: the preview ends with a
-confirmation code generated after your prompt was read, and only that code
-submits, so no pasted text can answer for you.
+Start work directly with a registered agent using `ahu @agent --headless --prompt TEXT`.
+Running `ahu` with no command prints this help.
 
 An agent's instructions and ahu's delegation contract are delivered as prompt
 text on every harness, fenced with a per-launch nonce. ahu passes no
@@ -63,8 +57,7 @@ Commands:
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
-                                  confirmed interactive cancellation closes its session-host workspace,
-                                  while the worktree, branch and record are kept
+                                  the worktree, branch and record are kept
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
@@ -95,7 +88,7 @@ Commands:
                         Check readiness for native or explicit work-mode launches
   harness ID            Open a direct session using an installed harness plugin.
                         Installed aliases may also be used as commands.
-  run-task              Internal: run a prepared task (used by the session host)
+  run-task              Internal: run a prepared task
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
 
@@ -213,7 +206,7 @@ agent assignment options:
   --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
   --input-file <path>   Bounded JSON input for an agent input_schema; requires --headless
-  --headless            Run unattended without an interactive session host
+  --headless            Run unattended (the default for delegated tasks)
   --work-mode           Headless auto permissions; native compatibility remains unverified
   --allow-child @name   Grant this exact registered child identity (repeatable)
   --allow-child-widened @name
@@ -299,10 +292,10 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
-        "doctor" => "Usage: ahu doctor [--verbose] [--work-mode]\n\nSummarize project, context-lock, skills, harness and telemetry readiness. By default, headless readiness uses native admission and checks the selected interactive session host. --work-mode checks explicit headless automatic-approval mode, skips native configuration and session-host checks, and reports native compatibility as unverified. Use --verbose for component-level diagnostics.\n".to_string(),
+        "doctor" => "Usage: ahu doctor [--verbose] [--work-mode]\n\nSummarize project, context-lock, skills, harness and telemetry readiness. By default, headless readiness uses native admission. --work-mode checks explicit headless automatic-approval mode, skips native configuration checks, and reports native compatibility as unverified. Use --verbose for component-level diagnostics.\n".to_string(),
         "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and duplicate formats, supports mixed policy/lock formats while preserving canonical policy bytes and lock annotations, preserves exact source backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
-        "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect installed plugins, committed bindings, and session-host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. Harness runtime packages require a committed harness-runtime grant; they provide harness descriptors and native operations, and never become session-host defaults. Use ahu harness ID after activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
+        "plugins" | "plugins invoke" => "Usage: ahu plugins [--project] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect installed plugins, committed bindings without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSource-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing,. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the harness-runtime grant before activation. Harness runtime packages require a committed harness-runtime grant; they provide harness descriptors and native operations, and. Use ahu harness ID after activation. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-. disable/remove refuse live or uncertain tasks. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity and readiness probes are supplied by installed harness runtime plugins. Unsupported observations remain unknown. A readiness check does not establish model entitlement, inference access or complete telemetry; consult the selected plugin documentation for its evidence and limitations.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),

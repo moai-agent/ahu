@@ -92,10 +92,9 @@ loading or require plugins to link the entire ahu core. Shared contract crates
 should contain protocol types and validation, not provider discovery, credentials,
 or workflow orchestration.
 
-- Keep the [one-shot protocol](executable-plugins.md) and
-  [session-host protocol](executable-hosts.md) distinct. Reuse their transport
-  implementations; do not merge their framing or privileges to reduce duplication.
-  Keep exact versions, limits, and error codes in those contract documents.
+- Keep exact versions, limits, and error codes in the [one-shot protocol](executable-plugins.md)
+  and the harness runtime contract; do not merge their framing or privileges to
+  reduce duplication.
 - Separate package identity, protocol version, capabilities, and authorization.
   A declared capability does not grant permission. Construct grants from trusted
   host decisions, never from a plugin response or caller-supplied identity.

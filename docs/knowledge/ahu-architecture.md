@@ -154,9 +154,7 @@ plugins. Missing local Git objects fail with all Git transports denied. Committe
 symlinks and non-file bindings are refused; metadata reads are bounded.
 Inspection is not activation. Explicit package installation verifies source pins;
 execution requires the matching committed enabled binding, compatibility and
-the appropriate grant. One-shot execution and session hosting have separate
-contracts. See `docs/executable-plugins.md`,
-`docs/executable-hosts.md`, and the CLI reference section
+the appropriate grant. See `docs/executable-plugins.md` and the CLI reference section
 `Committed project plugin bindings` for their bounds and limitations.
 
 [^main]: CLI routing in src/main.rs.
