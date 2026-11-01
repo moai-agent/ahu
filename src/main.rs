@@ -89,27 +89,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 print!("{}", ahu::explain::mermaid_only());
                 Ok(0)
             }
-            ExplainFormat::OpenInSessionHost => {
-                let path = ahu::explain::write_document()?;
-                println!("Wrote {}", path.display());
-                match ahu::explain::open_in_session_host(&path, true) {
-                    Ok(surface) => {
-                        println!(
-                            "Opened through the selected session-host plugin (surface {surface})."
-                        );
-                        println!("Rendering support depends on the selected plugin.");
-                        Ok(0)
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{}",
-                            style::stdout()
-                                .paint(Role::Hint, "The document is still at the path above.")
-                        );
-                        Err(e)
-                    }
-                }
-            }
         },
         // `run-task` is started by the selected session provider inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.

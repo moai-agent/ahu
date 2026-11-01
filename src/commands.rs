@@ -12,7 +12,6 @@ use crate::drift;
 use crate::git::{self, Repo};
 use crate::harness;
 use crate::hooks;
-use crate::interactive;
 use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
@@ -91,13 +90,6 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         )?;
     }
     crate::state::ensure_checkout_state(&repo.root)?;
-    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &plan)?;
-    for note in placement.notes {
-        eprintln!("ahu: {}", display_safe(&note));
-    }
-    if placement.opened_workspace {
-        return Ok(0);
-    }
     // The whole argument list, model included, so the line names exactly what
     // was launched rather than only the approval flags.
     eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
@@ -869,53 +861,6 @@ pub fn doctor_with_options(
                     shown.push('…');
                 }
                 console.say(&format!("  headless   {shown}\n"))?;
-            }
-        }
-    }
-
-    if work_mode {
-        console.say("session host not required for headless work mode\n")?;
-    } else {
-        let selected_host = interactive::plugins::status();
-        match &selected_host {
-            Ok(status) if status.selected => console.say(&format!(
-                "session host {} ({})\n",
-                display_safe(&status.id),
-                display_safe(&status.package),
-            ))?,
-            Ok(_) => console.say("session host disabled or not included in this build\n")?,
-            Err(e) => console.say(&format!(
-                "session host selection unavailable: {}\n",
-                display_safe_block(&e.to_string())
-            ))?,
-        }
-        if selected_host
-            .as_ref()
-            .is_ok_and(|status| status.selected && status.id == "terminal")
-        {
-            console.say("host         current terminal (no session plugin required)\n")?;
-        } else {
-            match interactive::discover() {
-                Ok(client) => {
-                    console.say("host         reachable\n")?;
-                    match client.check_capabilities() {
-                        Ok(_) => console.say("  host groups supported\n")?,
-                        Err(e) => {
-                            problems += 1;
-                            console.say(&format!(
-                                "  host groups {}\n",
-                                display_safe_block(&e.to_string())
-                            ))?;
-                        }
-                    }
-                }
-                Err(e) => {
-                    problems += 1;
-                    console.say(&format!(
-                        "host         {}\n",
-                        display_safe_block(&e.to_string())
-                    ))?;
-                }
             }
         }
     }
@@ -2070,7 +2015,6 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     // verifiably absent workspaces before applying the terminal-state gate;
     // this still preserves tasks whose host cannot be queried or whose
     // workspace remains present.
-    let _ = crate::launch::reconcile(repo)?;
     let (record_dir, record, owner_identity, via_index, gate_discovered) =
         match resolve_task(repo, task_id)? {
             Located::Listing(dir, record) => (dir, record, repo.identity(), false, None),
@@ -2208,20 +2152,10 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         None
     };
+    // Session hosts are no longer managed. A legacy record may name a workspace
+    // ahu opened earlier; removal leaves it for the user to close.
     let session_status = if record.session_ref.is_some() || record.session_host.is_some() {
-        let client = interactive::discover_for_record(gate, &record).map_err(|error| {
-            Error::new(format!(
-                "cannot safely remove task {} while its recorded session cannot be checked: {error}",
-                display_safe(task_id)
-            ))
-        })?;
-        if interactive::session::SessionManager::new(client.as_ref(), gate)
-            .close_task_session(&record)?
-        {
-            "closed"
-        } else {
-            "already absent"
-        }
+        "left open (session hosts are no longer managed)"
     } else {
         "not used"
     };
@@ -2363,8 +2297,8 @@ pub fn eval_report(
 ///
 /// A headless task is delegated to the headless supervisor's cancel flow
 /// unchanged. An interactive task is stopped by its run-task parent, which
-/// owns the harness process tree. Confirmed cancellation closes a recorded
-/// session-host workspace; an unconfirmed request leaves it open. The worktree,
+/// owns the harness process tree. A recorded legacy
+/// session-host workspace is left open. The worktree,
 /// branch and record are never deleted.
 pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let (dir, mut record) = inspect_local_task(repo, id)?;
@@ -2407,13 +2341,7 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     )?;
 
     let (cancellation, workspace) =
-        confirm_interactive_cancellation(&dir, &mut record, Duration::from_secs(5), |current| {
-            interactive::discover_for_record(repo, current).and_then(|client| {
-                interactive::session::SessionManager::new(client.as_ref(), repo)
-                    .close_task_session(current)
-                    .map(|_| ())
-            })
-        })?;
+        confirm_interactive_cancellation(&dir, &mut record, Duration::from_secs(5))?;
 
     crate::headless::emit(
         &serde_json::json!({
@@ -2435,7 +2363,6 @@ pub(crate) fn confirm_interactive_cancellation(
     dir: &Path,
     record: &mut task::TaskRecord,
     timeout: Duration,
-    close_workspace: impl FnOnce(&task::TaskRecord) -> Result<()>,
 ) -> Result<(&'static str, &'static str)> {
     let mut cancellation = "requested-unconfirmed";
     let deadline = Instant::now() + timeout;
@@ -2462,19 +2389,11 @@ pub(crate) fn confirm_interactive_cancellation(
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Only the spawning supervisor can confirm termination. A timeout or a
-    // read failure preserves the pane; closing it is not process supervision.
+    // Session hosts are no longer managed: a workspace a legacy record names
+    // is left for the user to close.
     let workspace = match record.session_ref.as_deref() {
         None if record.session_host.is_some() => "unknown",
         None => "absent",
-        Some(_workspace_id) if cancellation == "confirmed" => {
-            close_workspace(record).map_err(|error| {
-                crate::util::Error::new(format!(
-                    "cancellation confirmed, but interactive session close failed: {error}"
-                ))
-            })?;
-            "closed"
-        }
         Some(_) => "left open",
     };
 

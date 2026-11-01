@@ -119,7 +119,6 @@ Options:
 explain options:
   --markdown            Print the overview as a Markdown document
   --mermaid             Print only the diagrams, as fenced Mermaid blocks
-  --open                Write the overview and open it through the selected session-host plugin
 
 onboard options:
   --register <name>     Register a previewed native definition
@@ -370,8 +369,6 @@ pub enum ExplainFormat {
     Markdown,
     /// Only the diagrams, as fenced Mermaid blocks.
     Mermaid,
-    /// Written to ahu's state directory and opened through the selected session host.
-    OpenInSessionHost,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -591,7 +588,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 None => ExplainFormat::Terminal,
                 Some("--markdown") => ExplainFormat::Markdown,
                 Some("--mermaid") => ExplainFormat::Mermaid,
-                Some("--open") => ExplainFormat::OpenInSessionHost,
                 Some(other) => bail!("unknown option {other:?} for `ahu explain`."),
             };
             if format != ExplainFormat::Terminal {

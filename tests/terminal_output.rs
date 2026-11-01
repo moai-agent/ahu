@@ -117,7 +117,6 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
                 output.status.success(),
                 "provider-free terminal build: {stdout}"
             );
-            assert!(stdout.contains("session host terminal"), "{stdout}");
         } else {
             assert!(output.status.success(), "{stderr}");
             let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -409,7 +408,6 @@ fn redirected_commands_match_explicit_plain_output() {
         &["explain"],
         &["explain", "--markdown"],
         &["explain", "--mermaid"],
-        &["explain", "--open"],
         &["setup"],
         &["agents"],
         &["onboard"],

@@ -667,6 +667,3 @@ fn verification_resolves_workspace_path_without_executing_or_trusting_record_pat
         std::fs::rename(bin.join("codex-hidden"), bin.join("codex")).unwrap();
     }
 }
-
-#[path = "interactive/tests.rs"]
-mod interactive_host_tests;
