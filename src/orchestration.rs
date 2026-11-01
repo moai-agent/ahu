@@ -23,8 +23,7 @@ use crate::util::{Error, ErrorKind, Result, digest_bytes};
 
 pub const INSTRUCTIONS: &str = r#"ahu delegation contract (v1)
 You are running an ahu-assigned task in its own task worktree. The current
-terminal is the default interactive host; optional session hosts are enabled
-through committed project plugins. Do not assume cmux is installed.
+terminal is the default host; do not assume any terminal multiplexer is installed.
 Delegation is scoped to the entrypoint: outside ahu, a request for sub-agents or
 fan out belongs to that harness's own natively supported sub-agent features and
 stays inside that harness. Inside THIS ahu task, "sub-agents" and "fan out" mean
@@ -48,9 +47,7 @@ are NOT copied. For a review of uncommitted work, explicitly include the absolut
 source checkout path and revision/diff scope in the assignment. Tell reviewers
 where to write their findings so you can read and compare their actual reports.
 Record each returned task id and worktree. Use "$AHU_BIN" tasks and
-"$AHU_BIN" task <task-id> to inspect lifecycle and available results. Interactive
-screen inspection is host-specific; use it only when the selected session-host
-plugin provides that capability. Do not assume cmux is installed. A session
+"$AHU_BIN" task <task-id> to inspect lifecycle and available results. A
 launch or process exit does not prove completion; read the findings.
 Never read an agent definition and impersonate it using this harness's built-in
 Agent, Task, team, spawn_agent, or similar delegation tools. Never launch a

@@ -23,6 +23,7 @@ pub mod approval;
 pub mod auth_binding;
 pub mod catalog;
 pub mod cli;
+pub mod cmux;
 pub mod commands;
 pub mod config;
 pub mod context_lock;

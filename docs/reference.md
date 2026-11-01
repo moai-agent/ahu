@@ -2049,7 +2049,7 @@ Changing a pin does not migrate existing tasks to another package.
 
 ## Native hook safety inspection
 
-ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
+ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not install native hooks for headless tasks. Coordinator shortcuts are the one place ahu invokes cmux; see [coordinator sessions](#coordinator-sessions).
 
 Guarded headless admission is checked before execution and rechecked by the supervisor. Core does not recognize provider hook fingerprints, inspect provider bundle paths, remove provider environment variables, or set provider hook-disable controls. Unknown executable hooks and plugins refuse guarded admission unless covered by an existing harness invocation profile. Codex effective metadata must contain no executable hooks, including disabled or untrusted hooks. Generic harness flags, explicit approvals, bounded parsing and process/task ownership still apply. Native homes and settings remain in place. MCP configuration stays native; admission does not certify MCP subprocess behavior. A successful static inspection does not validate a native session or filesystem confinement.
 
@@ -2070,11 +2070,10 @@ remain tied to their reviewed versions.
 | Native artifact/source inspection | Bounded native settings and version-specific harness invocation controls | Effective trust, actual hook activation, native event delivery, and unknown builds |
 | Synthetic fixtures | Parser, refusal, environment preservation, and fixed-argv behavior under controlled inputs | Actual native harness behavior |
 | Real PTY tests | Terminal ownership, stdin/signal handling, restoration, and cancellation with test processes | Live harness terminal interface/session conformance |
-| Live cmux plumbing tests | Group/workspace operations and focus behavior with harmless startup processes | Native hooks or harness provider sessions |
 
 The status report deliberately labels its evidence `locally_inspected;
 live_untested`. Do not infer live harness conformance from installation,
-static inspection, PTY coverage, or cmux plumbing.
+static inspection, or PTY coverage.
 
 ## Committed agent context and evaluation
 
@@ -2229,6 +2228,30 @@ and request automatic approval. Plugins map that request to native flags; an
 unsupported combination fails rather than silently weakening permissions.
 OpenCode mini's reviewed version has no automatic interactive mode, so the direct
 automatic shortcut is refused; headless work mode remains a separate capability.
+
+#### cmux
+
+When the `cmux` CLI is installed outside every Git working tree, a coordinator
+shortcut uses what cmux offers for that harness, and prints what it did:
+
+| Harness | What ahu does |
+| --- | --- |
+| Claude Code | Starts cmux's `cmux-claude-wrapper`, which injects cmux's hooks for notifications and status |
+| Codex | Starts cmux's `cmux-codex-wrapper`, which carries cmux's hooks for that run only |
+| OpenCode, Kiro, Antigravity | Runs `cmux hooks setup --agent <name> --yes` first |
+| Other harnesses | Nothing |
+
+The wrappers find the real harness through `PATH` unless told otherwise, so ahu
+sets `CMUX_CUSTOM_CLAUDE_PATH` or `CMUX_CUSTOM_CODEX_PATH` to the executable it
+already vetted. A wrapper that is missing, not executable or inside a repository
+is skipped and the harness starts directly. `cmux hooks setup` writes native
+harness configuration (for example `~/.config/opencode/plugins/` and
+`~/.kiro/agents/cmux.json`); it is cmux's installer, run at your request by
+using a coordinator shortcut with cmux installed, and a failure is reported and
+never blocks the launch. Hooks cmux installs are native hooks like any other:
+guarded headless admission treats them as unreviewed integrations, so
+`ahu doctor` and `--work-mode` report them. ahu keeps no cmux workspace, group
+or session state, and delegated tasks never involve cmux.
 
 Rankings may include harnesses absent from `harness_preferences`: explicit
 shortcuts use those rankings, while automatic selection walks preferences.

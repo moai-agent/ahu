@@ -90,11 +90,25 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         )?;
     }
     crate::state::ensure_checkout_state(&repo.root)?;
+    // cmux, when installed, contributes what it offers for this harness; a
+    // generic harness has nothing to offer and is never wrapped.
+    let cmux = if runtime.is_generic() {
+        crate::cmux::Launch::default()
+    } else {
+        crate::cmux::Integration::detect()
+            .map(|cmux| cmux.prepare(harness, Path::new(&executable)))
+            .unwrap_or_default()
+    };
+    for note in &cmux.notes {
+        eprintln!("ahu: {}", display_safe(note));
+    }
     // The whole argument list, model included, so the line names exactly what
     // was launched rather than only the approval flags.
     eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
-    let mut command = std::process::Command::new(executable);
+    let mut command =
+        std::process::Command::new(cmux.program.as_deref().unwrap_or(Path::new(&executable)));
     command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    command.envs(cmux.env.iter().map(|(name, value)| (*name, value)));
     crate::telemetry::configure_coordinator(
         &mut command,
         &loaded
