@@ -2449,23 +2449,6 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
     Ok(0)
 }
 
-/// `ahu run-task --task-dir <dir>` — the fixed entrypoint the session provider starts.
-pub fn run_task(task_dir: &Path) -> Result<i32> {
-    let record = crate::task::load(task_dir)?;
-    if let Some(loaded) = crate::config::load(&record.worktree)? {
-        crate::telemetry::initialize_task(&loaded.config.telemetry, &record, None)?;
-    }
-    match launch::run_task(task_dir)? {
-        launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
-        launch::HarnessOutcome::Exited(status) => Err(crate::util::Error::new(format!(
-            "the harness exited unsuccessfully ({status})."
-        ))),
-        // The harness was terminated on request; the pane reports the
-        // cancellation itself rather than an unsuccessful exit.
-        launch::HarnessOutcome::Cancelled => Ok(1),
-    }
-}
-
 /// Resolve a launch identity from an optional `@name`.
 pub(crate) fn resolve_identity(
     repo: &Repo,

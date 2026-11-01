@@ -88,7 +88,6 @@ Commands:
                         Check readiness for native or explicit work-mode launches
   harness ID            Open a direct session using an installed harness plugin.
                         Installed aliases may also be used as commands.
-  run-task              Internal: run a prepared task
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
 
@@ -227,10 +226,7 @@ agent assignment options:
 
 Exit codes:
   0 success; 1 cancelled; 2 usage error; 3 unknown agent;
-  4 missing prerequisite; 5 run failure.
-
-run-task options:
-  --task-dir <path>     Directory holding the prepared task record";
+  4 missing prerequisite; 5 run failure.";
 
 pub const HELP: &str = "ahu — launch and coordinate repository agents
 
@@ -308,7 +304,6 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
-        "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
         "agents" | "eval" | "knowledge" | "mcp" | "harness" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
@@ -347,7 +342,6 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "harness" => "ahu harness ID — open an installed harness plugin's direct session",
         "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
-        "run-task" => "ahu run-task — internal task worker",
         "supervise" => "ahu supervise — internal task supervisor",
         _ => return None,
     })
@@ -496,9 +490,6 @@ pub enum Command {
     },
     Harness {
         selector: String,
-    },
-    RunTask {
-        task_dir: PathBuf,
     },
 }
 
@@ -898,7 +889,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "eval" => parse_eval(&args[1..]),
         direct if direct.starts_with('@') => parse_launch_backend(&args, stdin_available),
         "onboard" => parse_onboard(&args[1..]),
-        "run-task" => parse_run_task(&args[1..]),
         "launch" => bail!(
             "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
         ),
@@ -1263,23 +1253,6 @@ fn parse_onboard(rest: &[String]) -> Result<Command> {
         model,
         version,
     })
-}
-
-fn parse_run_task(rest: &[String]) -> Result<Command> {
-    let mut task_dir = None;
-    let mut index = 0;
-    while index < rest.len() {
-        match rest[index].as_str() {
-            "--task-dir" => {
-                task_dir = Some(PathBuf::from(value_for("--task-dir", rest, &mut index)?));
-            }
-            other => bail!("unknown option {other:?} for `ahu run-task`."),
-        }
-        index += 1;
-    }
-    let task_dir = task_dir
-        .ok_or_else(|| crate::util::Error::new("`ahu run-task` needs --task-dir <path>."))?;
-    Ok(Command::RunTask { task_dir })
 }
 
 fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
@@ -1980,21 +1953,15 @@ mod parser_tests {
 
     #[test]
     fn internal_workers_require_task_directory() {
-        for command in ["run-task", "supervise"] {
-            let task_dir = PathBuf::from("task directory");
-            let expected = if command == "run-task" {
-                Command::RunTask { task_dir }
-            } else {
-                Command::BatchSupervisor { task_dir }
-            };
-            assert_eq!(
-                parse([command, "--task-dir", "task directory"]).unwrap(),
-                expected
-            );
-            assert_usage(&[command], "--task-dir");
-            assert_usage(&[command, "--task-dir"], "--task-dir");
-        }
-        assert_usage(&["run-task", "--unknown"], "unknown option");
+        let command = "supervise";
+        assert_eq!(
+            parse([command, "--task-dir", "task directory"]).unwrap(),
+            Command::BatchSupervisor {
+                task_dir: PathBuf::from("task directory")
+            }
+        );
+        assert_usage(&[command], "--task-dir");
+        assert_usage(&[command, "--task-dir"], "--task-dir");
         for args in [
             vec!["supervise", "directory"],
             vec!["supervise", "--unknown", "directory"],
@@ -2715,7 +2682,6 @@ mod focused_help_tests {
             "mcp",
             "doctor",
             "harness",
-            "run-task",
             "supervise",
         ] {
             assert!(
@@ -2751,7 +2717,6 @@ mod focused_help_tests {
             ("lock", "--update refreshes .agents/ahu/lock.md"),
             ("mcp serve", "stdio MCP"),
             ("resume", "recorded native session"),
-            ("run-task", "Internal worker"),
             ("supervise", "Internal supervisor"),
         ] {
             assert!(help_for(Some(topic)).unwrap().contains(expected), "{topic}");

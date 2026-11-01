@@ -28,19 +28,6 @@ use std::time::{Duration, Instant};
 
 const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
 
-/// Owns the live foreground `run-task` process, whether its terminal uses a plugin
-/// or the caller's current terminal. The durable lock file lets inspection
-/// report activity without inferring it from a workspace alone.
-pub(crate) struct InteractiveTaskOwner {
-    _lock: Lock,
-}
-
-pub(crate) fn interactive_task_owner(dir: &Path) -> Result<InteractiveTaskOwner> {
-    Ok(InteractiveTaskOwner {
-        _lock: Lock::acquire(&dir.join("owner.lock"))?,
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

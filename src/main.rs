@@ -87,9 +87,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Ok(0)
             }
         },
-        // `run-task` is started by the selected session provider inside the task worktree and works from
-        // the task record alone, so it does not need repository discovery.
-        Command::RunTask { task_dir } => commands::run_task(&task_dir),
         Command::BatchSupervisor { task_dir } => ahu::headless::supervise(&task_dir),
         Command::BatchControl {
             action,
@@ -473,8 +470,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Plugins { .. }
                 | Command::PluginLifecycle { .. }
                 | Command::PluginsInstalled { .. }
-                | Command::PluginInvoke(_)
-                | Command::RunTask { .. } => unreachable!("handled above"),
+                | Command::PluginInvoke(_) => unreachable!("handled above"),
             })
         }
     }

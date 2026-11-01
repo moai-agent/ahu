@@ -973,18 +973,6 @@ fn cancellation_preserves_work_when_the_supervisor_finishes_or_record_becomes_un
 }
 
 #[test]
-fn run_task_refuses_invalid_project_configuration_before_starting_a_harness() {
-    let (_root, repo) = repository();
-    configured(&repo);
-    let (dir, _) = saved(&repo, "runinvalid01");
-    let before = std::fs::read(dir.join("task.json")).unwrap();
-    std::fs::write(config::config_path(&repo.root), "invalid = [").unwrap();
-    let error = run_task(&dir).unwrap_err().to_string();
-    assert!(error.contains("YAML frontmatter"), "{error}");
-    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
-}
-
-#[test]
 fn listing_omits_redundant_titles_and_preserves_short_task_branches() {
     let (_root, repo) = repository();
     let (dir, mut record) = saved(&repo, "short");

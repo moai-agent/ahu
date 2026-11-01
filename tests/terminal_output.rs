@@ -421,7 +421,6 @@ fn redirected_commands_match_explicit_plain_output() {
         &["knowledge", "lint"],
         &["knowledge", "lint", "--output", "json"],
         &["@missing", "--prompt", "fixture", "--dry-run"],
-        &["run-task", "--task-dir", "missing"],
     ];
     for args in cases {
         let run = |color: &str| {
