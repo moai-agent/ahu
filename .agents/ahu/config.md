@@ -16,6 +16,8 @@ ahu:
   model_rankings:
     antigravity:
     - gemini-3.1-pro-high
+    claude-code:
+    - claude-opus-5
     codex:
     - gpt-6-astra
     kiro:

@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 507266474029131eb378f8f5d9cd10f3ab2f0b9e128c02b5bedca5750678ace2
+  digest: 6537e4b8177df5a0e6e5852631e1ab7e4ee527661a211210ea8cb922c145fed7
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -94,8 +94,8 @@ ahu:
     digest: b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8
     executable: false
     path: .agents/ahu/agents/test-kiro.md
-  - bytes: 722
-    digest: b4898ea8c56ba185f9b99731fcecca90effaf4088612cb7f42cf09f0f24f98b1
+  - bytes: 759
+    digest: b7b70f8ec9e2cd6b9f7f7dab370b2dba485c924d23b3c9f819291ebca2ca3b14
     executable: false
     path: .agents/ahu/config.md
   - bytes: 553
