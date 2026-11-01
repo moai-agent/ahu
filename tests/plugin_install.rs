@@ -739,7 +739,7 @@ fn terminal_external_workspace_task_retains_its_plugin_until_removal() {
         binding: binding.clone(),
         policy_revision: common::git(repo.path(), &["rev-parse", "HEAD"]),
         package: "fixture-package".into(),
-        executable: ahu::interactive::external::Executable {
+        executable: ahu::plugin_package::Executable {
             path: "bin/host".into(),
             protocol_version: 1,
             timeout_ms: 5_000,

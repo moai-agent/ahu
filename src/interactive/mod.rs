@@ -32,7 +32,7 @@ pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
         Err(_) => return Err(crate::util::Error::new("invalid session host selection")),
     }
     if let Some(repo) = repo {
-        let enabled: Vec<_> = plugins::project::inventory(&repo.root)?
+        let enabled: Vec<_> = crate::plugin_package::project::inventory(&repo.root)?
             .bindings
             .into_iter()
             .filter(|s| {

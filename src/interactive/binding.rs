@@ -1,7 +1,7 @@
 //! Core-owned durable host identity. Neither a receipt nor a manifest grants execution.
-use super::{external::Executable, plugins::PluginStatus};
 use crate::git::Repo;
 use crate::plugin_binding::{Binding, Grant};
+use crate::plugin_package::{Executable, PluginStatus};
 use crate::util::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -59,7 +59,7 @@ fn package(repo: &Repo, binding: &Binding, discovered: Option<&PathBuf>) -> Resu
         crate::plugin_install::verify_installed(&path, binding)?;
         path.join("package")
     };
-    super::plugins::local::read_package(&root)
+    crate::plugin_package::local::read_package(&root)
 }
 
 fn executable_digest(status: &PluginStatus, binding: &Binding) -> Result<String> {
@@ -76,7 +76,7 @@ fn executable_digest(status: &PluginStatus, binding: &Binding) -> Result<String>
 }
 
 pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)> {
-    let inventory = super::plugins::project::inventory(&repo.root)?;
+    let inventory = crate::plugin_package::project::inventory(&repo.root)?;
     let binding = inventory
         .bindings
         .into_iter()
@@ -84,7 +84,7 @@ pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)
         .ok_or_else(|| refused("session host requires a committed project binding"))?
         .binding;
     authorize(&binding)?;
-    let discovered_root = super::plugins::local::discover()?
+    let discovered_root = crate::plugin_package::local::discover()?
         .into_iter()
         .find(|p| p.id == id)
         .and_then(|p| p.manifest)
@@ -110,19 +110,20 @@ pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)
 
 /// Verify current authority and the original committed identity without executing code.
 pub(crate) fn verify(repo: &Repo, frozen: &FrozenHost) -> Result<PluginStatus> {
-    let current = super::plugins::project::inventory(&repo.root)?
+    let current = crate::plugin_package::project::inventory(&repo.root)?
         .bindings
         .into_iter()
         .find(|s| s.binding.id == frozen.binding.id)
         .ok_or_else(|| refused("recorded session host binding is absent"))?
         .binding;
     authorize(&current)?;
-    let original = super::plugins::project::inventory_at(&repo.root, &frozen.policy_revision)?
-        .bindings
-        .into_iter()
-        .find(|s| s.binding.id == frozen.binding.id)
-        .ok_or_else(|| refused("recorded session host has no committed provenance"))?
-        .binding;
+    let original =
+        crate::plugin_package::project::inventory_at(&repo.root, &frozen.policy_revision)?
+            .bindings
+            .into_iter()
+            .find(|s| s.binding.id == frozen.binding.id)
+            .ok_or_else(|| refused("recorded session host has no committed provenance"))?
+            .binding;
     authorize(&original)?;
     if original != frozen.binding {
         return Err(refused(

@@ -1,9 +1,9 @@
 //! Inert discovery and explicit preparation; activation stays in plugin lifecycle commands.
 use super::{apply_plan, safe_new_path, validate_plan};
 use crate::git::Repo;
-use crate::interactive::plugins::{PluginStatus, local};
 use crate::launcher::Console;
 use crate::plugin_binding::{Binding, Compatibility, Source, SourceKind};
+use crate::plugin_package::{PluginStatus, local};
 use crate::util::{Error, Result};
 use std::path::Path;
 

@@ -28,7 +28,7 @@ struct Manifest {
     package: String,
     host_api: u32,
     cargo_manifest: String,
-    executable: Option<crate::interactive::external::Executable>,
+    executable: Option<crate::plugin_package::Executable>,
     entrypoint: Option<crate::plugin_exec::Entrypoint>,
     // General OKF metadata is preserved for inspection but never interpreted
     // as host capabilities or execution settings.

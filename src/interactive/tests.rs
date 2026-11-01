@@ -161,7 +161,7 @@ fn frozen_test_host() -> crate::interactive::binding::FrozenHost {
         },
         policy_revision: "0".repeat(40),
         package: "test-package".into(),
-        executable: crate::interactive::external::Executable {
+        executable: crate::plugin_package::Executable {
             path: "bin/host".into(),
             protocol_version: 2,
             timeout_ms: 5_000,

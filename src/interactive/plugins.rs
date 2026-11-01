@@ -1,29 +1,10 @@
 //! External plugin inventory and per-process selection.
 //! Discovery reads metadata only; executable activation is explicitly separate.
-pub(crate) mod local;
-pub mod project;
+use crate::plugin_package::{local, project};
 
+use crate::plugin_package::PluginStatus;
 use crate::util::{Error, ErrorKind, Result};
-use serde::Serialize;
-use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-
-#[derive(Debug, Serialize)]
-pub struct PluginStatus {
-    pub id: String,
-    pub package: String,
-    pub host_api: u32,
-    pub selected: bool,
-    pub selection_source: &'static str,
-    pub origin: &'static str,
-    pub manifest: Option<PathBuf>,
-    pub cargo_manifest: Option<PathBuf>,
-    pub executable: Option<super::external::Executable>,
-    pub entrypoint: Option<crate::plugin_exec::Entrypoint>,
-    pub activation_blocker: Option<&'static str>,
-    pub metadata: BTreeMap<String, Value>,
-}
 
 /// Inspect selection intent independently of authority, source verification and readiness.
 pub fn inventory() -> Result<Vec<PluginStatus>> {

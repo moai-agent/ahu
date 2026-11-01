@@ -2,8 +2,8 @@
 //! same-user code, not sandboxed code. Results are data, never execution authority.
 //! Consumers must validate operation-specific payloads before applying effects.
 use crate::git::Repo;
-use crate::interactive::plugins::{local, project};
 use crate::plugin_binding::{Binding, Grant};
+use crate::plugin_package::{local, project};
 use crate::util::{Error, Result};
 use std::path::PathBuf;
 use std::sync::Arc;

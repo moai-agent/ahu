@@ -1,8 +1,9 @@
 //! A persistent, bounded executable transport for Host V2.
-use super::{plugins::PluginStatus, v2::*};
+use super::v2::*;
+use crate::plugin_package::PluginStatus;
 use crate::util::{Error, ErrorKind, Result};
 use ahu_host_api::protocol::{self, ErrorCode, Hello, Request, Response};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -20,30 +21,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Executable {
-    pub path: String,
-    pub protocol_version: u32,
-    #[serde(default = "default_timeout")]
-    pub timeout_ms: u64,
-}
-fn default_timeout() -> u64 {
-    5000
-}
-impl Executable {
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.protocol_version != protocol::VERSION || !(100..=30_000).contains(&self.timeout_ms)
-        {
-            return Err(Error::new(
-                "executable requires protocol_version = 2 and timeout_ms between 100 and 30000",
-            )
-            .with_kind(ErrorKind::Usage));
-        }
-        Ok(())
-    }
-}
 
 struct RpcError {
     error: Error,
@@ -298,7 +275,7 @@ impl ExternalHost {
             .with_kind(ErrorKind::Prerequisite)
         })?;
         spec.validate()?;
-        let mut source = super::plugins::local::executable_file(status)?;
+        let mut source = crate::plugin_package::local::executable_file(status)?;
         let base = std::env::temp_dir().canonicalize()?;
         validate_snapshot_base(&base)?;
         let private_dir = std::fs::Permissions::from_mode(0o700);

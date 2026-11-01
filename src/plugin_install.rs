@@ -341,7 +341,7 @@ pub(crate) fn verify(root: &Path, binding: &Binding) -> Result<()> {
     if digest(root)? != binding.source.sha256 {
         bail!("plugin content SHA-256 pin mismatch");
     }
-    let status = crate::interactive::plugins::local::read_package(root)?;
+    let status = crate::plugin_package::local::read_package(root)?;
     if status.id != binding.id || status.host_api != binding.compatibility.host_api {
         bail!("installed manifest identity or host API does not match the project binding");
     }
@@ -495,7 +495,7 @@ pub(crate) fn verify_installed(path: &Path, binding: &Binding) -> Result<()> {
 }
 
 fn committed(repo: &crate::git::Repo, id: &str) -> Result<Option<Binding>> {
-    Ok(crate::interactive::plugins::project::inventory(&repo.root)?
+    Ok(crate::plugin_package::project::inventory(&repo.root)?
         .bindings
         .into_iter()
         .find(|s| s.binding.id == id)
@@ -814,7 +814,7 @@ pub(crate) fn verified_packages(repo: &crate::git::Repo) -> Result<Vec<(Binding,
 
 pub fn list(root: &Path, output_json: bool) -> Result<()> {
     let repo = crate::git::discover(root)?;
-    let bindings = crate::interactive::plugins::project::inventory(&repo.root)?;
+    let bindings = crate::plugin_package::project::inventory(&repo.root)?;
     let mut rows = Vec::new();
     for (binding, path) in verified_packages(&repo)? {
         let current = bindings
@@ -823,7 +823,7 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
             .find(|s| s.binding.id == binding.id);
         let matches =
             current.map(|s| key(&s.binding)).transpose()?.as_deref() == Some(&key(&binding)?);
-        let metadata = crate::interactive::plugins::local::read_package(&path.join("package"))?;
+        let metadata = crate::plugin_package::local::read_package(&path.join("package"))?;
         let activation_supported = metadata.executable.is_some() || metadata.entrypoint.is_some();
         rows.push(serde_json::json!({
             "id": binding.id, "version": binding.version, "source": binding.source,

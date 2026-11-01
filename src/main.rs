@@ -54,7 +54,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             project,
         } => {
             if project {
-                ahu::interactive::plugins::project::list(&std::env::current_dir()?, output_json)?;
+                ahu::plugin_package::project::list(&std::env::current_dir()?, output_json)?;
             } else if probe {
                 ahu::interactive::plugins::probe(output_json)?;
             } else {

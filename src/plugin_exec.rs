@@ -1,6 +1,6 @@
 //! Host-authorized, one-shot executable plugins. Inventory/install never call this API.
 //! This transport bounds communication and lifetime; it is not an OS sandbox.
-use crate::{git::Repo, interactive::plugins::local, plugin_binding::Grant};
+use crate::{git::Repo, plugin_binding::Grant, plugin_package::local};
 use ahu_host_api::protocol::from_slice;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -297,7 +297,7 @@ fn authorized_binding(repo: &Repo, grant: &HostGrant) -> Result<crate::plugin_bi
     if repo.identity() != grant.repository {
         return Err(Failure::before(Code::Denied));
     }
-    let binding = crate::interactive::plugins::project::inventory(&repo.root)
+    let binding = crate::plugin_package::project::inventory(&repo.root)
         .map_err(|_| Failure::before(Code::Unavailable))?
         .bindings
         .into_iter()
