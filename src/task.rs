@@ -196,7 +196,7 @@ pub struct TaskRecord {
     pub reliability_warning: Option<String>,
     /// Absent for headless tasks and tasks created before external host identity was recorded.
     #[serde(default)]
-    pub session_host: Option<crate::interactive::binding::FrozenHost>,
+    pub session_host: Option<serde_json::Value>,
     pub session_ref: Option<String>,
     pub state: TaskState,
 }

@@ -466,24 +466,6 @@ pub(crate) fn discover() -> Result<Vec<PluginStatus>> {
     Ok(packages)
 }
 
-// The package root and every relative component are pinned again at activation.
-// Copying from this handle avoids executing a subsequently replaced pathname.
-pub(crate) fn executable_file(status: &PluginStatus) -> Result<File> {
-    let root = status
-        .manifest
-        .as_ref()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| invalid("local package has no manifest root"))?;
-    let executable = status
-        .executable
-        .as_ref()
-        .ok_or_else(|| invalid(LOADING_BLOCKER))?;
-    executable.validate()?;
-    let file = open_relative(&open_root(root)?, &executable.path)?;
-    validate_executable(&file)?;
-    Ok(file)
-}
-
 fn open_relative(directory: &File, path: &str) -> Result<File> {
     let parts: Vec<_> = path.split('/').collect();
     if parts.len() > 32

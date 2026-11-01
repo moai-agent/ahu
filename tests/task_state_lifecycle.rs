@@ -189,14 +189,6 @@ fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
             .join("tasks")
             .join(&plan.task_id)
     );
-    // And the location reaches the child through the startup command ahu
-    // builds, so nothing has to be exported for the session to find it.
-    let startup =
-        ahu::interactive::startup_command(Path::new("/usr/local/bin/ahu"), &plan.task_dir);
-    assert!(
-        startup.contains(&plan.task_dir.to_string_lossy().to_string()),
-        "{startup}"
-    );
     // Planning creates nothing in the invoking checkout's own store.
     assert!(
         !repo

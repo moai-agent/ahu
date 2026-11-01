@@ -467,7 +467,6 @@ pub enum Command {
     },
     Plugins {
         output_json: bool,
-        probe: bool,
         project: bool,
     },
     PluginsInstalled {
@@ -728,32 +727,26 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             }
             [] => Ok(Command::Plugins {
                 output_json: false,
-                probe: false,
                 project: false,
             }),
             [flag, value] if flag == "--output" && value == "json" => Ok(Command::Plugins {
                 output_json: true,
-                probe: false,
                 project: false,
             }),
-            [flag] if matches!(flag.as_str(), "--probe" | "--project") => Ok(Command::Plugins {
+            [flag] if flag == "--project" => Ok(Command::Plugins {
                 output_json: false,
-                probe: flag == "--probe",
                 project: flag == "--project",
             }),
             [flag, output, value]
-                if matches!(flag.as_str(), "--probe" | "--project")
-                    && output == "--output"
-                    && value == "json" =>
+                if flag == "--project" && output == "--output" && value == "json" =>
             {
                 Ok(Command::Plugins {
                     output_json: true,
-                    probe: flag == "--probe",
                     project: flag == "--project",
                 })
             }
             _ => bail!(
-                "expected ahu plugins [--project|--probe] [--output json] or plugins install|update|enable|disable|remove ID or plugins digest PATH"
+                "expected ahu plugins [--project] [--output json] or plugins install|update|enable|disable|remove ID or plugins digest PATH"
             ),
         },
         "mcp" => match args.get(1).map(String::as_str) {

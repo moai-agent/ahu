@@ -8,10 +8,9 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ahu::harness::{self, LaunchRequest};
-use ahu::interactive;
 use ahu::util::shell_single_quote;
 use common::{HOSTILE_PROMPT, TestRepo, fake_harness};
 
@@ -220,42 +219,6 @@ fn shell_quoting_survives_every_metacharacter() {
     }
 }
 
-#[test]
-fn the_cmux_startup_command_carries_no_prompt_and_survives_a_hostile_path() {
-    let temp = tempfile::TempDir::new().unwrap();
-    // A task directory whose name would break naive quoting.
-    let nasty = temp.path().join("task dir with 'quote' and $VAR");
-    std::fs::create_dir_all(&nasty).unwrap();
-    let recorder = temp.path().join("argv.txt");
-    let exe = write_argv_recorder(temp.path(), &recorder);
-
-    let command = interactive::startup_command(&exe, &nasty);
-    assert!(!command.contains("$(touch"));
-    assert!(!command.contains(HOSTILE_PROMPT));
-
-    // cmux types this into an interactive shell, so run it through one.
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .status()
-        .expect("sh runs");
-    assert!(status.success(), "startup command failed: {command}");
-
-    let recorded: Vec<String> = std::fs::read_to_string(&recorder)
-        .unwrap()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        recorded,
-        vec![
-            "run-task".to_string(),
-            "--task-dir".to_string(),
-            nasty.to_string_lossy().to_string(),
-        ]
-    );
-}
-
 /// The whole path: a prepared task record, started the way cmux starts it,
 /// reaching a stand-in harness with the prompt intact and nothing executed.
 #[test]
@@ -413,26 +376,6 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("changed identity"), "{stderr}");
     assert!(!recorder.exists(), "the harness must not have been started");
-}
-
-fn write_argv_recorder(dir: &Path, record: &Path) -> PathBuf {
-    let script = dir.join("fake-ahu");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\n\
-             : > '{record}'\n\
-             for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}'; done\n",
-            record = record.display()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    script
 }
 
 /// Build the same record `launch::execute` writes, without needing cmux.

@@ -55,3 +55,74 @@ pub struct PluginStatus {
     pub activation_blocker: Option<&'static str>,
     pub metadata: BTreeMap<String, Value>,
 }
+
+/// Inspect discovered local packages and committed bindings without verifying
+/// authority or sources and without executing anything.
+pub fn inventory() -> Result<Vec<PluginStatus>> {
+    let repo = crate::git::discover(&std::env::current_dir()?);
+    let mut plugins = local::discover()?;
+    if let Ok(repo) = &repo {
+        for status in project::inventory(&repo.root)?.bindings {
+            let binding = status.binding;
+            // A discovery path takes precedence, just as it does at activation.
+            if plugins.iter().any(|p| p.id == binding.id) {
+                continue;
+            }
+            let metadata = (|| -> Result<PluginStatus> {
+                let store = crate::state::checkout_root(&repo.primary_root()?)?.join("plugins");
+                let installation = crate::plugin_install::installed(&store, &binding)?;
+                crate::state::confine_existing_dir(&installation)?;
+                let metadata = local::read_package(&installation.join("package"))?;
+                if metadata.id != binding.id {
+                    return Err(Error::new("installed package metadata identity mismatch"));
+                }
+                Ok(metadata)
+            })();
+            // Missing or invalid installed metadata is reported, never promoted
+            // to verified authority.
+            let mut plugin = metadata.unwrap_or_else(|_| PluginStatus {
+                id: binding.id,
+                package: "unknown".into(),
+                host_api: binding.compatibility.host_api,
+                selected: false,
+                selection_source: "not-selected",
+                origin: "committed-binding",
+                manifest: None,
+                cargo_manifest: None,
+                executable: None,
+                entrypoint: None,
+                activation_blocker: Some(
+                    "Installed package metadata unavailable; inspect the binding and installation.",
+                ),
+                metadata: BTreeMap::new(),
+            });
+            if plugin.manifest.is_some() {
+                plugin.origin = "installed-manifest";
+            }
+            plugins.push(plugin);
+        }
+    }
+    plugins.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(plugins)
+}
+
+pub fn list(output_json: bool) -> Result<()> {
+    let plugins = inventory()?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"schema_version":1,"plugins":plugins}))?
+        );
+    } else {
+        for status in plugins {
+            println!("{} ({}, {})", status.id, status.package, status.origin);
+            if let Some(blocker) = status.activation_blocker {
+                println!("  {blocker}");
+            }
+        }
+        println!(
+            "AHU_PLUGIN_PATH lists absolute local package directories. Inventory does not verify authority or sources, execute plugins, or probe a harness."
+        );
+    }
+    Ok(())
+}
