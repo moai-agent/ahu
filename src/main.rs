@@ -444,9 +444,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         other => {
             let repo = commands::repo_from_cwd()?;
             commands::with_stdio(|console| match other {
-                Command::Interactive { focus, agent } => {
-                    commands::interactive(console, &repo, focus, agent.as_deref())
-                }
                 Command::Setup => ahu::setup::run(console, &repo),
                 Command::SetupHarnessPlugins => ahu::setup::list_harness_plugins(console, &repo),
                 Command::SetupHarnessPlugin { package } => ahu::setup::prepare_harness_plugin(
@@ -475,7 +472,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     task_id,
                     output_json,
                 } => commands::task_cmd(console, &repo, &task_id, output_json),
-                Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Remove { task_id } => commands::remove_cmd(console, &repo, &task_id),
                 Command::Message { task_id, text } => {
                     commands::message_cmd(console, &repo, &task_id, &text)

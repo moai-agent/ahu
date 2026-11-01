@@ -1798,9 +1798,7 @@ task_id=abc123  # replace with a task ID from ahu tasks
 ahu task "$task_id" --output json
 ```
 
-Task commands accept a full task ID or an unambiguous prefix. `ahu focus`
-uses the newest record matching its prefix without checking ambiguity; use
-a full ID when focusing a task. Inspection reads the saved record and
+Task commands accept a full task ID or an unambiguous prefix. Inspection reads the saved record and
 attempt metadata, then checks the recorded session-owner signal. A confirmed
 missing owner reconciles a live record to `exited` under its task-state lock;
 an unreadable or unavailable signal reports `unknown` and does not mark the task

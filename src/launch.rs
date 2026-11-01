@@ -16,7 +16,7 @@ use crate::hooks::{self, HookInventory};
 use crate::interactive;
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
-use crate::state::{self, LaunchLock};
+use crate::state;
 use crate::task::{self, LaunchIdentity, LaunchMode, TaskRecord, TaskState};
 use crate::util::{Error, Result};
 
@@ -528,80 +528,6 @@ pub(crate) fn prepared_record(
     }
 }
 
-/// Undo the worktree a failed launch created, and say so when Git refuses.
-///
-/// `git worktree remove` will not force-delete a checkout that holds work, and
-/// materialization can legitimately leave one dirty by copying uncommitted
-/// agent configuration into it. When that happens the worktree and its branch
-/// stay, so the failure that is reported has to name them: they are the user's
-/// to inspect, and nothing else is going to mention them.
-fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
-    // A dead pointer in the task index degrades into a lead at resolution
-    // time, but removing it here keeps the index honest about live tasks.
-    let _ = crate::task_index::remove_in(repo, &plan.task_id);
-    // The record lives inside the worktree, so removing the worktree takes it.
-    // If Git refuses, the record is removed on its own so no half-prepared
-    // task is left claiming to be one.
-    if let Err(refused) = git::remove_worktree(repo, &plan.worktree, &plan.branch) {
-        discard_task_dir(&plan.task_dir);
-        let kind = cause.kind();
-        return Error::new(format!(
-            "{cause}\n\n\
-             The task checkout ahu created for this launch could not be removed, so it is still \
-             here along with its branch:\n  \
-             worktree {}\n  branch   {}\n\
-             {refused}\n\
-             ahu does not force-remove a checkout that holds work. Inspect it, then remove it \
-             yourself once you are sure nothing in it is needed. `ahu tasks` lists it as a task \
-             worktree with no record until then.",
-            plan.worktree.display(),
-            plan.branch
-        ))
-        .with_kind(kind);
-    }
-    discard_task_dir(&plan.task_dir);
-    cause
-}
-
-/// Only affirmative non-creation permits rollback. Do not rewrite the record:
-/// run-task may already have updated it while workspace discovery was failing.
-fn workspace_creation_failed(
-    repo: &Repo,
-    plan: &LaunchPlan,
-    error: interactive::v2::SessionCreationError,
-) -> Error {
-    match error {
-        interactive::v2::SessionCreationError::NotCreated(cause) => {
-            rollback_worktree(repo, plan, cause)
-        }
-        interactive::v2::SessionCreationError::OutcomeUnknown(cause) => {
-            let kind = cause.kind();
-            Error::new(format!(
-                "{cause}\n\n\
-                 Task {} may have started. Its record, worktree and branch are retained:\n  \
-                 record   {}\n  worktree {}\n  branch   {}\n\
-                 Inspect `ahu task {}` and the selected session host for a workspace using this \
-                 exact worktree directory. No terminal outcome has been recorded by this failure. \
-                 Reconcile the session before retrying or cleaning up: if it is running, use `ahu \
-                 cancel {}` and verify termination. If ownership or termination cannot be \
-                 confirmed, preserve the resources. Only after confirming no session is using the \
-                 checkout, inspect its changes. Use `ahu remove {}` if the record is terminal; if \
-                 it remains starting with no session, remove the checkout manually with non-forced \
-                 `git worktree remove` and then its branch with `git branch -d`. Do not invent a \
-                 terminal task state to permit cleanup.",
-                plan.task_id,
-                plan.task_dir.join("task.json").display(),
-                plan.worktree.display(),
-                plan.branch,
-                plan.task_id,
-                plan.task_id,
-                plan.task_id,
-            ))
-            .with_kind(kind)
-        }
-    }
-}
-
 /// Reload and update task metadata under the same lock used for task-state
 /// transitions so concurrent startup and coordinator writes cannot restore
 /// stale records.
@@ -621,16 +547,6 @@ fn update_task_record_locked(
     Ok(())
 }
 
-fn record_created_session(
-    task_dir: &Path,
-    record: &mut TaskRecord,
-    session_ref: &str,
-) -> Result<()> {
-    update_task_record_locked(task_dir, record, |latest| {
-        latest.session_ref = Some(session_ref.to_owned());
-    })
-}
-
 fn record_runtime_metadata(
     task_dir: &Path,
     record: &mut TaskRecord,
@@ -643,21 +559,6 @@ fn record_runtime_metadata(
     })
 }
 
-/// Remove a task directory a failed launch created, but never through a path
-/// ahu would refuse to write to.
-///
-/// One of the ways a launch fails here is a repository that committed a link at
-/// the worktree's `.ahu`. Deleting the task directory by name would follow that
-/// same link and take the deletion outside the checkout, which would turn a
-/// refusal into the damage the refusal exists to prevent. A path that cannot be
-/// validated is left exactly as it is; the error already tells the user the
-/// worktree was kept.
-fn discard_task_dir(task_dir: &Path) {
-    if state::confine_existing_dir(task_dir).is_ok() {
-        let _ = std::fs::remove_dir_all(task_dir);
-    }
-}
-
 /// Result of a successful launch.
 #[derive(Debug, Clone)]
 pub struct Launched {
@@ -665,175 +566,6 @@ pub struct Launched {
     pub task_dir: PathBuf,
     /// Non-fatal things the user should know, such as a reconciled anchor.
     pub notes: Vec<String>,
-}
-
-/// Execute a plan: create the worktree, task record, and selected provider session.
-pub fn execute(
-    repo: &Repo,
-    loaded: &LoadedConfig,
-    plan: &LaunchPlan,
-    prompt: &str,
-    focus: bool,
-) -> Result<Launched> {
-    let plan = plan.clone();
-    // Interactive admission runs in the submitting checkout. Headless callers
-    // perform their native probe only after their isolation policy is admitted.
-    crate::native_admission::validate_launch(
-        &repo.root,
-        &plan.pair.harness,
-        &plan.pair.model,
-        plan.permissions,
-        "interactive",
-        plan.enforcement
-            .harness_version
-            .as_deref()
-            .ok_or_else(|| Error::new("missing frozen native version"))?,
-        &plan.harness_executable,
-    )?;
-    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
-    let mut notes = Vec::new();
-
-    // The selected session provider must be reachable before a worktree is
-    // created, so a missing provider never leaves an orphan worktree.
-    let (session_host, frozen_host) = interactive::discover_for_launch(repo)
-        .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
-    if let Some(host) = &session_host {
-        host.check_capabilities()?;
-    }
-
-    if git::branch_exists(repo, &plan.branch)? {
-        bail!(
-            "branch {} already exists; ahu will not reuse or move it.",
-            plan.branch
-        );
-    }
-    let base = plan
-        .base_commit
-        .as_deref()
-        .ok_or_else(|| Error::new("the launch plan has no base commit"))?;
-    crate::task_handles::reserve(repo, &plan.task_id, plan.task_name.as_deref(), &plan.title)?;
-    // `.worktrees/` ignores itself, so task checkouts never show up in
-    // `git status` and cannot be committed by accident.
-    state::ensure_worktrees_root(&repo.root)?;
-    git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
-
-    // From here on, a failure must clean up the worktree it just made, but only
-    // while no session could have started in it.
-    let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
-        Ok(report) => report,
-        Err(e) => return Err(rollback_worktree(repo, &plan, e)),
-    };
-    // The task's own state directory, created now that its worktree exists. A
-    // repository that committed a link at `.ahu` or `.ahu/state` is refused
-    // here, before a record or a prompt is written through it.
-    if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
-        return Err(rollback_worktree(repo, &plan, e));
-    }
-    if !materialize.concurrently_modified.is_empty() {
-        notes.push(format!(
-            "agent configuration changed while the task was being prepared: {}. \
-             The worktree holds the version copied at submission.",
-            materialize.concurrently_modified.join(", ")
-        ));
-    }
-
-    let mut record = prepared_record(repo, loaded, &plan, prompt, materialize);
-    record.session_host = frozen_host;
-
-    if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
-        return Err(rollback_worktree(repo, &plan, e));
-    }
-    if let Err(e) = crate::task_index::register(
-        &repo.identity(),
-        &plan.task_id,
-        &plan.worktree,
-        crate::task_index::StoreKind::Worktree,
-    ) {
-        return Err(rollback_worktree(repo, &plan, e));
-    }
-
-    if let Some(session_host) = session_host {
-        let executable = std::env::current_exe()
-            .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
-        let startup = interactive::startup_command(&executable, &plan.task_dir);
-        let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
-        let manager = interactive::session::SessionManager::new(session_host.as_ref(), repo);
-        let created = match manager.create_task_session(
-            &title,
-            &plan.summary,
-            &plan.worktree,
-            &startup,
-            focus,
-        ) {
-            Ok(created) => created,
-            Err(e) => return Err(workspace_creation_failed(repo, &plan, e)),
-        };
-        finish_workspace_launch(&plan.task_dir, &mut record, &manager, &created, &mut notes);
-        // A session host starts the task in a separate workspace process. The
-        // repository lock protects worktree and workspace creation only; the
-        // agent's lifetime must not block the next assignment.
-        drop(_lock);
-    } else {
-        // The current-terminal backend runs the harness in this process. Drop
-        // the coordination lock before waiting for the interactive session so
-        // another agent can be launched while this one is working.
-        drop(_lock);
-        match run_task(&plan.task_dir)? {
-            HarnessOutcome::Exited(status) if !status.success() => {
-                bail!(
-                    "the harness exited unsuccessfully ({status}); the task worktree and record are retained."
-                );
-            }
-            HarnessOutcome::Exited(_) | HarnessOutcome::Cancelled => {}
-        }
-        record = task::load(&plan.task_dir)?;
-    }
-
-    Ok(Launched {
-        record,
-        task_dir: plan.task_dir.clone(),
-        notes,
-    })
-}
-
-fn finish_workspace_launch(
-    task_dir: &Path,
-    record: &mut TaskRecord,
-    manager: &interactive::session::SessionManager<'_>,
-    created: &interactive::v2::CreatedSession,
-    notes: &mut Vec<String>,
-) {
-    // The session may already be running. Persist its opaque reference before
-    // any best-effort status or presentation updates.
-    if let Err(e) = record_created_session(task_dir, record, &created.session_ref) {
-        notes.push(format!(
-            "the interactive session started but its task record could not be updated: {e}"
-        ));
-        return;
-    }
-    // Publication reloads under the task-state lock. If cancellation won that
-    // lock, cancel may already have returned without a workspace to close. If
-    // publication won, cancel's confirmation read will see these identifiers.
-    if record.state == TaskState::Cancelled {
-        if let Err(error) = manager.close_task_session(record) {
-            notes.push(format!(
-                "cancellation confirmed, but session close failed: {error}"
-            ));
-        }
-        return;
-    }
-    if let Err(e) = manager.set_task_status(
-        record,
-        &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
-    ) {
-        notes.push(format!("could not set the sidebar status: {e}"));
-    }
-    if let Err(e) = manager.set_agent_metadata(record) {
-        notes.push(format!("could not set session agent metadata: {e}"));
-    }
-    if let Err(e) = manager.expand_task_session(record) {
-        notes.push(format!("could not expand the interactive session: {e}"));
-    }
 }
 
 /// Reconcile recorded tasks against their session host, so sessions closed outside ahu do not

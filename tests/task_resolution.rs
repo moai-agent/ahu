@@ -414,25 +414,6 @@ fn a_record_describing_another_task_is_refused() {
     assert!(text.contains("Nothing was done"), "{text}");
 }
 
-/// `ahu focus` resolves a registered task from a sibling checkout.
-#[test]
-fn focus_resolves_through_the_task_index() {
-    let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let scenario = Scenario::new();
-    let a = fixture();
-    let c = sibling(&a);
-    let id = "006aa590-1234-7e5f-8a9b-0c1d2e3f4a51";
-    prepare_registered_task(&a, id);
-
-    let out = ahu_at(&scenario, c.path(), &["focus", id]);
-    let text = text_of(&out);
-    assert_eq!(out.status.code(), Some(5), "{text}");
-    assert!(
-        text.contains("has no recorded interactive session"),
-        "{text}"
-    );
-}
-
 /// `ahu task` resolves a registered task from a sibling checkout and hands
 /// back the checkout and launch base that reviewing it with Git needs.
 #[test]

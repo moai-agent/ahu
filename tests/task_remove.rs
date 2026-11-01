@@ -409,7 +409,8 @@ fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
     record.session_ref = Some("legacy-workspace".into());
     task::save(&dir, &record, "current work").unwrap();
     let before = std::fs::read(dir.join("task.json")).unwrap();
-    for command in ["focus", "remove"] {
+    let command = "remove";
+    {
         let output = common::ahu()
             .current_dir(repo.path())
             .args([command, id])

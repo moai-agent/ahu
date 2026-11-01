@@ -68,7 +68,6 @@ Commands:
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
-  focus <task-id>       Focus a task through its recorded session-host plugin
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
                         Append an operator message; subsequent flags are literal text
@@ -112,8 +111,6 @@ Options:
   --repo <path>         Select a repository checkout before the command.
                         Also accepts --repo=<path>; paths in the command are
                         relative to this checkout. No environment override.
-  --no-focus            Open the interactive launcher without switching to the new
-                        session after launch: `ahu --no-focus`. Select @name there.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -208,8 +205,6 @@ doctor options:
   --work-mode           Check explicit headless work mode; native configuration is not inspected
 
 agent assignment options:
-  Scripted assignments already leave focus unchanged; omit --no-focus.
-
   --name <name>        Reserve an immutable @name for this task in the repository.
                         By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
@@ -249,8 +244,8 @@ pub const HELP: &str = "ahu — launch and coordinate repository agents
 
 Usage: ahu [--repo PATH] [COMMAND]
 
-Start the launcher with `ahu`, or run a registered agent with
-`ahu @agent 'task prompt'`.
+Delegate to a registered agent with `ahu @agent --headless --prompt TEXT`,
+or start a coordinator (`ahu claude`, `ahu codex`, `ahu agy`).
 
 Commands:
   setup                 Configure this project for ahu
@@ -264,7 +259,7 @@ Commands:
   approve|reject ID     Resolve a task's pending MCP approval request
   resume ID --prompt-file PATH
   cleanup|remove ID     Clean headless captures or remove a terminal task
-  focus|message ID ...  Focus a task or send it a message
+  message ID ...        Send a task a message
   eval run|report       Run and compare local agent evaluations
   migrate               Preview/apply the explicit shared-policy format migration
   knowledge lint        Check configured OKF bundles
@@ -320,7 +315,6 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
-        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task to the front through its recorded session-host plugin.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
@@ -388,10 +382,6 @@ pub enum Command {
     Version,
     Explain {
         format: ExplainFormat,
-    },
-    Interactive {
-        focus: bool,
-        agent: Option<String>,
     },
     Setup,
     SetupHarnessPlugins,
@@ -470,9 +460,6 @@ pub enum Command {
     Task {
         task_id: String,
         output_json: bool,
-    },
-    Focus {
-        task_id: String,
     },
     Remove {
         task_id: String,
@@ -586,10 +573,7 @@ where
 
 fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
     let Some(first) = args.first().map(String::as_str) else {
-        return Ok(Command::Interactive {
-            focus: true,
-            agent: None,
-        });
+        return Ok(Command::Help { topic: None });
     };
     if let Some(help) = help_request(&args)? {
         return Ok(help);
@@ -894,14 +878,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 output_json,
             })
         }
-        "focus" => {
-            let task_id = args
-                .get(1)
-                .cloned()
-                .ok_or_else(|| crate::util::Error::new("`ahu focus` needs a task id."))?;
-            expect_no_more(&args[2..])?;
-            Ok(Command::Focus { task_id })
-        }
         "remove" => {
             let task_id = args
                 .get(1)
@@ -938,27 +914,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         },
         "knowledge" => parse_knowledge(&args[1..]),
         "eval" => parse_eval(&args[1..]),
-        direct if direct.starts_with('@') => {
-            if args.len() == 1 && !stdin_available {
-                let agent = direct.strip_prefix('@').unwrap_or_default();
-                validate_agent_name(agent)?;
-                Ok(Command::Interactive {
-                    focus: true,
-                    agent: Some(agent.to_string()),
-                })
-            } else {
-                parse_launch_backend(&args, stdin_available)
-            }
-        }
+        direct if direct.starts_with('@') => parse_launch_backend(&args, stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
-        "--no-focus" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Interactive {
-                focus: false,
-                agent: None,
-            })
-        }
         "launch" => bail!(
             "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
         ),
@@ -2768,7 +2726,6 @@ mod focused_help_tests {
             "approve",
             "reject",
             "resume",
-            "focus",
             "remove",
             "message",
             "auth",
@@ -2799,42 +2756,6 @@ mod focused_help_tests {
         assert!(!eval.contains("tasks options:"));
         assert!(!eval.contains("doctor options:"));
         assert_eq!(HELP_ALL.matches("agent assignment options:").count(), 1);
-    }
-
-    #[test]
-    fn no_focus_help_matches_interactive_and_scripted_syntax() {
-        assert_eq!(
-            parse_args(&["--no-focus"]).unwrap(),
-            Command::Interactive {
-                focus: false,
-                agent: None,
-            }
-        );
-        assert!(HELP_ALL.contains("`ahu --no-focus`"));
-        let args = [
-            "@fixture",
-            "--prompt-file",
-            "fixture.txt",
-            "--allow-widened-approvals",
-            "--name",
-            "fixture-task",
-            "--dry-run",
-            "--output",
-            "json",
-        ];
-        assert!(matches!(
-            parse_args(&args).unwrap(),
-            Command::Launch { dry_run: true, .. }
-        ));
-        let mut unsupported = args.to_vec();
-        unsupported.push("--no-focus");
-        assert!(parse_args(&unsupported).is_err());
-        let help = help_for(Some("@agent")).unwrap();
-        assert!(help.contains("assignments already leave focus unchanged"));
-        assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
-        assert!(help_for(Some("auth")).unwrap().contains(
-            "Identity and readiness probes are supplied by installed harness runtime plugins."
-        ));
     }
 
     #[test]
@@ -2903,14 +2824,8 @@ mod direct_agent_tests {
     }
 
     #[test]
-    fn direct_agent_without_prompt_preselects_interactive_or_reads_piped_stdin() {
-        assert_eq!(
-            parse_with_stdin(["@dev-glm"], false).unwrap(),
-            Command::Interactive {
-                focus: true,
-                agent: Some("dev-glm".into()),
-            }
-        );
+    fn direct_agent_without_prompt_needs_one_and_piped_stdin_only_previews() {
+        assert!(parse_with_stdin(["@dev-glm"], false).is_err());
         // A piped prompt would start an interactive task session, which is
         // retired; only the preview remains.
         assert!(

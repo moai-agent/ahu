@@ -133,13 +133,6 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
     }
 }
 
-/// Load the project policy written by the one supported setup command.
-fn config_or_setup(repo: &Repo, _console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
-    config::load(&repo.root)?
-        .map(Some)
-        .ok_or_else(|| Error::new("this repository is not set up for ahu; run `ahu setup` first"))
-}
-
 pub fn migrate_cmd(console: &mut Console<'_>, repo: &Repo, action: &str) -> Result<i32> {
     if action == "--rollback" {
         crate::migration::rollback(repo)?;
@@ -1403,7 +1396,7 @@ enum Located {
     Listing(PathBuf, task::TaskRecord),
     Pointer(crate::task_index::Entry, PathBuf, task::TaskRecord),
     Unreadable(task::UnreadableTask),
-    NoMatch { unreadable_in_repo: usize },
+    NoMatch,
 }
 
 /// Load the record behind a task index entry, refusing stale or hostile
@@ -1534,7 +1527,6 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
     if let Some(blocked) = listing.unreadable.iter().find(|u| u.task_id == id) {
         return Ok(Located::Unreadable(blocked.clone()));
     }
-    let unreadable_in_repo = listing.unreadable.len();
     let records: Vec<_> = listing
         .records
         .into_iter()
@@ -1594,7 +1586,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
         let (dir, record) = load_indexed_task(entry)?;
         return Ok(Located::Pointer(entry.clone(), dir, record));
     }
-    Ok(Located::NoMatch { unreadable_in_repo })
+    Ok(Located::NoMatch)
 }
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
@@ -1643,7 +1635,7 @@ pub(crate) fn resolve_inspection(repo: &Repo, id: &str) -> Result<(PathBuf, task
     match resolve_task(repo, id)? {
         Located::Listing(dir, record) | Located::Pointer(_, dir, record) => Ok((dir, record)),
         Located::Unreadable(blocked) => Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
+        Located::NoMatch => {
             bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
         }
     }
@@ -1871,7 +1863,7 @@ pub fn message_cmd(
     let (dir, record) = match resolve_task(repo, task_id)? {
         Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
         Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
+        Located::NoMatch => {
             bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
         }
     };
@@ -2051,53 +2043,6 @@ fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
     )))
 }
 
-/// `ahu focus <task-id>`
-pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let record = match resolve_task(repo, task_id)? {
-        Located::Listing(_, record) | Located::Pointer(_, _, record) => record,
-        Located::Unreadable(blocked) => {
-            // "no task matching" would be a claim that nothing here is that task.
-            // If a directory with that id exists and ahu simply could not read its
-            // record, saying so is the difference between a user looking for a
-            // typo and a user looking at a leftover worktree.
-            bail!(
-                "task {} exists but ahu cannot read its record, so it cannot find its interactive \
-                 session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
-                display_safe(&crate::task_ref::display(&blocked.task_id)),
-                display_safe_block(&blocked.reason),
-                display_path(&blocked.dir)
-            );
-        }
-        Located::NoMatch {
-            unreadable_in_repo: 0,
-        } => {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
-        }
-        Located::NoMatch { unreadable_in_repo } => {
-            bail!(
-                "no readable task matching {task_id:?}. {unreadable_in_repo} other task record(s) \
-                 in this repository could not be read either; run `ahu tasks` to see them."
-            );
-        }
-    };
-    if record.session_ref.is_none() {
-        bail!(
-            "task {} has no recorded interactive session.",
-            record.task_id
-        );
-    }
-    let client = interactive::discover_for_record(repo, &record)?;
-    interactive::session::SessionManager::new(client.as_ref(), repo)
-        .select_task_session(&record)?;
-    console.say(&format!(
-        "Focused {} — {}\n  worktree {}\n",
-        style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
-        display_safe(&record.title),
-        display_path(&record.worktree)
-    ))?;
-    Ok(0)
-}
-
 /// Name what is holding a task worktree back, so the refusal points at files
 /// rather than leaving the reader to run `git status` with ahu's own
 /// environment to find them.
@@ -2141,7 +2086,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 (dir, record, entry.repo_identity.clone(), true, Some(gate))
             }
             Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-            Located::NoMatch { .. } => {
+            Located::NoMatch => {
                 bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
             }
         };
@@ -2631,89 +2576,6 @@ pub(crate) fn resolve_identity(
     }
 }
 
-/// The default `ahu` flow: setup if needed, then select, compose, preview, submit.
-pub fn interactive(
-    console: &mut Console<'_>,
-    repo: &Repo,
-    focus_new: bool,
-    preselected_agent: Option<&str>,
-) -> Result<i32> {
-    let Some(loaded) = config_or_setup(repo, console)? else {
-        return Ok(1);
-    };
-
-    console.say(&format!(
-        "ahu {} — {}\n  policy {}\n\n",
-        env!("CARGO_PKG_VERSION"),
-        display_path(&repo.root),
-        loaded.short_digest()
-    ))?;
-
-    let registered = agent::load_all(&repo.root)?;
-    let selector = match preselected_agent {
-        Some(name) => {
-            console.say(&format!("Preselected agent: @{name}\n"))?;
-            Some(name.to_string())
-        }
-        None => launcher::read_selector(console, &registered)?,
-    };
-    let (resolved, pair) = resolve_identity(repo, &loaded, selector.as_deref())?;
-
-    // The resolved pair is shown before the prompt is entered, and again in the
-    // submission preview, so the provider is never a surprise.
-    console.say(&format!(
-        "\nResolved for this task:\n  agent   {}\n  harness {}\n  model   {}\n  because {}\n",
-        style::stdout().paint(
-            Role::Agent,
-            &display_safe(
-                &resolved
-                    .as_ref()
-                    .map(|a| a.label())
-                    .unwrap_or_else(|| "auto (no named agent)".to_string())
-            )
-        ),
-        style::stdout().paint(Role::Runtime, &display_safe(&pair.harness)),
-        style::stdout().paint(Role::Runtime, &display_safe(&pair.model)),
-        display_safe(&pair.basis)
-    ))?;
-    let prerequisite = selection::check_prerequisite(repo, &pair.harness)?;
-    if !prerequisite.satisfied() {
-        bail!(kind: crate::util::ErrorKind::Prerequisite,
-            "{} is not installed on this machine ({} not found on PATH).\n\
-             This is a diagnostic for your machine, not a reason to select a different \
-             harness: the project's policy is the same for everyone.",
-            pair.harness,
-            prerequisite.executable
-        );
-    }
-    for note in &prerequisite.notes {
-        console.say(&format!(
-            "  {}    {}\n",
-            style::stdout().paint(Role::Hint, "note"),
-            display_safe(note)
-        ))?;
-    }
-
-    let Some(prompt) = launcher::read_prompt(console)? else {
-        console.say("Cancelled. Nothing was created.\n")?;
-        return Ok(1);
-    };
-
-    submit(
-        console,
-        repo,
-        &loaded,
-        resolved,
-        pair,
-        &prompt,
-        true,
-        false,
-        focus_new,
-        false,
-        &launch::DisplayMetadata::default(),
-    )
-}
-
 /// Assign work without an interactive composer; the command itself requests launch.
 ///
 /// This path has no human at a terminal — the preview goes to a pipe read by
@@ -2759,9 +2621,7 @@ pub fn launch_cmd(
         resolved,
         pair,
         prompt,
-        false,
         dry_run,
-        false,
         output_json,
         display,
     )
@@ -2775,9 +2635,7 @@ fn submit(
     resolved: Option<ResolvedAgent>,
     pair: ResolvedPair,
     prompt: &str,
-    confirm: bool,
     dry_run: bool,
-    focus_new: bool,
     output_json: bool,
     display: &launch::DisplayMetadata,
 ) -> Result<i32> {
@@ -2824,26 +2682,8 @@ fn submit(
 
     preflight(console, repo, loaded, &plan)?;
 
-    // Generated here, after the prompt has been read and after the plan is
-    // built, so nothing in the prompt can have contained it.
-    let code = confirmation_code()?;
     if dry_run {
-        console.say(&render_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    } else {
-        console.say(&render_launch_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    }
-
-    if dry_run {
+        console.say(&render_preview(repo, &plan, prompt, None))?;
         console.say("Dry run. No task or session was created.\n")?;
         _span.set_string("ahu.status", "planned");
         if output_json {
@@ -2851,33 +2691,9 @@ fn submit(
         }
         return Ok(0);
     }
-    if confirm && !launcher::confirm_submit(console, &code)? {
-        console.say("Cancelled. No worktree, branch, or session was created.\n")?;
-        _span.set_string("ahu.status", "cancelled");
-        return Ok(1);
-    }
-
-    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
-    if launched.record.session_ref.is_some() || launched.record.session_host.is_some() {
-        console.say(&format!(
-            "\nStarted @{} in the selected session host.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
-            display_safe(&launched.record.identity.agent),
-            display_safe(&crate::task_handles::label(repo, &launched.record.task_id)),
-            display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-            display_safe(&crate::task_handles::reference(repo, &launched.record.task_id)),
-        ))?;
-    } else {
-        console.say(&format!(
-            "\nCompleted the foreground @{} session in this terminal.\n  task       {} ({})\n  worktree   {}\n\nList tasks: ahu tasks\n",
-            display_safe(&launched.record.identity.agent),
-            display_safe(&crate::task_handles::label(repo, &launched.record.task_id)),
-            display_safe(launched.record.state.as_str()),
-            display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-        ))?;
-    }
-    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
-    _span.set_string("ahu.status", "submitted");
-    Ok(0)
+    bail!(kind: crate::util::ErrorKind::Usage,
+        "interactive task sessions are no longer supported; delegated tasks run headless"
+    );
 }
 
 pub(crate) fn preflight(
@@ -3055,14 +2871,6 @@ pub fn render_launch_notes(notes: &[String]) -> String {
         out.push_str(&format!("  note     {}\n", display_safe(note)));
     }
     out
-}
-
-/// A short confirmation code for one submission.
-///
-/// Six hex characters: enough that a prompt written before the launch cannot
-/// contain it, short enough to retype.
-fn confirmation_code() -> Result<String> {
-    Ok(crate::orchestration::new_nonce()?[..6].to_string())
 }
 
 /// The submission preview: identity, Git effects, and every warning.
