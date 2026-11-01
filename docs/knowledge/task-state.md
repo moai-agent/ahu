@@ -37,7 +37,7 @@ sources:
 
 # Task state
 
-Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
+Each legacy interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
 a version-7 universally unique identifier. ahu reads only current task schema 6;
 older task records are reported as unreadable and are not migrated. Launch derives this path without an environment override, and
@@ -91,7 +91,7 @@ entries after known termination, retaining results, frozen inputs, private broke
 claims/responses, native stores, branches, and worktrees.
 It is not a full erasure of task content.
 
-Interactive task discovery scans sibling task worktrees under the primary checkout's
+Legacy interactive task discovery scans sibling task worktrees under the primary checkout's
 `.worktrees/`, then compatible legacy checkout stores. Discovery then consults the
 cross-checkout index for task IDs no local record holds, which makes tasks
 reachable from any checkout of the repository that launched them. Worktree

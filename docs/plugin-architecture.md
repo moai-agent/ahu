@@ -3,7 +3,7 @@
 ahu coordinates agents running in existing harnesses. External services and
 terminal products integrate through optional skills and plugins. A project can
 require an integration for its own workflow without making it an ahu dependency.
-Current-terminal and headless tasks work without cmux, GitHub, or a tracker.
+Headless tasks work without GitHub or a tracker.
 
 
 ## Customer runtime language policy

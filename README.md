@@ -53,8 +53,8 @@ See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model 
 ahu keeps task/attempt state, Git worktree lifecycle, process supervision, MCP
 coordination, and bounded telemetry/evaluation in core. Native harness behavior
 is supplied by installed Rust runtime plugins. External tools belong in
-optional plugins and skills. Users can run current-terminal and headless tasks
-without cmux, GitHub, or an issue tracker.
+optional plugins and skills. Users can run headless tasks and coordinators
+without GitHub or an issue tracker.
 
 Start with a skill that uses the tool's existing CLI. Add an executable plugin
 only when a workflow needs a stable machine-readable contract, such as session

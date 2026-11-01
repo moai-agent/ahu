@@ -15,7 +15,6 @@ implementation language of external CLIs or harnesses.
 | OpenCode runtime | Rust | Optional external harness package |
 | Kiro runtime | Rust | Optional external harness package |
 | GitHub CLI and tracker | Rust | Optional external packages; require native `gh` |
-| cmux session host | Rust | Optional external package; requires native cmux and Git |
 | Native Ollama decision client | Rust | Core client; requires compatible external Ollama and model |
 | text-stats authoring example | Rust | Independent example; build and stage before installation |
 
@@ -26,7 +25,7 @@ validation and lifecycle facades. Package updates can change native compatibilit
 without recompiling core. Rust implementation does not establish current account
 availability or live compatibility with every native version.
 
-The GitHub and cmux migrations retain independent protocol fixtures, including
+The GitHub migration retains independent protocol fixtures, including
 Python development oracles. Those files must never appear in the staged runtime
 packages. Build artifacts are platform-specific and are pinned after staging;
 ahu does not execute installation hooks or invoke Cargo during plugin install.
