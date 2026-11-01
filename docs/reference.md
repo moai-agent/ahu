@@ -47,8 +47,8 @@ list. It prints a task table laid out for the terminal; see [the task
 list](#the-task-list).
 
 To launch work directly, use a registered agent name followed by a quoted
-positional prompt. With no prompt, `ahu @name` opens the interactive launcher
-with that agent preselected. You can also pass a prompt file or the usual launch
+positional prompt. Task sessions run headless; without `--headless` the command
+only previews with `--dry-run`. You can also pass a prompt file or the usual launch
 options, including headless options:
 
 ```sh
@@ -103,7 +103,7 @@ in full; `@parser` is not a prefix match for `@parser-cleanup`.
 
 Handles are immutable and scoped to the repository. Linked checkouts share them;
 use `ahu --repo <checkout>` for another repository. All task controls accept them,
-including `task`, `focus`, `message`, `wait`, `result`, `cancel`, `approve`, `reject`, `resume`,
+including `task`, `message`, `wait`, `result`, `cancel`, `approve`, `reject`, `resume`,
 `cleanup`, and `remove`. Resume retains the same task identity and handle.
 
 Reservations remain after removal or a failed launch. They are not recycled or
@@ -323,21 +323,19 @@ rejected. Accepted prompt text retains its original bytes, including leading
 and trailing newlines.
 
 `--dry-run --output json` writes one JSON object to stdout and human-readable
-preview information to stderr. Previewing requires Git, valid project settings, and the selected harness, but
-no session-host plugin. It launches no task. Interactive execution uses the
-current terminal by default or an explicitly selected plugin; `--headless` uses a
-separate supervisor.
+preview information to stderr. Previewing requires Git, valid project settings, and the selected harness.
+It launches no task. `--headless` runs the task under a separate supervisor.
 Manifests that widen approvals require the
 explicit `--allow-widened-approvals` flag for both previews and execution, as in
-the preceding examples. Interactive launch JSON requires `--dry-run`; headless
+the preceding examples. Preview JSON requires `--dry-run`; headless
 launches also support JSON execution results.
 
-The interactive preview has `schema_version: 1` and these fields:
+The preview has `schema_version: 1` and these fields:
 
 | Field | Meaning |
 | --- | --- |
 | `agent` | Name, version, description, resolved source path, and full identity digest. |
-| `title`, `summary` | Plain sidebar display text, explicit or derived from the assignment. |
+| `title`, `summary` | Plain display text, explicit or derived from the assignment. |
 | `harness`, `model`, `selection_basis` | The exact selected pair and why it was selected. |
 | `policy_digest` | The exact project configuration used; the launch command also freezes installed runtime binding identity. |
 | `permissions` | The manifest's approval mode. |
@@ -757,8 +755,6 @@ Outside work mode, apart from the explicit OpenCode native-state trust setting,
 unknown or unsafe integrations have no operator bypass, including with
 `--allow-widened-approvals`. Work mode skips these native-configuration checks
 and records the unverified state; it does not establish isolation.
-Interactive execution uses the current terminal or
-an explicitly selected session host and retains normal approval and launch checks.
 ahu does not remove credentials, rewrite native settings, or treat interactive
 availability as headless isolation. New compatibility claims require validation
 before the catalog records a version as verified. Evidence is bounded local
@@ -1398,15 +1394,6 @@ drift is counted in `skill_unknown_events` and does not count as use. A catalog
 entry without a matching invocation is unobserved use, and only an explicit
 failed tool result is reported as a failed invocation.
 
-## Sidebar text
-
-`--title` and `--summary` set plain display metadata without changing the
-assignment. Titles are limited to 60 characters and summaries to 160; common
-Markdown formatting is converted to plain text. With `--title` alone, the summary
-uses the title too. Without either flag, text is derived from the assignment.
-The identity pill shows agent and model. cmux controls native notification
-previews and directory/branch rows through its own preferences.
-
 ## Terminal styling
 
 Use `--color=auto`, `--color=always`, or `--color=never` with any command.
@@ -1567,43 +1554,6 @@ ahu refuses interactive `auto` launches without dropping the requested approval
 control or substituting one-shot `run`. The existing default interactive shape
 remains available with compatible 1.x command-line versions.
 
-#### OpenCode 2.0.32 interactive automatic approvals
-
-An offline review on 2026-10-19 did not establish a supported way to combine
-`mini`'s exact model and persistent session with automatic approval of requests
-that native policy has not denied. The refusal above remains intentional; this
-is version-specific evidence, not a claim about every future OpenCode 2 release.
-
-| Candidate | Evidence from the installed 2.0.32 CLI and bundled source |
-| --- | --- |
-| `mini --auto` or `--auto mini` | Both exit 1 with an unrecognized-option error. The command declaration includes `--model` and `--prompt`, but omits the approval options shared by the default TUI and `run`. The hidden aliases `--yolo` and `--dangerously-skip-permissions` also fail on `mini`. |
-| `OPENCODE_PERMISSION` | No reader or declaration was found in the installed bundle. The server's explicit environment-to-config mapping reads `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT`, but provides no permission override through this variable. Setting it is not a verified approval control on this version. |
-| `OPENCODE_CLI_CONFIG_CONTENT` with `session.permissions = "autoaccept"` | The bundled CLI guide documents merging inline JSON over global CLI settings. The full TUI implements this preference by replying to pending requests. Mini's inspected session transport instead displays pending permissions and its frontend sends replies from the permission interaction; no equivalent automatic approval behavior was found. A setting accepted by the CLI schema is not evidence that Mini applies it. |
-| Replacing native permission rules through inline server configuration | This supplies configuration, not a deny-preserving approval mode. No supported transformation was established that approves all otherwise-asked requests while preserving existing user, project, agent, and managed policy. A blanket allow overlay is not a substitute for native `--auto`. |
-
-The packaged changelog also describes per-project settings that automatically
-accept permissions. ahu does not change those persisted settings, replace
-existing environment configuration, select a different native agent, or install a permission plugin
-to work around this gap. `prompt` continues to inherit native policy;
-`accept-edits` remains unsupported. An operator choosing a different manifest
-permission mode must make that change explicitly.
-
-Evidence was limited to local help, option-parser failures in fresh temporary
-homes and XDG directories, and static inspection of the shipped bundle and
-packaged documentation. No native user configuration, credentials, project
-bindings, or approval settings were inspected or changed. No server, inference
-session, or network probe was used; deny preservation through a live Mini
-session remains unverified. Existing synthetic admission tests cover the
-refusal without creating a task worktree. Revisit this mapping only with
-version-specific evidence for exact model selection, persistence, conversion
-of asks to approvals, and preservation of native denies and configuration.
-
-Explicit `--headless` tasks retain `opencode run --format json --model ...`
-with a positional message and `--auto` only for automatic approvals. The
-2.0.32 run help advertises those options, but help inspection alone does not
-establish event-stream, resume, or native isolation compatibility; the separate
-headless admission checks still apply. No live v2 inference is claimed here.
-
 ### Configure the Ollama provider in OpenCode
 
 OpenCode ships no Ollama provider. Until one is configured, `opencode models`
@@ -1720,10 +1670,9 @@ ahu @glm-reviewer --prompt-file assignment.txt
 
 This manifest declares `prompt`, so no approval-widening flag is needed. A
 manifest declaring `auto` requires `--allow-widened-approvals` on previews and
-launches alike. Interactive launches use the current terminal or selected session-host plugin.
-The same agent runs unattended
-with `--headless`, which builds `opencode run --format json` instead and needs
-no cmux; see [headless execution](#headless-execution).
+launches alike.
+The agent runs unattended
+with `--headless`, which builds `opencode run --format json`; see [headless execution](#headless-execution).
 
 `auto` is the widest of the three and OpenCode has no sandbox to narrow it:
 unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
@@ -1851,7 +1800,7 @@ need goes to the branch until it is whole, and then to the title.
 | `TITLE` | The recorded task title, when it adds something the handle does not |
 | `STATE` | The reconciled session state or `unknown` when activity cannot be verified |
 | `AGENT` | The agent and its version |
-| `MODE` | `cmux`, `plugin`, `terminal`, or `headless` |
+| `MODE` | `headless`, or `legacy` for a task recorded before interactive sessions were retired |
 | `RUNTIME` | The pinned harness and model |
 | `BRANCH` | The task's branch, prefix and the first eight characters of the task id |
 
@@ -1964,9 +1913,7 @@ your work for you.
 ## Prompts are data
 
 A task prompt can contain anything—`$(...)`, backticks, pipes, newlines. `ahu`
-never puts a prompt into a shell command. The cmux startup command contains only
-`ahu`'s own executable path and task directory, both shell-quoted; the prompt is
-written to a file and handed to the harness as a single argument.
+never puts a prompt into a shell command. The prompt is written to a file and handed to the harness as a single argument.
 The prompt file is written owner-only. The task record stores its digest and
 a placeholder rather than the full prompt; sidebar titles and summaries can
 still contain excerpts derived from the assignment.
@@ -2022,17 +1969,6 @@ hooks contributed by plugins. Configuration inventory cannot establish runtime i
 file that exists but cannot be parsed is reported as *unknown* hooks, never as
 *no* hooks.
 
-## Interactive host boundary
-
-Interactive session providers use the versioned external Host V2 protocol
-([details](executable-hosts.md)). ahu owns cross-harness coordination, task
-lifecycle, worktree operations, and MCP; provider-specific session mechanics
-live in plugins. The current terminal is the default. An enabled committed
-binding with the `interactive-backend` grant selects an external provider, and
-the task record freezes its package identity for later focus and cleanup. ahu
-contains no compiled cmux session adapter. Providers run with the user's OS
-permissions; plugin separation is an integration boundary, not a sandbox.
-
 ## Committed project plugin bindings
 
 A package describes its capabilities in `ahu-plugin.md`. A project separately
@@ -2074,8 +2010,7 @@ Reviewed optional integration.
 
 Replace the example identity, version, source location and digests with the
 reviewed package's values. Omit `subdirectory` when `repository` already names
-the package directory. Session hosts use `grants: [interactive-backend]` instead;
-one-shot JSON entrypoints need `execute`. Neither grant confines the executable.
+the package directory. One-shot JSON entrypoints need `execute`. Neither grant confines the executable.
 Never include credentials or private tracker associations in a shared binding.
 For a complete runnable example without an external provider, use the
 [text statistics example](../examples/plugins/text-stats/README.md).
@@ -2110,25 +2045,7 @@ To turn the integration off, run `ahu plugins disable example`, refresh the lock
 with `ahu lock --update`, then review and commit both files. Invocation must now
 be refused. `ahu plugins remove example` removes the installed package while
 retaining the binding; inspect `ahu plugins installed --output json` afterward.
-Finish and remove tasks using a session host before disabling or removing it:
-existing tasks retain their frozen host identity and uncertain ownership can
-block cleanup. Changing a pin does not migrate existing tasks to another package.
-
-## Local session package discovery and selection
-
-`ahu plugins` inventories package metadata without executing it. Package metadata
-alone does not grant activation; the committed binding, compatibility, digest,
-executable declaration and `interactive-backend` grant must all pass verification.
-For package fields, framing and ownership semantics, see
-[executable session hosts](executable-hosts.md).
-
-The current terminal needs no host package. To select an enabled host explicitly,
-set `AHU_INTERACTIVE_PLUGIN` to its binding ID. For example,
-`AHU_INTERACTIVE_PLUGIN=example-host ahu plugins --probe` starts the selected
-host only for protocol negotiation, then closes the connection. A successful probe
-is not a live task or provider authentication test. `none` or `terminal` selects
-the current terminal. Coordinator shortcuts require explicit plugin selection;
-headless execution does not select a session host.
+Changing a pin does not migrate existing tasks to another package.
 
 ## Native hook safety inspection
 
@@ -2206,121 +2123,6 @@ Headless tasks use primary-owned coordination; interactive tasks use their own
 worktree-local records. `tasks` and `task` include compatible legacy records as
 well. `focus` uses the task’s recorded session-host plugin.
 
-### Interactive provider ownership
-
-Interactive session lifecycle uses the selected external Host V2 plugin. ahu
-owns task records, worktree creation, cancellation confirmation, and cleanup
-decisions. The provider owns its native grouping and session identifiers and
-returns an opaque `session_ref`. Before focus, status updates, metadata changes,
-or close, the provider verifies that reference against the task's repository and
-worktree. Ownership mismatches fail closed. Headless tasks do not require a
-session provider.
-
-Each interactive task stores `task.json` and `prompt.txt` under
-`<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
-is part of `task.json`. ahu derives this location from the worktree it creates;
-state discovery uses explicit checkout paths. Removing the worktree removes
-its state. Task checkouts are siblings under the primary checkout's `.worktrees/`,
-including nested launches. State and worktree directories ignore themselves.
-
-`tasks`, `task`, and `focus` discover task records through those worktrees
-from the primary checkout or a sibling. Each managed worktree store accepts only
-its owner's task ID, matching repository identity and canonical worktree path.
-This rule applies on every scan, including from inside that worktree; its store
-is not scanned again as an unrestricted legacy store.
-
-Compatible legacy records remain readable in the primary checkout and an
-invoking plain checkout. A managed worktree's accepted record takes precedence
-for a duplicate ID. Older nested child records
-kept in a parent task worktree are reported as misplaced for inspection, not
-accepted or migrated automatically. Persisted schema compatibility is unchanged.
-
-`ahu tasks` reports misplaced entries in managed stores as warning notes, without
-adding task rows or changing the files. Invalid task/repository identity in a
-legacy store produces an unreadable row. Unreadable or refused owner records
-remain visible for inspection. After checking legacy stores, a worktree with no
-record accounting for its task is reported as incomplete; a stray record cannot
-hide it. Such a worktree may still be preparing or may remain from a failed
-launch. Missing worktrees have no worktree-local record to list; independent
-legacy records are not automatically deleted.
-
-On launch failure, rollback is allowed only when the task session could not have
-started, and uses ordinary Git worktree removal, without force.
-If removal fails, the error names the retained worktree and branch for inspection.
-ahu attempts to discard partial task state only after validating its path; it
-leaves redirected paths alone. Cleanup can itself fail, so inspect the reported
-paths. A retained worktree without a record appears as incomplete in `ahu tasks`.
-Listing does not remove it or establish that its contents are safe to delete.
-
-Once the provider create operation has started, a failed command or lookup
-does not prove non-creation. ahu retains the task record, index, worktree and
-branch, reports the task identity and inspection paths, and does not invent a
-terminal outcome. Every new workspace candidate must match the requested
-worktree directory, even when only one candidate appears. Unrelated or ambiguous
-workspaces are preserved. Inspect the task and recorded session-host state before retrying;
-confirm termination before cleanup. `ahu remove` requires a terminal record. If
-the record remains `starting` and manual inspection confirms no session uses the
-checkout, use non-forced Git worktree and branch removal rather than fabricating
-a terminal task state.
-
-The primary checkout owns the launch lock, headless coordination, and scoped task index. Generated architecture documents use the
-invoking checkout’s `.ahu/state/`. All locations derive from
-explicit repository discovery, not ambient storage selectors. Ownership requires
-positive Git verification, with filesystem checks before reusing process-local
-evidence. Normal primary and linked checkouts are supported. Separate Git-directory
-layouts are refused when Git cannot identify a verifiable primary checkout.
-
-Execution admission, reconciliation, and cancellation stay within their owning
-storage domain. Malformed records in unrelated legacy stores cannot fail a new
-execution. Session checkpoint schema 2 binds native session evidence to task,
-attempt, and harness. Invalid checkpoints remain unavailable; invalid ownership
-metadata produces unknown `liveness`. Opened metadata files must have a single hard
-link, the current user as owner, and safe permissions. New coordination records
-and ownership locks require owner-only permissions.
-
-Conventional old stores under `$HOME/.local/state/ahu/runtime` and
-`$HOME/.local/state/ahu/task-index` remain lookup sources. Additional old roots
-can be listed in `<primary-checkout>/.ahu/state/legacy-lookup.json`:
-
-```json
-{
-  "schema_version": 1,
-  "runtime_roots": ["/private/ahu-archive/runtime"],
-  "index_roots": ["/private/ahu-archive/task-index"]
-}
-```
-
-This file must be an owner-only regular file owned by the current user, without
-hard links, at most 64 KiB. Unknown fields, unsupported schemas, or more than 32
-combined roots are refused. Roots must be absolute, contain no `..`, remain
-outside Git checkouts, and pass path checks. Missing roots are not created by
-lookup. Old index entries remain read-only; new registrations and removals affect
-the primary index. Lookup neither relocates old data nor enables unsupported
-legacy execution. Explicit lifecycle commands are separate from read-only discovery.
-
-Checkout state paths refuse existing symlinks at `.ahu`, `state`, and descendant
-directories and files; state files must be regular files. Files are created
-owner-only on Unix and replaced through temporary files. These checks refuse
-static path redirection; they do not prevent a concurrent host process from
-replacing paths between inspection and use.
-
-At startup, ahu checks prompt and delivered-instruction digests, reconstructs the
-launch command, and checks repository and worktree identity, including which task
-worktree owns a local record. Records and their digests are mutable local files,
-not authenticated evidence against a writer able to change both. Neither these
-checks nor Git worktrees provide OS isolation or protection against concurrent
-hostile host processes.
-
-Interactive execution gives the child process group terminal foreground ownership
-and restores the caller’s foreground afterward, including error paths. The
-run-task owner holds a lock and supervises its child; cancellation uses an owned
-process, not an unverified saved PID. A request before startup is honored.
-Cancellation retains the task record, worktree, and branch. Only confirmed
-cancellation closes the task's recorded session-host workspace. An already-terminal task, an
-unconfirmed request, or a task that finishes on its own leaves the workspace open.
-A workspace-close failure is reported separately from confirmed process
-termination. A terminal outcome is recorded even if foreground restoration fails.
-
 ### Utility lookup
 
 Git lookup skips empty and relative `PATH` entries. Candidates
@@ -2340,7 +2142,7 @@ Project configuration may pin exact native versions; it no longer selects a
 compiled catalog revision. A missing runtime cannot fall back to a built-in
 adapter, and existing tasks freeze their runtime package/binding identity.
 
-Persisted task records use schema 6, including the frozen `session_host` binding
+Persisted task records use schema 6, including an opaque, ignored `session_host` field for older records
 and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Only schema 6
 task records are readable; every earlier task schema is refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
@@ -2350,9 +2152,7 @@ ahu does not reinterpret their digests or delete their worktrees.
 
 Outside ahu, delegation belongs to the current harness. Registered assignments
 inside ahu use registered ahu agents running their configured
-harnesses and models in separate worktrees. Interactive tasks use the current
-terminal by default or an explicitly selected session-host plugin; headless
-descendants inherit the execution mode and primary-owned coordination scope.
+harnesses and models in separate worktrees. Tasks run headless; descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
 The supplied delegation contract uses the canonical
 `ahu @name --prompt-file assignment.txt` form so saved deliveries can
@@ -2439,14 +2239,9 @@ These shortcuts explicitly request the harness permission bypass; any outer
 sandbox still applies.
 
 Coordinator shortcuts accept no additional arguments, preserve the invoking
-directory and terminal, and set `AHU_BIN`. They use the current terminal by
-default, including when invoked inside a terminal provider. Setting
-`AHU_INTERACTIVE_PLUGIN` to an enabled session-host binding explicitly requests
-plugin placement when that plugin reports an inherited workspace. The plugin
-owns any repository grouping or window movement; placement errors prevent
-harness startup. `none` or `terminal` selects the current terminal without a
-host. These shortcuts create no task or worktree. Current-terminal operation
-requires installed runtime configuration and an exact model ranking; plugin placement also requires its committed session-host binding.
+directory and terminal, and set `AHU_BIN`. They run in the current terminal; ahu never places them in a terminal-provider
+workspace. These shortcuts create no task or worktree. They require installed
+runtime configuration and an exact model ranking.
 ahu does not inject `AHU_STATE_DIR`;
 subsequent commands discover checkout and primary coordination paths explicitly.
 Registered child agents retain their own manifest permissions, harness, and

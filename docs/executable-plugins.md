@@ -1,7 +1,6 @@
 # One-shot executable plugins (protocol V1)
 
-A package can declare a generic JSON entrypoint separately from its optional
-[session-host executable](executable-hosts.md). The host library exposes
+A package can declare a generic JSON entrypoint. The host library exposes
 `ahu::plugin_exec::invoke` and the read-only
 `ahu::plugin_exec::task_service::invoke` integration below. The foreground CLI
 uses these transports without MCP registration, background activation or

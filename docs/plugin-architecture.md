@@ -55,13 +55,10 @@ operator-only. Its task-observation mode is read-only; it does not provide
 automatic event delivery, tracker synchronization or task mutation authority.
 An agent's direct CLI use is governed by harness permissions, not plugin grants.
 
-Use a [session-host plugin](executable-hosts.md) when ahu must create, focus,
-inspect or close an external terminal session. The cmux plugin owns its command
-mapping and group/workspace state. Core keeps the frozen host identity and opaque
-session reference, verifies the contract, and retains responsibility for harness
-supervision and worktree cleanup. Headless execution does not select a host.
+Session-host plugins were removed with interactive task sessions; the coordinator
+is the entry point and delegated tasks run headless.
 
-The GitHub packages and cmux package are separate external repositories and use
+The GitHub packages are separate external repositories and use
 the same documented contracts available to independently authored packages.
 Provider-specific retry, stale-write handling and error interpretation belong
 there. Do not introduce a core provider registry, tracker client or duplicate

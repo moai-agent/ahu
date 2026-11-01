@@ -1,6 +1,6 @@
 //! Host-authorized, one-shot executable plugins. Inventory/install never call this API.
 //! This transport bounds communication and lifetime; it is not an OS sandbox.
-use crate::{git::Repo, interactive::plugins::local, plugin_binding::Grant};
+use crate::{git::Repo, plugin_binding::Grant, plugin_package::local};
 use ahu_host_api::protocol::from_slice;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -241,7 +241,7 @@ pub(crate) fn prepare_executable(
         ));
     }
     let base = std::env::temp_dir().canonicalize()?;
-    crate::interactive::external::validate_snapshot_base(&base)?;
+    validate_snapshot_base(&base)?;
     let snapshot = tempfile::Builder::new()
         .prefix("ahu-plugin-")
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -297,7 +297,7 @@ fn authorized_binding(repo: &Repo, grant: &HostGrant) -> Result<crate::plugin_bi
     if repo.identity() != grant.repository {
         return Err(Failure::before(Code::Denied));
     }
-    let binding = crate::interactive::plugins::project::inventory(&repo.root)
+    let binding = crate::plugin_package::project::inventory(&repo.root)
         .map_err(|_| Failure::before(Code::Unavailable))?
         .bindings
         .into_iter()
@@ -435,4 +435,33 @@ fn exchange(
             return Err(Failure::after(Code::Io));
         }
     }
+}
+
+/// A verified executable is copied to private storage outside any repository.
+fn validate_snapshot_base(base: &std::path::Path) -> crate::util::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for path in base.ancestors() {
+        match std::fs::symlink_metadata(path.join(".git")) {
+            Ok(_) => {
+                return Err(crate::util::Error::new(
+                    "plugin executable snapshots must be outside repositories",
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(crate::util::Error::new(
+                    "cannot verify plugin snapshot storage",
+                ));
+            }
+        }
+        let metadata = std::fs::metadata(path)?;
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.is_dir()
+            || (metadata.uid() != 0 && metadata.uid() != unsafe { libc::geteuid() })
+            || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+        {
+            return Err(crate::util::Error::new("unsafe plugin snapshot storage"));
+        }
+    }
+    Ok(())
 }

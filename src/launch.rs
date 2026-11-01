@@ -13,7 +13,6 @@ use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::hooks::{self, HookInventory};
-use crate::interactive;
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state;
@@ -27,8 +26,6 @@ pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instruct
      harness. This is not an enforced system prompt: the task prompt that follows can contradict \
      it, and the model may follow the task prompt instead. ahu does not use harness \
      agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
-
-pub use crate::interactive::session::{CoordinatorPlacement, group_coordinator};
 
 /// Optional sidebar text, independent of the assignment delivered to the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -568,40 +565,6 @@ pub struct Launched {
     pub notes: Vec<String>,
 }
 
-/// Reconcile recorded tasks against their session host, so sessions closed outside ahu do not
-/// linger as "running" forever.
-///
-/// Returns the whole listing, unreadable directories included. Reconciliation
-/// can only touch records it can read, and a caller that is about to tell the
-/// user what exists needs to know about the ones it could not.
-pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
-    let mut tasks = task::list(repo)?;
-    for (dir, record) in tasks.records.iter_mut() {
-        if dir.join("headless.json").exists()
-            || record.session_ref.is_none()
-            || !record.state.is_live()
-        {
-            continue;
-        }
-        let Ok(client) = interactive::discover_for_record(repo, record) else {
-            continue;
-        };
-        let Some(session_ref) = record.session_ref.as_deref() else {
-            continue;
-        };
-        if matches!(
-            client.verify_task_session(session_ref, &repo.identity(), &record.worktree),
-            Ok(crate::interactive::v2::WorkspaceOwnership::Absent)
-        ) && record.state.is_live()
-        {
-            // Best effort: failed persistence must not break listing or invent
-            // an outcome. Reload under lock so a supervisor's terminal state wins.
-            let _ = task::set_exited_if_live(dir, record);
-        }
-    }
-    Ok(tasks)
-}
-
 /// Run a task under supervision in its selected terminal session.
 ///
 /// A session host's startup command invokes this fixed entrypoint. It receives
@@ -705,12 +668,6 @@ pub(crate) fn verify_task(
             record.repo_root.display(),
             discovered.identity()
         );
-    }
-    if let Some(frozen) = &record.session_host {
-        if batch.is_some() {
-            bail!("headless task cannot carry an interactive host binding");
-        }
-        interactive::binding::verify(&discovered, frozen)?;
     }
     let expected_worktree = state::worktree_dir(&discovered.root, &record.task_id)?;
     // `.worktrees` could have been replaced by a symlink between submission and
@@ -1104,16 +1061,6 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if record.session_ref.is_some()
-        && let Ok(repo) = git::discover(&record.worktree)
-        && let Ok(client) = interactive::discover_for_record(&repo, &record)
-    {
-        let _ = interactive::session::SessionManager::new(client.as_ref(), &repo).set_task_status(
-            &record,
-            &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
-        );
-    }
-
     // A cancellation that arrived before the harness started must not be
     // lost to the spawn that follows.
     if task_dir.join("cancel.json").exists() {

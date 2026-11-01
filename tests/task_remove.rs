@@ -400,7 +400,7 @@ fn remove_clears_a_record_left_in_the_checkout_store() {
 }
 
 #[test]
-fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
+fn removing_a_legacy_session_record_leaves_its_workspace_open() {
     let repo = fixture();
     let id = "006aa50000000000plugin";
     let dir = prepare_task(&repo, id);
@@ -408,25 +408,16 @@ fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
     let mut record = task::load(&dir).unwrap();
     record.session_ref = Some("legacy-workspace".into());
     task::save(&dir, &record, "current work").unwrap();
-    let before = std::fs::read(dir.join("task.json")).unwrap();
-    let command = "remove";
-    {
-        let output = common::ahu()
-            .current_dir(repo.path())
-            .args([command, id])
-            .env("AHU_INTERACTIVE_PLUGIN", "none")
-            .output()
-            .unwrap();
-        let text = text_of(&output);
-        assert!(!output.status.success(), "{text}");
-        assert!(
-            text.contains("legacy task has no recorded external session-host binding"),
-            "{text}"
-        );
-        assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
-        assert!(worktree.is_dir());
-        assert!(git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
-    }
+    let output = common::ahu()
+        .current_dir(repo.path())
+        .args(["remove", id])
+        .output()
+        .unwrap();
+    let text = text_of(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("left open"), "{text}");
+    assert!(!worktree.exists(), "{text}");
+    assert!(!dir.exists(), "{text}");
 }
 
 fn prepare_headless_task(repo: &TestRepo, id: &str) -> PathBuf {

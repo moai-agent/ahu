@@ -35,9 +35,6 @@ authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
 OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
-Interactive tasks run in the current terminal by default. cmux is an optional
-session-host plugin; enable it only for projects that want cmux workspaces.
-Headless tasks need no session host.
 Projects that configure knowledge bundles also require the `okf` binary for
 [knowledge checks](docs/reference.md#knowledge-checks). Projects can enable a
 provider plugin for issue tracking; core ahu does not require GitHub or the
@@ -45,8 +42,8 @@ GitHub CLI (`gh`).
 ahu installs none of these; harness authentication remains with each harness.
 The optional Jev tool reads its separately configured API key only when called.
 Read-only help and
-launch previews do not require a session-host connection. Git and explicit
-cmux plugin operations require its executable outside Git working trees; see the
+launch previews need no running harness. Git and explicit
+plugin operations require their executables outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
 
 See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
@@ -87,14 +84,7 @@ project MCP entries, and writes `.agents/ahu/config.md` and `.agents/ahu/lock.md
 Review and commit the generated files so future ahu commands can use the same
 project setup. ahu does not stage, commit, or push them.
 
-In the launcher, select an agent by number, `@name`, or bare name. Leave the
-selection blank for the project's automatic harness/model choice. The resolved
-pair appears before you enter the task. Finish the prompt with a line containing
-only `.`, then review the preview and type its confirmation code. Pasting never
-submits. Use `.cancel` on its own line to abandon the prompt.
-
-Start work directly with a registered agent and a quoted prompt. With no prompt,
-this opens the interactive launcher with that agent selected:
+Delegate work to a registered agent with a quoted prompt; tasks run headless:
 
 ```sh
 ahu @dev-astra 'Review configuration validation.' --allow-widened-approvals
@@ -118,8 +108,7 @@ ahu @dev-astra --prompt-file assignment.txt \
   --allow-widened-approvals
 ```
 
-Direct `ahu @agent` submissions do not ask for interactive confirmation and keep
-focus on the caller. The direct form also accepts `--prompt` and `--prompt-file`.
+The direct form accepts `--prompt` and `--prompt-file`.
 Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
 the handle: `ahu task @review` or `ahu cancel @review`.
@@ -235,7 +224,7 @@ without a mandatory interview. The canonical repository skill tree is
 Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
 `.worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
-deletions. Unrelated dirty source files stay behind. Interactive task records and
+deletions. Unrelated dirty source files stay behind. Task records and
 prompts live in the worktree’s ignored `.ahu/state/`; removing the worktree removes
 that state. Headless coordination and the repository’s task index belong to the
 primary checkout’s `.ahu/state/` and survive task worktree deletion. ahu does not
@@ -248,7 +237,7 @@ assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
 settings and gaps without claiming to know everything the harness loads.
-Ordinary launches do not alter native hooks or settings. cmux session hosting is provided by the selected external plugin; ahu does not invoke cmux to install or inspect session-host configuration.
+Ordinary launches do not alter native hooks or settings.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
 
@@ -270,7 +259,6 @@ require explicit user permission.
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
-| `ahu explain --open` | Open the overview through the selected session-host plugin |
 | `ahu agy` | Open a coordinating Antigravity CLI session in the current terminal |
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
@@ -304,9 +292,7 @@ approval. Native configuration can still deny tools, and automatic mode is not
 filesystem confinement. See [harness plugins](docs/harness-plugins.md) for evidence
 and version boundaries.
 
-Aliases accept no extra native flags. Coordinator sessions use the current
-terminal by default. An enabled session-host plugin can supply workspace
-placement through `AHU_INTERACTIVE_PLUGIN`; headless tasks need no session host.
+Aliases accept no extra native flags. Coordinator sessions run in the current terminal.
 See [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
@@ -373,11 +359,8 @@ bundle; they do not install or sync skills globally. See [knowledge checks](docs
 for project configuration and machine-readable results.
 
 Tests use temporary repositories and stand-in harness executables. Core CI tests
-the generic session-host and plugin contracts without cmux or GitHub services.
-Core has no compiled cmux adapter or live cmux test target. Live provider
-checks belong to the external plugin's validation and require an explicitly
-selected installed provider. Passing core fixtures does not establish live
-provider compatibility.
+the plugin contracts without GitHub services. Passing core fixtures does not
+establish live harness compatibility.
 
 ```sh
 cargo test --locked --doc
@@ -386,8 +369,7 @@ cargo run --locked -- explain --mermaid > /tmp/ahu-diagrams.md
 ```
 
 The explanation tests check diagram structure, not rendering. Full validation
-requires parsing the emitted blocks with Mermaid; `ahu explain --open` displays
-them through the selected session-host plugin.
+requires parsing the emitted blocks with Mermaid.
 
 ### Prose linting
 

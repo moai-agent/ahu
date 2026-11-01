@@ -28,7 +28,7 @@ struct Manifest {
     package: String,
     host_api: u32,
     cargo_manifest: String,
-    executable: Option<crate::interactive::external::Executable>,
+    executable: Option<crate::plugin_package::Executable>,
     entrypoint: Option<crate::plugin_exec::Entrypoint>,
     // General OKF metadata is preserved for inspection but never interpreted
     // as host capabilities or execution settings.
@@ -464,24 +464,6 @@ pub(crate) fn discover() -> Result<Vec<PluginStatus>> {
     }
     packages.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(packages)
-}
-
-// The package root and every relative component are pinned again at activation.
-// Copying from this handle avoids executing a subsequently replaced pathname.
-pub(crate) fn executable_file(status: &PluginStatus) -> Result<File> {
-    let root = status
-        .manifest
-        .as_ref()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| invalid("local package has no manifest root"))?;
-    let executable = status
-        .executable
-        .as_ref()
-        .ok_or_else(|| invalid(LOADING_BLOCKER))?;
-    executable.validate()?;
-    let file = open_relative(&open_root(root)?, &executable.path)?;
-    validate_executable(&file)?;
-    Ok(file)
 }
 
 fn open_relative(directory: &File, path: &str) -> Result<File> {

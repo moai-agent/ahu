@@ -7,10 +7,6 @@
 //! The Markdown form carries the diagrams as ```` ```mermaid ```` fences, which
 //! render unchanged on GitHub and can be opened by a selected session-host plugin.
 
-use std::path::{Path, PathBuf};
-
-use crate::util::{Error, Result};
-
 // Bundled skills may still carry the legacy shared-document spellings during
 // migration. Native harness paths are deliberately not translated.
 fn architecture_document() -> String {
@@ -109,7 +105,7 @@ pub fn overview() -> String {
     out.push_str("Harness behavior is supplied by installed Rust plugins. Discovery is metadata-only;\nproject bindings explicitly grant native runtime operations. Run ahu doctor for local status.\n\n");
     out.push_str(
         "Run `ahu explain --markdown` for the same document as Markdown, `--mermaid` for the\n\
-         diagrams alone, or `--open` to open it through the selected session-host plugin.\n\
+         diagrams alone.\n\
          Run `ahu help` for commands, and `ahu doctor` for this machine.\n",
     );
     out
@@ -136,22 +132,6 @@ pub fn mermaid_only() -> String {
         }
     }
     out
-}
-
-pub fn document_path() -> Result<PathBuf> {
-    Ok(crate::state::root()?.join("docs/architecture.md"))
-}
-
-pub fn write_document() -> Result<PathBuf> {
-    let path = document_path()?;
-    crate::state::write_private_file(&path, markdown().as_bytes())
-        .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
-    Ok(path)
-}
-
-pub fn open_in_session_host(path: &Path, focus: bool) -> Result<String> {
-    let client = crate::interactive::discover()?;
-    client.open_markdown(path, focus)
 }
 
 #[cfg(test)]

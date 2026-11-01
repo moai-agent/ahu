@@ -50,15 +50,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         Command::Plugins {
             output_json,
-            probe,
             project,
         } => {
             if project {
-                ahu::interactive::plugins::project::list(&std::env::current_dir()?, output_json)?;
-            } else if probe {
-                ahu::interactive::plugins::probe(output_json)?;
+                ahu::plugin_package::project::list(&std::env::current_dir()?, output_json)?;
             } else {
-                ahu::interactive::plugins::list(output_json)?;
+                ahu::plugin_package::list(output_json)?;
             }
             Ok(0)
         }
@@ -88,27 +85,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             ExplainFormat::Mermaid => {
                 print!("{}", ahu::explain::mermaid_only());
                 Ok(0)
-            }
-            ExplainFormat::OpenInSessionHost => {
-                let path = ahu::explain::write_document()?;
-                println!("Wrote {}", path.display());
-                match ahu::explain::open_in_session_host(&path, true) {
-                    Ok(surface) => {
-                        println!(
-                            "Opened through the selected session-host plugin (surface {surface})."
-                        );
-                        println!("Rendering support depends on the selected plugin.");
-                        Ok(0)
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{}",
-                            style::stdout()
-                                .paint(Role::Hint, "The document is still at the path above.")
-                        );
-                        Err(e)
-                    }
-                }
             }
         },
         // `run-task` is started by the selected session provider inside the task worktree and works from
