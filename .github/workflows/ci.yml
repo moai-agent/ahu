@@ -21,8 +21,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
-    # Cold tool installation plus the serialized coverage suite exceeds 20 minutes.
-    timeout-minutes: 40
+    # Local instrumented validation exceeded 40 minutes before all suites finished.
+    # Allow cold tool installation and the slower single-worker Linux lifecycle run.
+    timeout-minutes: 120
     env:
       TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
@@ -72,7 +73,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check installed harness runtime lifecycle
         run: |
-          cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked --test harness_runtime --test setup_harness_plugins
       - name: Check optional session plugin absence
         run: |
@@ -105,7 +105,7 @@ jobs:
       - name: Test and report code coverage
         run: |
           unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
-          cargo llvm-cov --workspace --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
+          cargo llvm-cov --workspace --all-targets --locked --no-fail-fast --summary-only -- --test-threads="$TEST_THREADS"
           cargo llvm-cov report --json --summary-only | python3 -B scripts/check-eval-mcp-coverage.py
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run

@@ -514,6 +514,11 @@ pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
     };
     fs::write(build.join("src/main.rs"), instrumented).unwrap();
     let output = Command::new(env!("CARGO"))
+        // Standalone fixture crates are checked separately. Do not inherit the
+        // workspace coverage instrumentation: their sanitized runtime environment
+        // intentionally omits LLVM_PROFILE_FILE.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args(["build", "--offline", "--locked", "--manifest-path"])
         .arg(build.join("Cargo.toml"))
         .arg("--target-dir")

@@ -79,8 +79,8 @@ Make CI prove the release boundary without paid services:
   line coverage for each of the eval/OTel and MCP/OTel groups. Release policy
   requires whole-project line coverage strictly greater than 90% and each group at
   least 95%. Check the underlying counts, not just rounded display values.
-  The current CI guard enforces the two group thresholds; separately verify
-  the whole-project threshold before accepting a release.
+  The CI guard enforces the workspace and both group thresholds from the
+  underlying counts; rounded percentages do not determine acceptance.
 - Serialize heavyweight coverage and timed integration suites on a shared host.
   Give each build a separate `CARGO_TARGET_DIR` under the repository’s ignored `.ahu/build/` and
   coordinate suite ownership across agents. Separate target directories avoid

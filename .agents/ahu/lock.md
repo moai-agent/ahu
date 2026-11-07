@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 88aaca6a11220e8ab7bd6c1811269ea2fa76cd973ccfa98a5fd770c18724b091
+  digest: 4e7443a6f41a05281b3a3c33ed647617455a7d26b430db9d4c87c40b16e5ca0b
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -138,8 +138,8 @@ ahu:
     digest: 4e6604b08eb811d2f957e19251426d8f8d0a9af0c10406e69696c2990c1c4abc
     executable: false
     path: .agents/skills/ahu-harness-upgrade/SKILL.md
-  - bytes: 14477
-    digest: eff35f4a9ab7bfe159a9aa8233332beb4e7907cbdc9e7c59ef889ee26ed79468
+  - bytes: 14486
+    digest: 93e76316a4a776c424d6f41dfc852b7290f868cd34da882c26a547f4c25b9581
     executable: false
     path: .agents/skills/ahu-release/SKILL.md
   - bytes: 6771

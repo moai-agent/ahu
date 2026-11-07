@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce line coverage for ahu's evaluation and MCP service code."""
+"""Enforce workspace, evaluation/OTel, and MCP/OTel release coverage."""
 
 import json
 import sys
@@ -29,10 +29,17 @@ def is_mcp(path: str) -> bool:
     )
 
 
+def counts(lines: dict) -> tuple[int, int]:
+    covered, total = lines["covered"], lines["count"]
+    if type(covered) is not int or type(total) is not int or not 0 <= covered <= total:
+        raise ValueError("invalid line coverage counts")
+    return covered, total
+
+
 def coverage(files: list[dict], label: str, select: Callable[[str], bool]) -> tuple[int, int]:
-    selected = [file["summary"]["lines"] for file in files if select(file["filename"])]
-    covered = sum(item["covered"] for item in selected)
-    total = sum(item["count"] for item in selected)
+    selected = [counts(file["summary"]["lines"]) for file in files if select(file["filename"])]
+    covered = sum(item[0] for item in selected)
+    total = sum(item[1] for item in selected)
     if not total:
         raise ValueError(f"coverage report contains no {label} source files")
     return covered, total
@@ -41,12 +48,16 @@ def coverage(files: list[dict], label: str, select: Callable[[str], bool]) -> tu
 def main() -> int:
     report = json.load(sys.stdin)
     files = report["data"][0]["files"]
-    failed = False
+    covered, total = counts(report["data"][0]["totals"]["lines"])
+    if not total:
+        raise ValueError("coverage report contains no workspace lines")
+    print(f"workspace: {covered}/{total} lines ({covered / total * 100:.2f}%), required >90.00%")
+    failed = covered * 100 <= total * 90
     for label, select in (("eval + OTel", is_eval), ("MCP tools + OTel", is_mcp)):
         covered, total = coverage(files, label, select)
         percent = covered / total * 100
         print(f"{label}: {covered}/{total} lines ({percent:.2f}%), required 95.00%")
-        failed |= percent < 95.0
+        failed |= covered * 100 < total * 95
     return int(failed)
 
 

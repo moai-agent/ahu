@@ -374,6 +374,7 @@ fn read_request(id: &str) -> Value {
 fn file_snapshot(
     root: &std::path::Path,
 ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    use std::os::unix::fs::PermissionsExt;
     fn visit(
         root: &std::path::Path,
         paths: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
@@ -393,11 +394,21 @@ fn file_snapshot(
     }
     let mut paths = Default::default();
     visit(root, &mut paths);
+    // Successful invocation may initialize its project-local scratch parent.
+    // Only an empty, private directory is housekeeping: retained snapshots,
+    // files, links, and all durable task mutations must still fail comparison.
+    let scratch = root.join("state/tmp");
+    if fs::symlink_metadata(&scratch)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o700)
+        && fs::read_dir(&scratch).is_ok_and(|mut entries| entries.next().is_none())
+    {
+        paths.remove(&scratch);
+    }
     paths
 }
 
 #[test]
-fn exact_observations_ignore_unrelated_and_unused_corruption_without_state_writes() {
+fn exact_observations_ignore_unrelated_and_unused_corruption_without_durable_writes() {
     for headless in [false, true] {
         let f = fixture("normal");
         f.install();
