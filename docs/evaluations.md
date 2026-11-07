@@ -9,8 +9,8 @@ expectations and judge rubrics stay out of its prompt.
 Keep cases outside the candidate checkout if the candidate should not read their
 answers. Prompt omission is not filesystem isolation. Bounded structured records
 and derived summaries default to the primary checkout's ignored, untracked
-`.ahu/evals/`; raw transcripts, prompts, tool payloads and OTel captures must
-remain outside every repository. Never put private tracker content in eval
+`.ahu/evals/`; raw transcripts, prompts, tool payloads and OTel captures belong in separate
+ignored `.ahu/` subdirectories. Never put private tracker content in eval
 results or commit/upload these local results.
 
 `eval run`, `eval report` and `eval verify` default `--records` to

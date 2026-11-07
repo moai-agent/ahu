@@ -237,7 +237,7 @@ fn structured_input_refusal_precedes_worktree_creation_and_harness_probe() {
             error.contains("schema keyword") || error.contains("valid JSON"),
             "{error}"
         );
-        assert!(!f.repo.path().join(".worktrees").exists());
+        assert!(!f.repo.path().join(".ahu/worktrees").exists());
     }
 }
 
@@ -3030,7 +3030,7 @@ fn primary_store_redirect_is_refused_before_creating_a_task_worktree() {
     let out = f.launch("success", &[]);
     assert!(!out.status.success());
     assert_eq!(std::fs::read_dir(&decoy).unwrap().count(), 0);
-    assert!(!f.repo.path().join(".worktrees").exists());
+    assert!(!f.repo.path().join(".ahu/worktrees").exists());
 }
 
 #[test]
@@ -3341,7 +3341,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launc
             assert!(!ahu::headless::store(&repo).unwrap().exists());
             // Planning may create the self-ignoring root, but no task checkout.
             assert!(
-                std::fs::read_dir(f.repo.path().join(".worktrees"))
+                std::fs::read_dir(f.repo.path().join(".ahu/worktrees"))
                     .unwrap()
                     .all(|entry| entry.unwrap().file_name() == ".gitignore")
             );

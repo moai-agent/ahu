@@ -82,7 +82,7 @@ exit 7
         let tasks: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("tasks")).unwrap()).unwrap();
         assert_eq!(tasks["tasks"], serde_json::json!([]));
-        assert!(!repo.path().join(".worktrees").exists());
+        assert!(!repo.path().join(".ahu/worktrees").exists());
         assert!(output.stdout.is_empty());
         assert_eq!(common::git(repo.path(), &["status", "--porcelain"]), "");
     }
@@ -99,5 +99,5 @@ fn direct_session_without_ranked_model_refuses_before_native_execution() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("exact project-ranked model"));
-    assert!(!repo.path().join(".worktrees").exists());
+    assert!(!repo.path().join(".ahu/worktrees").exists());
 }

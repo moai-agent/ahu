@@ -277,7 +277,7 @@ behavior, execution routing and native history replay are not claimed.
 
 See [system architecture](knowledge/ahu-architecture.md),
 [task state](knowledge/task-state.md), [task communication](knowledge/task-communication.md),
-and [terminal Host V2](../crates/ahu-host-api/src/v2.rs).
+and [executable plugin protocol](executable-plugins.md).
 
 ## Executable plugin CLI observations
 

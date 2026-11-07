@@ -2001,7 +2001,7 @@ fn run_attempt(
         }
     }
     let measurement_started = Instant::now();
-    let pin = crate::executable_pin::ExecutablePin::create()?;
+    let pin = crate::executable_pin::ExecutablePin::create(&repo)?;
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
@@ -4892,7 +4892,7 @@ mod filesystem_behavior_tests {
             let intent = PlacementIntent {
                 schema_version,
                 task_id: task_id.into(),
-                worktree: repo.root.join(".worktrees").join(task_id),
+                worktree: repo.root.join(".ahu/worktrees").join(task_id),
                 branch: "unused".into(),
                 pid,
                 timestamp: 0,

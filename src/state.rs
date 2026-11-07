@@ -10,6 +10,13 @@ use std::path::{Component, Path, PathBuf};
 use crate::bail;
 use crate::util::{Error, Result};
 
+/// Private temporary runtime storage owned by the primary checkout.
+pub(crate) fn temporary_root(repo: &crate::git::Repo) -> Result<PathBuf> {
+    let root = ensure_checkout_state(&repo.primary_root()?)?.join("tmp");
+    create_private_dir_all(&root)?;
+    Ok(root)
+}
+
 /// Local state of the invoking checkout, discovered from the working directory.
 pub fn root() -> Result<PathBuf> {
     let repo = crate::git::discover(&std::env::current_dir()?)?;
@@ -150,22 +157,22 @@ pub fn worktrees_root_at(primary_root: &Path) -> PathBuf {
 
 /// Directory holding a repository's task worktrees.
 ///
-/// Task worktrees live under `.worktrees/` in the primary checkout, including
+/// Task worktrees live under `.ahu/worktrees/` in the primary checkout, including
 /// when launched from another task. That
 /// keeps a task's checkout discoverable from the repository it belongs to.
 ///
 /// The directory ignores itself (see [`WORKTREES_GITIGNORE`]), so it never
 /// appears in `git status` and cannot be committed by accident.
 pub fn worktrees_root(repo_root: &Path) -> Result<PathBuf> {
-    Ok(crate::git::discover(repo_root)?
-        .primary_root()?
-        .join(WORKTREES_DIR))
+    let primary = crate::git::discover(repo_root)?.primary_root()?;
+    checkout_root(&primary)?;
+    Ok(primary.join(WORKTREES_DIR))
 }
 
 /// Name of the in-repository directory holding task worktrees.
-pub const WORKTREES_DIR: &str = ".worktrees";
+pub const WORKTREES_DIR: &str = ".ahu/worktrees";
 
-/// Contents of the `.gitignore` ahu places inside `.worktrees/`.
+/// Contents of the `.gitignore` ahu places inside `.ahu/worktrees/`.
 ///
 /// `*` ignores every entry including this file, so the whole directory is
 /// invisible to Git without ahu ever editing the repository's own `.gitignore`.
@@ -177,15 +184,16 @@ pub fn worktree_dir(repo_root: &Path, task_id: &str) -> Result<PathBuf> {
     Ok(worktrees_root(repo_root)?.join(task_id))
 }
 
-/// Create `.worktrees/` and make it ignore itself.
+/// Create `.ahu/worktrees/` and make it ignore itself.
 ///
-/// `.worktrees` sits inside the repository, so a repository can commit a symlink
+/// `.ahu/worktrees` sits inside the repository, so a repository can commit a symlink
 /// at that path. Following it would put the task checkout, the harness's working
 /// directory, and every configuration file ahu copies wherever the repository
 /// chose — `~/.claude/skills`, say, which would install a machine-wide skill.
 /// So the path is required to be a real directory, and a symlink is refused.
 pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
     let root = worktrees_root(repo_root)?;
+    ensure_checkout_state(&crate::git::discover(repo_root)?.primary_root()?)?;
     match std::fs::symlink_metadata(&root) {
         Ok(meta) if meta.file_type().is_symlink() => {
             let points_to = std::fs::read_link(&root)
@@ -212,7 +220,7 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
         Err(e) => bail!("cannot inspect {}: {e}", root.display()),
     }
     let ignore = root.join(".gitignore");
-    // `.worktrees/.gitignore` is an ordinary path inside the repository, so a
+    // `.ahu/worktrees/.gitignore` is an ordinary path inside the repository, so a
     // repository can commit one. Checking only that *a* file is there would let
     // a committed `# nothing ignored here` stand in for the real one, and then
     // task checkouts show up in the parent's `git status`, can be swept into a
@@ -288,7 +296,7 @@ fn ignores_everything(body: &str) -> bool {
 
 /// Confirm a prepared task worktree really sits inside the repository.
 ///
-/// Checked again at exec time, because `.worktrees` could have been replaced
+/// Checked again at exec time, because `.ahu/worktrees` could have been replaced
 /// between submission and the workspace shell starting.
 pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<()> {
     let root = worktrees_root(repo_root)?;
@@ -301,15 +309,14 @@ pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<
         );
     }
     // Both paths have to resolve. `Path::starts_with` compares components
-    // literally, so an unresolved `<repo>/.worktrees/../../elsewhere` would pass
+    // literally, so an unresolved `<repo>/.ahu/worktrees/../../elsewhere` would pass
     // a prefix test while naming a directory outside the repository. Falling
     // back to the unresolved path on a canonicalize failure would turn this
     // check into exactly that prefix test, so a path that cannot be resolved is
     // refused instead. Nothing legitimate reaches here unresolvable: the
     // worktree has been created and materialized into by the time it is checked.
-    let canonical_repo = root
-        .parent()
-        .expect("worktrees has parent")
+    let canonical_repo = crate::git::discover(repo_root)?
+        .primary_root()?
         .canonicalize()
         .map_err(|e| {
             Error::new(format!(
@@ -1167,6 +1174,7 @@ mod tests {
     #[test]
     fn worktrees_reject_invalid_ignore_entries_and_missing_worktrees() {
         let root = git_repo();
+        ensure_checkout_state(root.path()).unwrap();
         let worktrees = root.path().join(WORKTREES_DIR);
         std::fs::write(&worktrees, "preserve").unwrap();
         let error = ensure_worktrees_root(root.path()).unwrap_err().to_string();
@@ -1202,6 +1210,7 @@ mod tests {
 
         let root = git_repo();
         let outside = tempfile::tempdir().unwrap();
+        ensure_checkout_state(root.path()).unwrap();
         let worktrees = root.path().join(WORKTREES_DIR);
         symlink(outside.path(), &worktrees).unwrap();
         let error = verify_worktree_inside_repo(root.path(), outside.path())
@@ -1368,6 +1377,7 @@ mod tests {
 
         let root = git_repo();
         let outside = tempfile::tempdir().unwrap();
+        ensure_checkout_state(root.path()).unwrap();
         symlink(outside.path(), root.path().join(WORKTREES_DIR)).unwrap();
         assert!(ensure_worktrees_root(root.path()).is_err());
         std::fs::remove_file(root.path().join(WORKTREES_DIR)).unwrap();

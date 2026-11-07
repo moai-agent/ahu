@@ -875,7 +875,7 @@ fn record_a_launch(
         repo_identity: discovered.identity(),
         repo_root: discovered.root.clone(),
         branch: format!("ahu/chris/{task_id}"),
-        worktree: discovered.root.join(format!(".worktrees/{task_id}")),
+        worktree: discovered.root.join(format!(".ahu/worktrees/{task_id}")),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
             release_id: None,

@@ -532,7 +532,7 @@ mod tests {
     fn worktree_and_merged_branch_lifecycle_is_non_destructive() {
         let root = committed_repo();
         let repo = discover(root.path()).unwrap();
-        let worktree = root.path().join(".worktrees/feature-checkout");
+        let worktree = root.path().join(".ahu/worktrees/feature-checkout");
         add_worktree(&repo, &worktree, "ahu/test-task", "HEAD").unwrap();
         assert_eq!(
             discover(&worktree).unwrap().primary_root().unwrap(),
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn discovery_excludes_harnesses_from_every_linked_worktree() {
         let root = committed_repo();
-        let linked = root.path().join(".worktrees/linked-checkout");
+        let linked = root.path().join(".ahu/worktrees/linked-checkout");
         git(
             root.path(),
             &[
@@ -578,7 +578,7 @@ mod tests {
     fn dirty_worktree_and_unmerged_branch_are_preserved() {
         let root = committed_repo();
         let repo = discover(root.path()).unwrap();
-        let worktree = root.path().join(".worktrees/dirty-checkout");
+        let worktree = root.path().join(".ahu/worktrees/dirty-checkout");
         add_worktree(&repo, &worktree, "ahu/dirty-task", "HEAD").unwrap();
         std::fs::write(worktree.join("new-file"), "keep this\n").unwrap();
         assert!(remove_task_worktree(&repo, &worktree).is_err());
@@ -598,9 +598,9 @@ mod tests {
     fn add_worktree_failure_names_invalid_base_and_cleanup_is_safe() {
         let root = committed_repo();
         let repo = discover(root.path()).unwrap();
-        let bad = root.path().join(".worktrees/bad");
+        let bad = root.path().join(".ahu/worktrees/bad");
         assert!(add_worktree(&repo, &bad, "ahu/bad", "missing-commit").is_err());
-        let good = root.path().join(".worktrees/good");
+        let good = root.path().join(".ahu/worktrees/good");
         add_worktree(&repo, &good, "ahu/good", "HEAD").unwrap();
         remove_worktree(&repo, &good, "ahu/good").unwrap();
         assert!(!branch_exists(&repo, "ahu/good").unwrap());

@@ -14,7 +14,7 @@ project or machine must satisfy.
 ## Assign work
 
 Discover identities with `ahu agents`. Put the complete assignment in a UTF-8
-file outside every repository, then launch it with:
+file under the owning repository’s ignored `.ahu/assignments/`, then launch it with:
 
 ```sh
 ahu @agent-name --prompt-file /absolute/path/to/task.txt
@@ -28,7 +28,7 @@ one.
 
 Assign validation ownership as part of the task. Serialize heavyweight coverage
 and timed suites across agents on a shared host; separate build directories do
-not isolate CPU load. Use a distinct external `CARGO_TARGET_DIR` for each build
+not isolate CPU load. Use a distinct `.ahu/build/` subdirectory as `CARGO_TARGET_DIR` for each build
 and require reports to name the tested commit, commands, results, and skips.
 
 ## Inspect and accept

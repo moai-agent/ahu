@@ -42,7 +42,7 @@ or silently replace a named identity. If suitable capacity or evidence is
 unknown, report that and queue or request a decision.
 
 Preserve the repository's auth, privacy, lockfile, and approval boundaries.
-Keep prompts and execution evidence outside the repository. Do not stage,
+Keep prompts and execution evidence under the repository’s ignored `.ahu/`. Do not stage,
 commit, merge, publish, or push unless explicitly authorized; pushes always need
 explicit permission. Give concise progress updates and a final account of
 assignments, reviewed results, checks, integration state, unresolved work, and

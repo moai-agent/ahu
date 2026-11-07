@@ -107,7 +107,7 @@ flowchart LR
 `.agents/ahu/lock.md` gates use of recognized project context. `ahu lock --update` writes a
 candidate lock; an operator reviews and commits it with the context files. The
 lock does not contain per-user settings. Recognized local settings that affect
-agent behavior are separately fingerprinted in owner-only host state per user
+agent behavior are separately fingerprinted in ignored, owner-only `.ahu/state/context-locks/`
 and repository; changing them requires that user to accept the new fingerprint.
 These inputs include local Claude settings and native Antigravity MCP settings
 for projects with an Antigravity registration. Native user settings stay on the

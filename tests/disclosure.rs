@@ -459,7 +459,7 @@ fn a_path_printed_by_a_renderer_is_escaped_like_every_other_string() {
     ) {
         return;
     }
-    let hostile = Path::new("/tmp/repo\u{1b}[2J\u{1b}[1;31mEVIL/.worktrees/abc");
+    let hostile = Path::new("/tmp/repo\u{1b}[2J\u{1b}[1;31mEVIL/.ahu/worktrees/abc");
     let rendered = ahu::util::display_path(hostile);
     assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     assert!(rendered.contains("\\x1b[2J"), "{rendered:?}");

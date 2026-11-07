@@ -193,7 +193,7 @@ fn invented_harness_is_inert_owned_and_provider_independent() {
     );
     let cwd = runtime.call("probe", json!({"mode":"cwd"})).unwrap();
     let snapshot = PathBuf::from(cwd.as_str().unwrap());
-    assert!(!snapshot.starts_with(&fixture.root));
+    assert!(snapshot.starts_with(fixture.root.join(".ahu/state/tmp")));
     assert_eq!(
         fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
         0o700

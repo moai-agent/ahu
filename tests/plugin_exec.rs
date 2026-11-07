@@ -518,7 +518,7 @@ fn task_observations_are_exact_scoped_projected_and_read_only() {
             reader.effects(1, TASK_A).unwrap().start,
             v1::DeliveryState::Pending
         );
-        assert!(!fixture.root.join(".worktrees").exists());
+        assert!(!fixture.root.join(".ahu/worktrees").exists());
         fixture.stopped();
     }
 }

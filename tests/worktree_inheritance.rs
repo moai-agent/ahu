@@ -454,7 +454,7 @@ fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
     let discovered = git::discover(repo.path()).unwrap();
 
     let root = ahu::state::ensure_worktrees_root(&discovered.root).unwrap();
-    assert_eq!(root, discovered.root.join(".worktrees"));
+    assert_eq!(root, discovered.root.join(".ahu/worktrees"));
     assert_eq!(
         std::fs::read_to_string(root.join(".gitignore")).unwrap(),
         ahu::state::WORKTREES_GITIGNORE
@@ -474,7 +474,7 @@ fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
     // committed by accident and `git status` stays clean.
     let status = common::git(repo.path(), &["status", "--porcelain"]);
     assert!(
-        !status.contains(".worktrees"),
+        !status.contains(".ahu/worktrees"),
         "task worktrees must not show up in git status: {status}"
     );
 
@@ -482,7 +482,10 @@ fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
     repo.write("CLAUDE.md", "guidance\n");
     let taken = snapshot::collect(&discovered.root).unwrap();
     assert!(
-        !taken.entries.iter().any(|e| e.path.contains(".worktrees")),
+        !taken
+            .entries
+            .iter()
+            .any(|e| e.path.contains(".ahu/worktrees")),
         "the snapshot must not inventory a task worktree: {:?}",
         taken.entries
     );
@@ -635,18 +638,18 @@ fn committed_configuration_inside_skipped_paths_is_not_launchable() {
     assert!(status.detail.contains("vendor/CLAUDE.md"), "{status:?}");
 }
 
-// --- `.worktrees` must really ignore itself ----------------------------------
+// --- `.ahu/worktrees` must really ignore itself ----------------------------------
 
 #[test]
 fn a_committed_worktrees_gitignore_that_ignores_nothing_is_refused() {
     let repo = native_repo();
-    repo.write(".worktrees/.gitignore", "# nothing ignored here\n");
+    repo.write(".ahu/worktrees/.gitignore", "# nothing ignored here\n");
     repo.commit("hostile gitignore");
 
     let error = ahu::state::ensure_worktrees_root(repo.path())
         .expect_err("a .gitignore that ignores nothing must be refused");
     let message = error.to_string();
-    assert!(message.contains(".worktrees"), "{message}");
+    assert!(message.contains(".ahu/worktrees"), "{message}");
     assert!(message.contains(".gitignore"), "{message}");
 }
 
@@ -656,7 +659,7 @@ fn the_gitignore_ahu_writes_itself_is_accepted_on_every_later_launch() {
     ahu::state::ensure_worktrees_root(repo.path()).expect("first call writes it");
     ahu::state::ensure_worktrees_root(repo.path()).expect("second call accepts it");
     assert_eq!(
-        std::fs::read_to_string(repo.path().join(".worktrees/.gitignore")).unwrap(),
+        std::fs::read_to_string(repo.path().join(".ahu/worktrees/.gitignore")).unwrap(),
         ahu::state::WORKTREES_GITIGNORE
     );
 }
@@ -669,7 +672,9 @@ fn a_worktree_path_that_cannot_be_resolved_is_refused() {
     let discovered = git::discover(repo.path()).unwrap();
     // Textually inside the repository, actually outside it, and nonexistent —
     // so `canonicalize` fails and there is nothing to compare components of.
-    let escaping = discovered.root.join(".worktrees/../../outside-the-repo");
+    let escaping = discovered
+        .root
+        .join(".ahu/worktrees/../../outside-the-repo");
 
     let error = ahu::state::verify_worktree_inside_repo(&discovered.root, &escaping)
         .expect_err("an unresolvable worktree path must be refused");

@@ -16,7 +16,8 @@ release label fails launch preflight; ordinary unlabeled tasks remain supported.
 Verify the collector's actual task/attempt attribution and MCP service version
 after launch. A correct preview does not prove export or the MCP executable.
 
-Keep captures, the selection file, and reports outside every repository. A
+Keep captures, the selection file, and reports under the owning repository’s
+ignored `.ahu/` directory. A
 selection is an explicit array of task attempts to inspect, including attempts
 for which no telemetry arrived:
 

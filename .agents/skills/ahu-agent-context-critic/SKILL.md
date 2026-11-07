@@ -23,7 +23,8 @@ changes and commits them; never commit or push as part of this workflow.
   it does not show all native skill or prompt loading.
 - Bounded eval records and derived summaries belong in the primary checkout's
   ignored `.ahu/evals/` by default; explicit external paths remain supported.
-  Keep raw prompts, traces, transcripts, and run artifacts outside repositories.
+  Keep raw prompts, traces, transcripts, and run artifacts under the owning
+  repository’s ignored `.ahu/` directory.
   Never commit or upload local results or include private tracker content.
 
 ## Workflow

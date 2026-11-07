@@ -395,7 +395,7 @@ fn a_registered_repository_excludes_binaries_under_it() {
         &discovered.root.join("tools/nested/claude")
     ));
     assert!(ahu::selection::is_excluded(
-        &discovered.root.join(".worktrees/abc/claude")
+        &discovered.root.join(".ahu/worktrees/abc/claude")
     ));
 
     let outside = tempfile::TempDir::new().unwrap();

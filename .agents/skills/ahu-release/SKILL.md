@@ -82,11 +82,11 @@ Make CI prove the release boundary without paid services:
   The current CI guard enforces the two group thresholds; separately verify
   the whole-project threshold before accepting a release.
 - Serialize heavyweight coverage and timed integration suites on a shared host.
-  Give each build a separate `CARGO_TARGET_DIR` outside every repository and
+  Give each build a separate `CARGO_TARGET_DIR` under the repository’s ignored `.ahu/build/` and
   coordinate suite ownership across agents. Separate target directories avoid
   build locks, but do not prevent CPU contention from invalidating timed runs.
-  Keep prompts, logs, coverage exports, traces, and release-review reports outside
-  repositories. Structured eval records and derived eval summaries belong in the
+  Keep prompts, logs, coverage exports, traces, and release-review reports under
+  the repository’s ignored `.ahu/` directory. Structured eval records and derived eval summaries belong in the
   primary checkout's ignored `.ahu/evals/` by default; explicit external record
   paths remain supported. Never publish those local results.
 - Use hermetic stubs for harness executables when tests only need executable discovery
@@ -141,7 +141,7 @@ permission separately from publication state; do not modify native user accounts
 or harness configuration as part of this check.
 
 Before removing release task evidence, produce a release effectiveness report
-from an explicit, auditable set of Ahu task/attempt references. Treat this as a
+from an explicit, auditable set of ahu task/attempt references. Treat this as a
 release gate and include the report's disposition in the final handoff. Cover:
 
 - Work assigned to each harness and role (implementation, review, evaluation,
@@ -173,7 +173,7 @@ interactive usage is unavailable unless a supported machine-readable source
 provides it. Do not add retries, parent and child totals, or repeated cumulative
 snapshots as if they were independent usage. Preserve task/attempt-level
 observations and document any aggregation. Save detailed reports and traces
-outside repositories; retain only the appropriately scoped summary and its
+in the owning repository’s ignored `.ahu/` directory; retain only the appropriately scoped summary and its
 coverage limits in the release handoff.
 
 Before handoff, reconcile the ahu tasks used to implement this release. Run

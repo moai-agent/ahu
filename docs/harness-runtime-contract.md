@@ -99,7 +99,7 @@ setup conflicts, trust reconciliation, interrupted decoding, timeout and cleanup
 Live validation separately records native version, model, execution mode, actual
 MCP calls, task-attributed local OTel, deterministic evals and cleanup. Account or
 quota failures are explicit skips, never successful conformance. Keep raw traces
-outside repositories and publication artifacts.
+in the owning repository’s ignored `.ahu/` directory, never in publication artifacts.
 
 Runtimes advertising `decode-event-batches-v1` accept `decode_event` parameters
 with an `events` array instead of a single `stream` and `line`. Each entry has

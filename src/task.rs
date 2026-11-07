@@ -483,7 +483,7 @@ impl TaskListing {
 /// repository, so `ahu tasks` shows the same list from the primary checkout and
 /// from a sibling task worktree without anything being set in the environment:
 ///
-/// * each task worktree under `.worktrees/`, which is where a task's own record
+/// * each task worktree under `.ahu/worktrees/`, which is where a task's own record
 ///   lives and where it goes away when the worktree is removed, and
 /// * the invoking checkout's own store, which holds records written before task
 ///   state moved into worktrees.
@@ -495,8 +495,17 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
     let storage = crate::storage::RepositoryStorage::new(repo)?;
     let mut listing = TaskListing::default();
     let mut incomplete = Vec::new();
+    state::checkout_root(storage.primary.root())?;
     scan_worktrees(
         &storage.worktrees_root(),
+        &identity,
+        &mut listing,
+        &mut incomplete,
+    )?;
+
+    // Read old worktrees without moving or abandoning existing task ownership.
+    scan_worktrees(
+        &storage.primary.root().join(".worktrees"),
         &identity,
         &mut listing,
         &mut incomplete,
@@ -770,7 +779,7 @@ fn scan_worktrees(
         else {
             continue;
         };
-        // `.gitignore` is the file that makes `.worktrees/` ignore itself.
+        // `.gitignore` is the file that makes `.ahu/worktrees/` ignore itself.
         if task_id.starts_with('.') {
             continue;
         }

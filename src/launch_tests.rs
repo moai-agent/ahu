@@ -51,7 +51,7 @@ fn fixture_with_runtime(installed: bool) -> (tempfile::TempDir, Repo, LoadedConf
         path: repo.root.join(crate::config::CONFIG_RELATIVE_PATH),
     };
     let task_id = task::new_task_id().unwrap();
-    let worktree = repo.root.join(".worktrees").join(&task_id);
+    let worktree = repo.root.join(".ahu/worktrees").join(&task_id);
     let task_dir = state::worktree_task_dir(&worktree, &repo.identity(), &task_id);
     let (delivered, delivery) = crate::orchestration::deliver_composed(
         None,
@@ -311,7 +311,7 @@ fn verify_refuses_redirected_worktree_and_changed_command() {
     let dir = repo.root.join(".ahu/state/fixture");
     std::fs::create_dir_all(&plan.worktree).unwrap();
     let mut record = original.clone();
-    record.worktree = repo.root.join(".worktrees/other");
+    record.worktree = repo.root.join(".ahu/worktrees/other");
     std::fs::create_dir_all(&record.worktree).unwrap();
     task::save(&dir, &record, PROMPT).unwrap();
     let error = verify_task(&dir, None).unwrap_err().to_string();
@@ -335,7 +335,7 @@ fn planning_rejects_empty_assignment_and_unborn_repository_before_side_effects()
     let error = plan(&repo, None, frozen.pair, PROMPT).unwrap_err();
     assert_eq!(error.kind(), crate::util::ErrorKind::Prerequisite);
     assert!(error.to_string().contains("no commits yet"));
-    assert!(!repo.root.join(".worktrees").exists());
+    assert!(!repo.root.join(".ahu/worktrees").exists());
     assert!(!repo.root.join(".ahu").exists());
 }
 
@@ -365,7 +365,7 @@ fn planning_refuses_missing_context_lock_before_creating_task_state() {
             .contains("agent context is not committed and locked")
     );
     assert!(error.to_string().contains(".agents/ahu/lock.md is missing"));
-    assert!(!repo.root.join(".worktrees").exists());
+    assert!(!repo.root.join(".ahu/worktrees").exists());
     assert!(!frozen.task_dir.exists());
 }
 
@@ -395,7 +395,7 @@ fn verification_refuses_record_held_by_a_sibling_checkout() {
     let (_temp, repo, loaded, plan) = fixture();
     std::fs::create_dir_all(&plan.worktree).unwrap();
     let record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
-    let sibling = repo.root.join(".worktrees/sibling");
+    let sibling = repo.root.join(".ahu/worktrees/sibling");
     std::fs::create_dir_all(&sibling).unwrap();
     let misplaced = state::worktree_task_dir(&sibling, &repo.identity(), &plan.task_id);
     task::save(&misplaced, &record, PROMPT).unwrap();

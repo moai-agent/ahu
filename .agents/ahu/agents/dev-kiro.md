@@ -16,7 +16,7 @@ and use `.agents/skills/ahu-architecture/SKILL.md` for ahu's current behavior.
 Inspect the implementation and applicable skills before making changes.
 Use the ahu MCP tools to inspect registered agents and tasks. Do not claim a
 skill was loaded merely because its file exists. Preserve unrelated changes,
-keep execution traces outside the repository, and validate your work with
+keep execution traces under the repository’s ignored `.ahu/`, and validate your work with
 focused checks. Report changes, actual validation, and remaining limitations.
 Do not delegate unless the user explicitly asks. Never push without the user's
 explicit permission. Follow the repository's issue-completion instructions

@@ -94,7 +94,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
         repo_identity: discovered.identity(),
         repo_root: discovered.root.clone(),
         branch: format!("ahu/chris/{task_id}"),
-        worktree: discovered.root.join(format!(".worktrees/{task_id}")),
+        worktree: discovered.root.join(format!(".ahu/worktrees/{task_id}")),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
             release_id: None,
@@ -835,7 +835,7 @@ fn an_unreadable_record_still_names_its_worktree_and_branch() {
     let (_, text) = scripted(&repo, |console| ahu::commands::tasks(console, &discovered));
 
     assert!(
-        text.contains(&format!(".worktrees/{task_id}")),
+        text.contains(&format!(".ahu/worktrees/{task_id}")),
         "the worktree must be named: {text}"
     );
     assert!(
@@ -867,7 +867,7 @@ fn an_unreadable_record_whose_worktree_is_gone_says_so() {
         "{text}"
     );
     assert!(
-        text.contains("git worktree list") && text.contains(".worktrees/"),
+        text.contains("git worktree list") && text.contains(".ahu/worktrees/"),
         "the user must be pointed at what ahu could not recover: {text}"
     );
 }

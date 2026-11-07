@@ -260,7 +260,7 @@ fn plan_with_mode(
         hooks::collect(&repo.root, &pair.harness)?
     };
     let parent_dirty = git::is_dirty(repo)?;
-    // Refuse early if `.worktrees` is a symlink, before anything is created.
+    // Refuse early if `.ahu/worktrees` is a symlink, before anything is created.
 
     let task_id = task::new_task_id()?;
     let agent_segment = match &agent {
@@ -634,7 +634,7 @@ pub(crate) fn verify_task(
         );
     }
     let expected_worktree = state::worktree_dir(&discovered.root, &record.task_id)?;
-    // `.worktrees` could have been replaced by a symlink between submission and
+    // `.ahu/worktrees` could have been replaced by a symlink between submission and
     // this shell starting.
     state::verify_worktree_inside_repo(&discovered.root, &record.worktree)?;
     if record.worktree != expected_worktree {
@@ -659,7 +659,7 @@ pub(crate) fn verify_task(
 
     // A record kept inside a task worktree must be that worktree's own. Records
     // written before task state moved into worktrees live in a checkout's store
-    // rather than under `.worktrees/`, and are not subject to this.
+    // rather than under `.ahu/worktrees/`, and are not subject to this.
     if let Some(owner) = state::enclosing_checkout(task_dir) {
         let worktrees = state::worktrees_root_at(&discovered.primary_root()?);
         let resolved = owner.canonicalize().ok();

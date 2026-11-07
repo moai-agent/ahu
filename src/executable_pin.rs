@@ -16,10 +16,13 @@ pub struct ExecutablePin {
 }
 
 impl ExecutablePin {
-    pub fn create() -> Result<Self> {
+    pub fn create(repo: &crate::git::Repo) -> Result<Self> {
         // Trust the controller the operator actually executed, never AHU_BIN or
         // a repository/PATH candidate. This also supports cargo-run binaries.
-        Self::for_executable(&std::env::current_exe()?, &std::env::temp_dir())
+        Self::for_executable(
+            &std::env::current_exe()?,
+            &crate::state::temporary_root(repo)?,
+        )
     }
 
     fn for_executable(executable: &Path, base: &Path) -> Result<Self> {
@@ -72,11 +75,14 @@ impl ExecutablePin {
 
 fn validate_temporary_base(base: &Path) -> Result<()> {
     // Canonicalization permits standard /tmp and /var aliases, but a private
-    // executable directory must not be created in a checkout or unsafe parent.
+    // executable directory must use private state inside a checkout, or a safe
+    // explicit external parent.
     for path in base.ancestors() {
-        if std::fs::symlink_metadata(path.join(".git")).is_ok() {
+        if std::fs::symlink_metadata(path.join(".git")).is_ok()
+            && crate::state::enclosing_checkout(base).is_none()
+        {
             return Err(Error::new(
-                "MCP executable temporary storage must be outside Git checkouts",
+                "MCP executable temporary storage must use private project state",
             ));
         }
         let metadata = std::fs::metadata(path)?;
@@ -118,8 +124,12 @@ mod tests {
 
     #[test]
     fn repeated_pins_are_private_unique_and_cleaned_up() {
-        let first = ExecutablePin::create().unwrap();
-        let second = ExecutablePin::create().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
+        let repo = crate::git::discover(temp.path()).unwrap();
+        let first = ExecutablePin::create(&repo).unwrap();
+        let second = ExecutablePin::create(&repo).unwrap();
+        assert!(first.bin_dir.starts_with(repo.root.join(".ahu/state/tmp")));
         assert_ne!(first.bin_dir, second.bin_dir);
         assert_eq!(
             std::fs::metadata(&first.bin_dir).unwrap().mode() & 0o777,

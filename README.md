@@ -159,8 +159,8 @@ worktree, and launch base; run Git against those directly:
 
 ```sh
 base_commit=COMMIT  # replace with the launch base printed by ahu task
-git -C .worktrees/"$task_id" diff "$base_commit"
-git -C .worktrees/"$task_id" status
+git -C .ahu/worktrees/"$task_id" diff "$base_commit"
+git -C .ahu/worktrees/"$task_id" status
 ```
 
 Worktrees make task changes reviewable; Git does not sandbox an agent's
@@ -222,7 +222,7 @@ without a mandatory interview. The canonical repository skill tree is
 ## What travels with a task
 
 Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
-`.worktrees/` under the primary checkout. Recognized agent configuration is copied
+`.ahu/worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
 deletions. Unrelated dirty source files stay behind. Task records and
 prompts live in the worktree’s ignored `.ahu/state/`; removing the worktree removes

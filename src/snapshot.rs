@@ -23,7 +23,7 @@ struct ContextPaths {
     files: Vec<String>,
     /// Checkout root and index paths when it is a Git checkout. A skipped
     /// directory that Git ignores and that holds no tracked file is local state
-    /// (`target`, `.ahu`, `.worktrees`), not a coverage gap.
+    /// (`target`, `.ahu`, `.ahu/worktrees`), not a coverage gap.
     git: Option<(PathBuf, std::collections::BTreeSet<Vec<u8>>)>,
 }
 impl ContextPaths {
@@ -334,7 +334,7 @@ fn record_unscanned(
     {
         return;
     }
-    // Ignored directories with no tracked file (`target`, `.ahu`, `.worktrees`)
+    // Ignored directories with no tracked file (`target`, `.ahu`, `.ahu/worktrees`)
     // are local state; listing them would make the committed lock depend on
     // whichever of them exist. Untracked directories Git does not ignore stay
     // disclosed, since a planted file there is exactly what this is for.

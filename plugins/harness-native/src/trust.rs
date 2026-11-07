@@ -103,20 +103,17 @@ fn replace(path: &Path, previous: Option<&[u8]>, bytes: &[u8], limit: u64) -> Re
     Ok(())
 }
 
-// Keep the lock inode stable across calls and crashes; never unlink it.
+// Lock the existing native-home directory so all repositories serialize Ahu
+// writers without creating an ahu-owned file in the user's home directory.
+// Native applications do not participate in this advisory lock.
 fn lock_native(path: &Path) -> Result<fs::File> {
     use std::os::fd::AsRawFd;
-    read(path, 128)?;
+    checked(path, true)?.ok_or_else(refused)?;
     let file = OpenOptions::new()
         .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(|_| refused())?;
-    checked(path, false)?.ok_or_else(refused)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         // SAFETY: file owns this live descriptor; flock changes only its advisory lock.
@@ -145,8 +142,7 @@ pub(crate) fn update(
     checked(home, true)?.ok_or_else(refused)?;
     crate::files::check_components(dir)?;
     checked(dir, true)?.ok_or_else(refused)?;
-    let lock = home.join(".ahu-native-trust.lock");
-    let _lock = lock_native(&lock)?;
+    let _lock = lock_native(home)?;
     let path = match harness {
         "claude-code" => home.join(".claude.json"),
         "antigravity" | "codex" => {
@@ -360,6 +356,32 @@ fn edit_codex(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn native_lock_serializes_writers_without_creating_home_files() {
+        use std::os::fd::AsRawFd;
+
+        let home = tempfile::tempdir().unwrap();
+        let lock = lock_native(home.path()).unwrap();
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+        let competitor = fs::File::open(home.path()).unwrap();
+        // SAFETY: competitor owns a live directory descriptor.
+        assert_eq!(
+            unsafe { libc::flock(competitor.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(lock);
+        // SAFETY: competitor still owns its live descriptor; the first lock was released.
+        assert_eq!(
+            unsafe { libc::flock(competitor.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn native_trust_codex_exact_entry_and_reversal() {

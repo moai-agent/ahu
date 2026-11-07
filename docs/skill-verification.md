@@ -62,7 +62,7 @@ transcript, session ID, or machine path. Use `not-tested` for checks that were n
 without the sentinel. An untrusted or untested result is not evidence that a
 trusted session cannot discover skills. Keep bounded verification summaries in
 the primary checkout's ignored `.ahu/evals/` or an explicit external directory.
-Keep raw CLI output and execution traces outside repositories.
+Keep raw CLI output and execution traces under the owning repository’s ignored `.ahu/`.
 
 Provider-free regression coverage runs with:
 
@@ -85,7 +85,7 @@ cd "$fixture" && opencode debug skill
 
 The command prints a JSON array of discovered skills with their locations.
 Piping the output to a parser is unreliable; if needed, use a temporary file
-outside the repository and remove it after inspection. To probe
+under the owning repository’s ignored `.ahu/` and remove it after inspection. To probe
 invocation, start `opencode`, ask it to use the probe skill, and check for
 `PROBE_SKILL_OK`.
 
@@ -182,9 +182,9 @@ not claim a project skill was used when Antigravity does not expose one.
 ## Kiro CLI
 
 ahu setup installs bundled copies under `.kiro/skills/`; the canonical sources
-remain under `.agents/skills/`. The [Kiro adapter](../src/harness/kiro.rs) and
-[catalog](../src/catalog.rs) record interactive V3 2.28.0 and headless
-2.28.0/2.29.0 launch evidence. Those records do not establish native discovery
+remain under `.agents/skills/`. The [runtime setup](../plugins/harness-native/src/setup.rs)
+maintains the Kiro MCP and skill paths. Historical interactive V3 2.28.0 and
+headless 2.28.0/2.29.0 launch evidence does not establish native discovery
 of `.agents/skills/` or invocation of an installed skill. No fixture discovery
 or invocation result is recorded here for Kiro in either mode. Both remain
 unverified, as does native skill-invocation event accounting.

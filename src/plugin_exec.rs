@@ -240,7 +240,7 @@ pub(crate) fn prepare_executable(
             "plugin executable changed after verification",
         ));
     }
-    let base = std::env::temp_dir().canonicalize()?;
+    let base = crate::state::temporary_root(repo)?.canonicalize()?;
     validate_snapshot_base(&base)?;
     let snapshot = tempfile::Builder::new()
         .prefix("ahu-plugin-")
@@ -437,16 +437,17 @@ fn exchange(
     }
 }
 
-/// A verified executable is copied to private storage outside any repository.
+/// A verified executable is copied to private project-local temporary storage.
 fn validate_snapshot_base(base: &std::path::Path) -> crate::util::Result<()> {
     use std::os::unix::fs::MetadataExt;
     for path in base.ancestors() {
         match std::fs::symlink_metadata(path.join(".git")) {
-            Ok(_) => {
+            Ok(_) if crate::state::enclosing_checkout(base).is_none() => {
                 return Err(crate::util::Error::new(
-                    "plugin executable snapshots must be outside repositories",
+                    "plugin executable snapshots must use private project state",
                 ));
             }
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
                 return Err(crate::util::Error::new(

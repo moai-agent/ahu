@@ -64,13 +64,12 @@ impl RepositoryStorage {
     }
     /// Managed worktrees are scanned with task ownership checks, never as legacy stores.
     pub fn legacy_task_stores(&self) -> Result<Vec<PathBuf>> {
-        let managed = self
-            .checkout
-            .root
-            .canonicalize()
-            .ok()
-            .zip(self.worktrees_root().canonicalize().ok())
-            .is_some_and(|(root, worktrees)| root.parent() == Some(worktrees.as_path()));
+        let managed = self.checkout.root.canonicalize().ok().is_some_and(|root| {
+            [self.worktrees_root(), self.primary.root.join(".worktrees")]
+                .iter()
+                .filter_map(|path| path.canonicalize().ok())
+                .any(|worktrees| root.parent() == Some(worktrees.as_path()))
+        });
         let mut stores = Vec::new();
         if !managed {
             stores.push(self.checkout.tasks_dir(&self.identity)?);

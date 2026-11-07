@@ -24,6 +24,27 @@ git check-ignore --quiet .ahu/build/probe || {
   echo "Ignore .ahu/plugin-packages and .ahu/build before staging plugins" >&2; exit 1;
 }
 [ $# -gt 0 ] || set -- codex claude-code antigravity opencode kiro
+# Validate before building or replacing any package. Explicit overrides may be
+# external, but no staging or build path may traverse a symlink.
+for h in "$@"; do
+  case "$h" in
+    codex|claude-code|antigravity|opencode|kiro) ;;
+    *) echo "Unsupported harness: $h" >&2; exit 1 ;;
+  esac
+done
+for destination in "$packages" "$target"; do
+  case "$destination" in
+    /*) ;;
+    *) echo "Use an absolute staging/build path: $destination" >&2; exit 1 ;;
+  esac
+  cursor=$destination
+  while [ "$cursor" != / ]; do
+    if [ -L "$cursor" ]; then
+      echo "Refusing symlinked staging/build path: $cursor" >&2; exit 1
+    fi
+    cursor=$(dirname "$cursor")
+  done
+done
 path=""
 for h in "$@"; do path="$path$packages/harness-$h:"; done
 for h in "$@"; do

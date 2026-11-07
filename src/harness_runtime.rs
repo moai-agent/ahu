@@ -154,7 +154,7 @@ pub fn load(repo: &Repo, harness: &str) -> Result<Runtime> {
         })?;
     let (snapshot, executable, timeout) = if declaration.is_generic() {
         (
-            tempfile::tempdir()?,
+            tempfile::tempdir_in(crate::state::temporary_root(repo)?)?,
             PathBuf::new(),
             Duration::from_millis(declaration.timeout_ms),
         )

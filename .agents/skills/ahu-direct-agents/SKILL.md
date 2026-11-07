@@ -19,7 +19,7 @@ assumption every project or machine must satisfy.
 ## Assign work
 
 Discover identities with `ahu agents`. Put the complete assignment in a UTF-8
-file outside every repository, then launch it with:
+file under the owning repository’s ignored `.ahu/assignments/`, then launch it with:
 
 ```sh
 ahu @agent-name --name meaningful-example --prompt-file /absolute/path/to/task.txt
@@ -33,7 +33,7 @@ one.
 
 Assign validation ownership as part of the task. Serialize heavyweight coverage
 and timed suites across agents on a shared host; separate build directories do
-not isolate CPU load. Use a distinct external `CARGO_TARGET_DIR` for each build
+not isolate CPU load. Use a distinct `.ahu/build/` subdirectory as `CARGO_TARGET_DIR` for each build
 and require reports to name the tested commit, commands, results, and skips.
 
 ## Structured child contracts
@@ -56,11 +56,11 @@ output_schema:
   additionalProperties: false
 ```
 
-With `{"file":"src/lib.rs"}` in an external input artifact, assign a granted
+With `{"file":"src/lib.rs"}` in an ignored `.ahu/` input artifact, assign a granted
 child using:
 
 ```sh
-ahu @reviewer --headless --prompt 'Review the supplied file.' --input-file /absolute/path/outside/repositories/input.json
+ahu @reviewer --headless --prompt 'Review the supplied file.' --input-file /absolute/project/.ahu/assignments/input.json
 ```
 
 Schemas are checked at manifest load and frozen in the child identity. Input is
@@ -84,8 +84,8 @@ through the task's contract and repository policy, inspect the diff and validati
 evidence, and review the actual commit before integrating. New headless tasks
 keep final answers in native harness stores rather than a copied `result.md`.
 Headless tasks have no terminal surface to read; do not make a terminal transcript the
-durable task record. Keep prompts, task reports, and execution traces outside
-repositories. Store bounded eval records and derived eval summaries in the
+durable task record. Keep prompts, task reports, and execution traces under the owning repository’s
+ignored `.ahu/` directory. Store bounded eval records and derived eval summaries in the
 primary checkout's ignored `.ahu/evals/` by default; external record paths remain
 supported. Never publish these local results or include private tracker content.
 

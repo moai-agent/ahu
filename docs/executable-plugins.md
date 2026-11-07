@@ -297,7 +297,7 @@ the same same-user executable limitations described below.
 ## Wire contract and process lifetime
 
 ahu snapshots the verified installed executable into a private temporary
-directory outside repositories, then starts it with this fixed argument vector:
+directory under the primary checkout’s ignored `.ahu/state/tmp/`, then starts it with this fixed argument vector:
 
 ```text
 <private snapshot executable> --ahu-plugin-protocol=1

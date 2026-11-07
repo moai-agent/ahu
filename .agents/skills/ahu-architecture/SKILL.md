@@ -204,7 +204,7 @@ flowchart TB
 ```
 
 Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh
-worktree under .worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
+worktree under .ahu/worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
 ahu requires every recognized context input to be tracked and clean and checks
 that `.agents/ahu/lock.md` matches. Operators update and commit the lock with context edits;
 ahu never stages or commits. Scan skips and depth limits still bound coverage,
@@ -364,10 +364,10 @@ checkpoint does not intercept arbitrary actions or expand harness permissions.
 
 ## State and records
 
-Task worktrees are siblings under `.worktrees/` in the primary checkout.
+Task worktrees are siblings under `.ahu/worktrees/` in the primary checkout.
 A legacy interactive task's record and prompt live in `.ahu/state/` in its worktree,
 so removing that worktree removes them with it. `ahu tasks` and `task` find them
-by looking through `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
+by looking through `.ahu/worktrees/`, from the primary checkout or from any sibling. The launch lock,
 headless coordination and task index belong to the primary; plugin-specific
 `.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;

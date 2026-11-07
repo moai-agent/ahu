@@ -1,6 +1,6 @@
 //! Host-owned issue/task associations and private numeric reports.
 //!
-//! Association data is deliberately kept outside repositories, task records,
+//! Association data stays in ignored owner-only project state, outside task records,
 //! prompts, configuration snapshots, MCP, and telemetry exports.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,20 +53,6 @@ fn ensure_record_capacity(store: &Store, record_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn base_dir() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME") {
-        Some(path) => PathBuf::from(path),
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| Error::new("cannot locate the host state directory"))?
-            .join(".local/state"),
-    };
-    if !base.is_absolute() {
-        return Err(Error::new("host state directory must be absolute"));
-    }
-    Ok(base.join("ahu/private-measurements"))
-}
-
 fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() {
@@ -75,6 +61,13 @@ fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
     let root = repo_root
         .canonicalize()
         .map_err(|_| Error::new("cannot verify repository boundary for private measurements"))?;
+    let allowed = root.join(".ahu/state/private-measurements");
+    if !path.starts_with(&allowed) {
+        return Err(Error::new(
+            "private measurements must use project-local .ahu state",
+        ));
+    }
+    crate::state::ensure_checkout_state(&root)?;
     let mut cursor = PathBuf::new();
     let mut private_zone = false;
     for component in path.components() {
@@ -82,7 +75,7 @@ fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
             Component::RootDir => cursor.push("/"),
             Component::Normal(name) => {
                 cursor.push(name);
-                if cursor.ends_with("ahu/private-measurements") || private_zone {
+                if cursor == root.join(".ahu/state") || private_zone {
                     private_zone = true;
                 }
                 match std::fs::symlink_metadata(&cursor) {
@@ -111,16 +104,6 @@ fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                let canonical = cursor.canonicalize()?;
-                if canonical.starts_with(&root)
-                    || canonical
-                        .ancestors()
-                        .any(|ancestor| ancestor.join(".git").exists())
-                {
-                    return Err(Error::new(
-                        "private measurement state must be outside every checkout",
-                    ));
-                }
             }
             Component::CurDir => {}
             Component::ParentDir | Component::Prefix(_) => {
@@ -132,7 +115,11 @@ fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
 }
 
 fn store_dir(repo: &Repo) -> Result<PathBuf> {
-    let path = base_dir()?.join(repo.identity());
+    let path = repo
+        .primary_root()?
+        .canonicalize()?
+        .join(".ahu/state/private-measurements")
+        .join(repo.identity());
     ensure_private_tree(&path, &repo.primary_root()?)?;
     Ok(path)
 }
@@ -497,11 +484,13 @@ mod tests {
     }
 
     #[test]
-    fn external_store_is_owner_only_and_round_trips_validated_links() {
+    fn project_store_is_owner_only_and_round_trips_validated_links() {
         let root = platform_tempdir();
-        let checkout = platform_tempdir();
-        let directory = root.path().join("ahu/private-measurements").join(REPO);
-        ensure_private_tree(&directory, checkout.path()).unwrap();
+        let directory = root
+            .path()
+            .join(".ahu/state/private-measurements")
+            .join(REPO);
+        ensure_private_tree(&directory, root.path()).unwrap();
         assert_eq!(std::fs::metadata(&directory).unwrap().mode() & 0o777, 0o700);
         let mut records = BTreeMap::new();
         records.insert("r-59".into(), BTreeSet::from([TASK.into()]));
@@ -540,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn external_store_rejects_checkout_paths_symlinks_and_wrong_owner_modes() {
+    fn project_store_rejects_other_paths_symlinks_and_wrong_owner_modes() {
         let root = platform_tempdir();
         let checkout = root.path().join("repo");
         std::fs::create_dir(&checkout).unwrap();
@@ -554,10 +543,14 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(ensure_private_tree(&link.join("ahu/private-measurements"), &checkout).is_err());
 
-        let broad = external.path().join("ahu/private-measurements");
+        let broad = checkout.join(".ahu/state/private-measurements");
         std::fs::create_dir_all(&broad).unwrap();
         std::fs::set_permissions(&broad, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(ensure_private_tree(&broad.join(REPO), &checkout).is_err());
+        std::fs::remove_dir(&broad).unwrap();
+        std::os::unix::fs::symlink(&target, &broad).unwrap();
+        assert!(ensure_private_tree(&broad.join(REPO), &checkout).is_err());
+        assert!(!target.join(REPO).exists());
     }
 
     #[test]

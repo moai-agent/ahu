@@ -5,7 +5,7 @@
 //! Putting that state inside the worktree the task works in is what makes
 //! removing the worktree remove the task's state with it, and what lets the
 //! primary checkout and every sibling worktree find the live tasks by looking
-//! in one place: `.worktrees/`.
+//! in one place: `.ahu/worktrees/`.
 
 mod common;
 
@@ -23,8 +23,27 @@ fn fixture() -> TestRepo {
     repo
 }
 
-/// The repository a child case was pointed at.
-///
+#[test]
+fn legacy_worktrees_remain_discoverable_without_moving_them() {
+    let repo = fixture();
+    let discovered = git::discover(repo.path()).unwrap();
+    let id = "aabbccdd";
+    let worktree = repo.path().join(".worktrees").join(id);
+    git::add_worktree(&discovered, &worktree, "ahu/chris/legacy", "HEAD").unwrap();
+    state::ensure_checkout_state(&worktree).unwrap();
+    let dir = state::worktree_task_dir(&worktree, &discovered.identity(), id);
+    task::save(&dir, &record_for(&repo, id, &worktree), "current work").unwrap();
+    let listing = task::list(&discovered).unwrap();
+    assert!(
+        listing
+            .records
+            .iter()
+            .any(|(_, record)| record.task_id == id)
+    );
+    assert!(worktree.is_dir());
+    assert!(!repo.path().join(".ahu/worktrees").exists());
+}
+
 /// The repository a child case was pointed at.
 ///
 /// Cases that depend on the state override being absent, or on a particular
@@ -218,7 +237,7 @@ fn a_nested_launch_records_into_its_own_worktree_not_its_parent() {
     let plan = plan_from(&parent);
     // `repo.path()` and Git's own answer differ by macOS's `/var` link, so the
     // containment check compares resolved paths.
-    let siblings = repo.path().join(".worktrees").canonicalize().unwrap();
+    let siblings = repo.path().join(".ahu/worktrees").canonicalize().unwrap();
     assert!(
         plan.worktree.parent().unwrap().canonicalize().unwrap() == siblings,
         "a nested task is still a sibling: {}",
@@ -240,7 +259,7 @@ fn live_tasks_are_discovered_from_the_primary_checkout_and_from_a_sibling() {
     let second = "006aa50000000000d2";
     prepare_task(&repo, repo.path(), first);
     let second_dir = prepare_task(&repo, repo.path(), second);
-    let second_worktree = repo.path().join(".worktrees").join(second);
+    let second_worktree = repo.path().join(".ahu/worktrees").join(second);
 
     for from in [repo.path(), second_worktree.as_path()] {
         let listing = ahu_in(from, &["tasks"]);
@@ -291,7 +310,7 @@ fn removing_a_task_worktree_removes_its_state_and_its_listing() {
     // Ordinary removal, not `--force`: the state directory ignores itself, so
     // it does not make the worktree look dirty and does not have to be cleaned
     // up by hand first.
-    let worktree = repo.path().join(".worktrees").join(gone);
+    let worktree = repo.path().join(".ahu/worktrees").join(gone);
     common::git(
         repo.path(),
         &["worktree", "remove", "--", &worktree.to_string_lossy()],
@@ -310,7 +329,7 @@ fn removing_a_task_worktree_removes_its_state_and_its_listing() {
 
     // A worktree deleted with `rm -rf` rather than through Git leaves no state
     // behind either, and the listing handles it without an error.
-    let kept_worktree = repo.path().join(".worktrees").join(kept);
+    let kept_worktree = repo.path().join(".ahu/worktrees").join(kept);
     std::fs::remove_dir_all(&kept_worktree).unwrap();
     let listing = ahu_in(repo.path(), &["tasks"]);
     let text = text_of(&listing);
@@ -325,12 +344,12 @@ fn a_record_in_the_checkout_store_is_still_listed_beside_worktree_records() {
     let repo = fixture();
     let live = "006aa50000000000l1";
     prepare_task(&repo, repo.path(), live);
-    let live_worktree = repo.path().join(".worktrees").join(live);
+    let live_worktree = repo.path().join(".ahu/worktrees").join(live);
 
     let discovered = git::discover(repo.path()).unwrap();
     let identity = discovered.identity();
     let legacy_id = "006aa50000000000l2";
-    let legacy_worktree = repo.path().join(".worktrees").join(legacy_id);
+    let legacy_worktree = repo.path().join(".ahu/worktrees").join(legacy_id);
     let legacy_dir = state::ensure_checkout_state(repo.path())
         .unwrap()
         .join("repos")
@@ -395,13 +414,13 @@ fn a_link_in_place_of_a_worktree_state_directory_is_reported_not_followed() {
     );
 }
 
-/// A link in place of `.worktrees/` itself is refused rather than enumerated.
+/// A link in place of `.ahu/worktrees/` itself is refused rather than enumerated.
 #[cfg(unix)]
 #[test]
 fn a_link_in_place_of_the_worktrees_directory_is_refused() {
     let repo = fixture();
     let elsewhere = tempfile::TempDir::new().unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".worktrees")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".ahu/worktrees")).unwrap();
 
     let listing = ahu_in(repo.path(), &["tasks"]);
     let text = text_of(&listing);
@@ -477,8 +496,8 @@ fn a_transplanted_record_is_named_but_never_listed_as_a_task_case() {
     prepare_task(&repo, repo.path(), other);
 
     let discovered = git::discover(repo.path()).unwrap();
-    let owner_worktree = repo.path().join(".worktrees").join(owner);
-    let other_worktree = repo.path().join(".worktrees").join(other);
+    let owner_worktree = repo.path().join(".ahu/worktrees").join(owner);
+    let other_worktree = repo.path().join(".ahu/worktrees").join(other);
     // `other`'s complete, self-consistent record, sitting in `owner`'s store.
     task::save(
         &state::worktree_task_dir(&owner_worktree, &discovered.identity(), other),
@@ -545,7 +564,7 @@ fn a_record_that_does_not_match_where_it_was_found_is_refused_case() {
     let mismatched = record_for(
         &repo,
         "006aa50000000000m9",
-        &repo.path().join(".worktrees/x"),
+        &repo.path().join(".ahu/worktrees/x"),
     );
     task::save(
         &store.join("006aa50000000000m1"),
@@ -557,7 +576,7 @@ fn a_record_that_does_not_match_where_it_was_found_is_refused_case() {
     let mut foreign = record_for(
         &repo,
         "006aa50000000000m2",
-        &repo.path().join(".worktrees/y"),
+        &repo.path().join(".ahu/worktrees/y"),
     );
     foreign.repo_identity = "0".repeat(16);
     task::save(&store.join("006aa50000000000m2"), &foreign, "current work").unwrap();
@@ -667,7 +686,7 @@ fn discovery_uses_the_repository_it_is_given_not_the_working_directory() {
     let repo = fixture();
     let live = "006aa50000000000q1";
     prepare_task(&repo, repo.path(), live);
-    let sibling = repo.path().join(".worktrees").join(live);
+    let sibling = repo.path().join(".ahu/worktrees").join(live);
 
     let legacy = "006aa50000000000q2";
     let discovered = git::discover(repo.path()).unwrap();
@@ -678,7 +697,11 @@ fn discovery_uses_the_repository_it_is_given_not_the_working_directory() {
             .join(discovered.identity())
             .join("tasks")
             .join(legacy),
-        &record_for(&repo, legacy, &repo.path().join(".worktrees").join(legacy)),
+        &record_for(
+            &repo,
+            legacy,
+            &repo.path().join(".ahu/worktrees").join(legacy),
+        ),
         "current work",
     )
     .unwrap();
@@ -736,7 +759,11 @@ fn an_inherited_override_cannot_hide_worktree_or_legacy_tasks() {
             .join(discovered.identity())
             .join("tasks")
             .join(legacy),
-        &record_for(&repo, legacy, &repo.path().join(".worktrees").join(legacy)),
+        &record_for(
+            &repo,
+            legacy,
+            &repo.path().join(".ahu/worktrees").join(legacy),
+        ),
         "current work",
     )
     .unwrap();
@@ -796,7 +823,11 @@ fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own_case() {
     // Someone else's record, and nothing of the worktree's own.
     task::save(
         &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
-        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        &record_for(
+            &repo,
+            stray,
+            &repo.path().join(".ahu/worktrees").join(stray),
+        ),
         "current work",
     )
     .unwrap();
@@ -847,7 +878,11 @@ fn a_note_survives_a_listing_with_no_tasks_in_it() {
     .unwrap();
     task::save(
         &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
-        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        &record_for(
+            &repo,
+            stray,
+            &repo.path().join(".ahu/worktrees").join(stray),
+        ),
         "current work",
     )
     .unwrap();
@@ -858,7 +893,11 @@ fn a_note_survives_a_listing_with_no_tasks_in_it() {
     std::fs::write(worktree.join(".ahu/.gitignore"), "*\n").unwrap();
     task::save(
         &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
-        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        &record_for(
+            &repo,
+            stray,
+            &repo.path().join(".ahu/worktrees").join(stray),
+        ),
         "current work",
     )
     .unwrap();
@@ -1033,8 +1072,8 @@ fn foreign_record_is_refused_everywhere(genuine_b: bool) {
     }
 
     let discovered = git::discover(repo.path()).unwrap();
-    let a_worktree = repo.path().join(".worktrees").join(a);
-    let b_worktree = repo.path().join(".worktrees").join(b);
+    let a_worktree = repo.path().join(".ahu/worktrees").join(a);
+    let b_worktree = repo.path().join(".ahu/worktrees").join(b);
     // A valid, self-consistent record for B, in A's store.
     task::save(
         &state::worktree_task_dir(&a_worktree, &discovered.identity(), b),

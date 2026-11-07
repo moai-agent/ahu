@@ -438,7 +438,7 @@ fn removal_refuses_live_tasks_and_current_checkout_but_cleans_absent_terminal_wo
             .contains("running inside the worktree")
     );
     assert!(dir.exists());
-    record.worktree = repo.root.join(".worktrees/absent");
+    record.worktree = repo.root.join(".ahu/worktrees/absent");
     task::save(&dir, &record, "synthetic prompt").unwrap();
     let (result, output) = scripted("", |c| remove_cmd(c, &repo, "remove01"));
     assert_eq!(result.unwrap(), 0);
@@ -646,7 +646,7 @@ fn launch_requires_explicit_opt_in_for_widened_manifest_permissions() {
         );
         // Refusal happens before task state, branches, or worktrees are made.
         assert!(task_dirs(&repo).unwrap().is_empty());
-        assert!(!repo.root.join(".worktrees").exists());
+        assert!(!repo.root.join(".ahu/worktrees").exists());
     }
 }
 
@@ -683,7 +683,7 @@ fn agents_distinguish_drift_from_unreadable_history() {
 fn removal_preserves_task_state_when_a_worktree_is_locked() {
     let (_root, repo) = repository();
     let (dir, mut record) = saved(&repo, "locked01");
-    record.worktree = repo.root.join(".worktrees/locked01");
+    record.worktree = repo.root.join(".ahu/worktrees/locked01");
     git(
         &repo.root,
         &[

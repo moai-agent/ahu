@@ -8,7 +8,7 @@ use super::{Error, Result};
 ///
 /// Every path ahu writes to, deletes, or creates inside a repository goes
 /// through this. A repository can commit a symlink at any path it likes — at
-/// `.agents/ahu/agents`, at `.claude`, at `.worktrees` — and following one lets
+/// `.agents/ahu/agents`, at `.claude`, at `.ahu/worktrees` — and following one lets
 /// the repository choose where ahu's filesystem operations land. Checking only
 /// the final component is not enough: the escape is usually a parent.
 ///

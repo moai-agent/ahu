@@ -1322,7 +1322,7 @@ pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask])
     if any_unrecovered {
         out.push_str(
             "   For anything ahu could not recover above, `git worktree list` and the\n\
-             \x20  .worktrees/ directory in this repository are the authoritative listing.\n",
+             \x20  .ahu/worktrees/ directory in this repository are the authoritative listing.\n",
         );
     }
     out
@@ -3324,7 +3324,7 @@ mod artifact_and_inbox_tests {
         assert!(rendered.contains("2 task(s)"));
         assert_eq!(rendered.matches("unsupported record").count(), 1);
         assert!(rendered.contains("task-one [unreadable]"));
-        assert!(rendered.contains(".worktrees/task-two"));
+        assert!(rendered.contains(".ahu/worktrees/task-two"));
         assert!(rendered.contains("branch    none found"));
         assert!(rendered.contains("authoritative listing"));
     }

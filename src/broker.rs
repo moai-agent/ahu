@@ -765,7 +765,7 @@ mod tests {
             std::fs::read(private.join(format!("{id}.prompt.txt"))).unwrap(),
             request.prompt.as_bytes()
         );
-        assert!(!repo.root.join(".worktrees").exists());
+        assert!(!repo.root.join(".ahu/worktrees").exists());
     }
 
     #[test]
@@ -800,7 +800,7 @@ mod tests {
             assert!(!broker.private_dir.join(format!("{id}.prompt.txt")).exists());
         }
         broker.finish().unwrap();
-        assert!(!repo.root.join(".worktrees").exists());
+        assert!(!repo.root.join(".ahu/worktrees").exists());
     }
 
     #[test]

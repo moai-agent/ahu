@@ -128,8 +128,8 @@ sources, and does not include the mapping key, task IDs, or paths.[^telemetry][^
 
 ## Private association lifecycle
 
-`ahu telemetry link|unlink` maintains explicit task membership under the user's
-owner-only host state directory, outside all checkouts. The key is an opaque
+`ahu telemetry link|unlink` maintains explicit task membership under the primary checkout’s
+ignored, owner-only `.ahu/state/private-measurements/` directory. The key is an opaque
 local string and ahu does not contact a tracker or verify its visibility. The
 mapping store is schema-versioned, bounded, symlink-resistant, locked during
 updates, and atomically written. It accepts validated task references only;

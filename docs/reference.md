@@ -510,7 +510,7 @@ smokes do not certify a later CLI version or source revision. Interactive
 startup, headless preview, a completed task, a successful MCP call, and OTel
 collector delivery are separate observations. This public compatibility note
 contains no trace payloads or collector metrics; local telemetry evidence stays
-outside the repository.
+in the repository’s ignored `.ahu/` directory.
 
 Readiness and budget observations are local and time-sensitive, so this public
 reference does not publish account identities, binding states, or capacity
@@ -1089,10 +1089,9 @@ ahu telemetry unlink --key record-a4 --task TASK
 ahu telemetry unlink --key record-a4
 ```
 
-The key and explicit task UUID membership live in an owner-only host state
-directory (`$XDG_STATE_HOME/ahu/private-measurements/` or
-`$HOME/.local/state/ahu/private-measurements/`), outside checkouts, task
-records, and project configuration. A key is limited to ASCII letters, digits,
+The key and explicit task UUID membership live in the primary checkout's
+ignored, owner-only `.ahu/state/private-measurements/` directory, separate from
+task records and shared project configuration. A key is limited to ASCII letters, digits,
 underscores, and hyphens; ahu does not contact the tracker or validate its
 visibility. Keep it opaque and use a private tracker record only after checking
 the record and project visibility yourself. The command does not write to the
@@ -1159,7 +1158,7 @@ envelopes or prove completeness. No provider calls are involved.
 
 Keep the opaque key out of task records, worktree names, prompts, MCP
 responses, shared configuration, OTLP attributes, and diagnostics. Store files
-are outside checkouts, owner-only, symlink-resistant, locked during updates, and
+are ignored, owner-only, symlink-resistant, locked during updates, and
 written atomically. Bind through validated repository/task identity rather than
 caller-supplied paths; repository moves require explicit rebinding.
 Unlink associations explicitly; their retention is independent of task cleanup.
@@ -1815,7 +1814,7 @@ so Git reviews it directly and without an ahu-shaped wrapper around it. Text
 `ahu task` prints a `review` line with the exact command for that task:
 
 ```sh
-git -C /path/to/.worktrees/<task-id> diff <base-commit>
+git -C /path/to/.ahu/worktrees/<task-id> diff <base-commit>
 ```
 
 The same two values are `worktree` and `base_commit` in `ahu task --output
@@ -1826,7 +1825,7 @@ branch alone does not show everything the session touched. See `ahu result` for
 the full recorded list.
 
 - **A fresh branch and worktree.** `ahu/<agent>/<task-id>`, based on the HEAD of
-  the checkout you launched from, under `.worktrees/` in the primary checkout.
+  the checkout you launched from, under `.ahu/worktrees/` in the primary checkout.
   Repeated and concurrent launches always produce distinct tasks.
 - **Recognized repository agent configuration.** Recognized `.agents/`, `.claude/`,
   `.codex/`, `.agent/`, and `.opencode/` directories, plus `CLAUDE.md`,
@@ -2090,8 +2089,7 @@ match committed `HEAD`.
 
 Claude's project-local `.claude/settings.local.json` can change the tools
 available to an agent, so ahu checks its fingerprint too. That fingerprint is
-stored in owner-only host state outside the checkout, separately for each user
-and repository. It does not enter shared `.agents/ahu/lock.md` or telemetry. A local
+stored in the primary checkout’s ignored, owner-only `.ahu/state/context-locks/`. It does not enter shared `.agents/ahu/lock.md` or telemetry. A local
 harness may use the file to enable ahu MCP, and a task worktree may inherit it
 for startup. Keep it limited to settings the task agent may read. A change
 blocks launch until that user runs `ahu lock --update`; local acceptance does

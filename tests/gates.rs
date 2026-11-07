@@ -135,7 +135,7 @@ fn launch_refuses_to_widen_approvals_without_an_explicit_opt_in() {
         // Nothing was created on the way to refusing.
         assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
         assert!(
-            !repo.path().join(".worktrees").exists(),
+            !repo.path().join(".ahu/worktrees").exists(),
             "{permissions}: a refused launch left a worktree root behind"
         );
     }
