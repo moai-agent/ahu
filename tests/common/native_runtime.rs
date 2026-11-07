@@ -64,12 +64,7 @@ fn target() -> &'static std::path::Path {
             for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
                 let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join(format!("plugins/harness-{harness}/Cargo.toml"));
-                let output = Command::new(env!("CARGO"))
-                    // Standalone fixture crates are checked separately. Do not inherit the
-                    // workspace coverage instrumentation: their sanitized runtime environment
-                    // intentionally omits LLVM_PROFILE_FILE.
-                    .env_remove("RUSTFLAGS")
-                    .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                let output = super::fixture_cargo()
                     .args(["build", "--locked", "--offline", "--manifest-path"])
                     .arg(manifest)
                     .env("CARGO_TARGET_DIR", target.path())

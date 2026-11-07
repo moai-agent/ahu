@@ -403,6 +403,11 @@ pub fn run_child_case(name: &str, configure: impl FnOnce(&mut Command)) -> std::
         .env("RUST_BACKTRACE", "1");
     clear_worker_env(&mut command);
     configure(&mut command);
+    // Keep instrumented test subprocesses inside the caller's coverage store,
+    // even when a test deliberately clears its ordinary environment.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command.output().expect("the child test runs")
 }
 
@@ -487,6 +492,24 @@ pub mod plugin;
 pub(crate) use ahu as core_api;
 pub mod runtime;
 
+/// Standalone fixtures have their own checks; do not instrument them with the
+/// workspace's coverage wrapper or flags. Their production-like environment
+/// intentionally omits the profiler destination.
+fn fixture_cargo() -> Command {
+    let mut command = Command::new(env!("CARGO"));
+    command
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    if std::env::var_os("__CARGO_LLVM_COV_RUSTC_WRAPPER").is_some() {
+        command
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER_CRATE_NAMES");
+    }
+    command
+}
+
 /// Build the independent Rust example explicitly, then stage only its package.
 /// Installation itself must never invoke Cargo or use the source directory.
 pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
@@ -513,12 +536,7 @@ pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
         None => source,
     };
     fs::write(build.join("src/main.rs"), instrumented).unwrap();
-    let output = Command::new(env!("CARGO"))
-        // Standalone fixture crates are checked separately. Do not inherit the
-        // workspace coverage instrumentation: their sanitized runtime environment
-        // intentionally omits LLVM_PROFILE_FILE.
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+    let output = fixture_cargo()
         .args(["build", "--offline", "--locked", "--manifest-path"])
         .arg(build.join("Cargo.toml"))
         .arg("--target-dir")
