@@ -1223,6 +1223,57 @@ fn wrapper_runs_as_the_configured_harness_executable() {
     assert!(marker.exists());
 }
 #[test]
+fn work_mode_registered_child_matches_the_frozen_native_inventory() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.bin.join("claude"),
+        r#"#!/usr/bin/env python3
+import json, os, subprocess, sys
+if '--version' in sys.argv:
+ print('2.1.270'); sys.exit(0)
+spec=json.load(open(os.path.join(os.environ['AHU_TASK_DIR'],'headless.json')))
+assert spec['options']['work_mode']
+session=os.environ['AHU_TASK_ID']
+print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
+if spec['depth']==0:
+ child=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background',
+  '--work-mode','--allow-widened-approvals','--timeout','30','--output','json',
+  '--prompt','complete the synthetic child'],capture_output=True,text=True)
+ assert child.returncode==0,child.stderr
+ task=json.loads(child.stdout)['task_id']
+ joined=subprocess.run([os.environ['AHU_BIN'],'wait',task,'--output','json'],capture_output=True,text=True)
+ assert joined.returncode==0,joined.stderr
+ assert json.loads(joined.stdout)['outcome']=='succeeded',joined.stdout
+print(json.dumps({'type':'result','subtype':'success','session_id':session,'is_error':False,'result':'synthetic completion'}),flush=True)
+"#,
+    )
+    .unwrap();
+    let out = f.launch(
+        "success",
+        &["--work-mode", "--allow-child-widened", "@worker"],
+    );
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parent = Fixture::value(&out);
+    assert_eq!(parent["outcome"], "succeeded", "{parent}");
+    let listed = f
+        .command()
+        .args(["tasks", "--output", "json"])
+        .output()
+        .unwrap();
+    let tasks = Fixture::value(&listed);
+    assert_eq!(tasks["tasks"].as_array().unwrap().len(), 2, "{tasks}");
+    assert!(tasks["tasks"].as_array().unwrap().iter().any(|task| {
+        task["attempt"]["parent_task"] == parent["task_id"]
+            && task["attempt"]["outcome"] == "succeeded"
+    }));
+}
+
+#[test]
 fn recursive_registered_child_inherits_headless_and_is_discoverable() {
     let f = Fixture::new();
     let prompt = f.external.path().join("child.txt");

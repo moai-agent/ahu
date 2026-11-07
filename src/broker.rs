@@ -48,7 +48,13 @@ pub fn freeze_grants(
         if !matches!(policy, "disabled" | "bounded") {
             bail!("child native_helpers must be disabled or bounded");
         }
-        let hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
+        // Match the inventory used by the child's launch plan. Work mode
+        // deliberately leaves native configuration uninspected.
+        let hooks = if work_mode {
+            crate::headless::work_mode::hooks(&agent.manifest.harness)
+        } else {
+            crate::hooks::collect(&repo.root, &agent.manifest.harness)?
+        };
 
         grants.push(ChildGrant {
             contract: agent.contract.clone(),
