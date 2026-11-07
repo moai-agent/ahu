@@ -8,8 +8,21 @@
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 ahu=${AHU:-ahu}
-packages=${PACKAGES:-$HOME/.local/share/ahu/plugin-packages}
-target=${TARGET:-${TMPDIR:-/tmp}/ahu-plugins-target}
+packages=${PACKAGES:-$(pwd)/.ahu/plugin-packages}
+target=${TARGET:-$(pwd)/.ahu/build/harness-plugins}
+# Use the same ignored, private local store as the CLI.
+if [ ! -e .ahu ]; then mkdir -m 700 .ahu; fi
+if [ -L .ahu ] || [ ! -d .ahu ]; then
+  echo "Refusing unsafe .ahu directory" >&2; exit 1
+fi
+if [ -L .ahu/.gitignore ]; then
+  echo "Refusing symlinked .ahu/.gitignore" >&2; exit 1
+fi
+if [ ! -e .ahu/.gitignore ]; then printf '*\n' > .ahu/.gitignore; fi
+git check-ignore --quiet .ahu/plugin-packages/probe &&
+git check-ignore --quiet .ahu/build/probe || {
+  echo "Ignore .ahu/plugin-packages and .ahu/build before staging plugins" >&2; exit 1;
+}
 [ $# -gt 0 ] || set -- codex claude-code antigravity opencode kiro
 path=""
 for h in "$@"; do path="$path$packages/harness-$h:"; done
@@ -28,7 +41,9 @@ for h in "$@"; do
     # Re-pin an existing binding to the freshly staged content.
     digest=$("$ahu" plugins digest "$dest" | grep -oE '[0-9a-f]{64}' | tail -1)
     version=$(sed -n '3s/^version = "\(.*\)"$/\1/p' "$src/Cargo.toml")
-    sed -i.bak -E -e "s/^(    (revision|sha256): ).*/\1$digest/" \
+    # Quote the YAML path, then escape sed replacement metacharacters.
+    source_path=$(printf '%s' "$dest" | sed 's/\\/\\\\/g; s/"/\\"/g; s/[&|]/\\&/g')
+    sed -i.bak -E -e "s|^(    repository: ).*|\1\"$source_path\"|" -e "s/^(    (revision|sha256): ).*/\1$digest/" \
       -e "s/^  version: .*/  version: $version/" "$binding"
     rm -f "$binding.bak"
   else

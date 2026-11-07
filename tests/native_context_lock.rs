@@ -38,6 +38,14 @@ fn native_mcp_changes_require_private_acceptance_without_shared_lock_churn() {
     assert!(!String::from_utf8_lossy(&shared).contains("native:invented"));
     assert!(!String::from_utf8_lossy(&shared).contains(".invented/local.json"));
     assert!(run(&["lock"]).status.success());
+    assert!(std::fs::read_dir(state.path()).unwrap().next().is_none());
+    assert!(!home.path().join(".local/state/ahu").exists());
+    let private = repo.path().join(".ahu/state/context-locks");
+    assert!(private.is_dir());
+    common::git(
+        repo.path(),
+        &["check-ignore", "--quiet", ".ahu/state/context-locks"],
+    );
     std::fs::write(
         &native,
         br#"{"mcpServers":{"ahu":{"command":"SYNTHETIC-PRIVATE-SECOND"}}}"#,

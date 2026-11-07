@@ -8,7 +8,7 @@
 //! Three constraints shape this module.
 //!
 //!   - Bounded records and derived summaries may live in the primary checkout's
-//!     ignored, untracked `.ahu/evals/`. Raw run artifacts stay external.
+//!     ignored, untracked `.ahu/evals/`. Raw run artifacts stay in ignored `.ahu/eval-artifacts/`.
 //!   - A missing observation is not a zero. Token, timing, and decision-call
 //!     figures are reported as coverage counts alongside means taken over the
 //!     records that carried them, so a configuration that reported nothing is

@@ -1,6 +1,6 @@
 //! Per-user acceptance for local context that changes agent behavior.
 //!
-//! Fingerprints live in owner-only host state outside checkouts. The shared
+//! Fingerprints live in owner-only, ignored project state. The shared
 //! `.agents/ahu/lock.md` therefore stays collaborative and does not churn with local MCP
 //! or permission settings.
 
@@ -28,18 +28,8 @@ fn invalid() -> Error {
     Error::new("private local-context acceptance is invalid or unavailable")
 }
 
-fn default_state_home() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME") {
-        Some(path) => PathBuf::from(path),
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| Error::new("cannot locate the host state directory"))?
-            .join(".local/state"),
-    };
-    if !base.is_absolute() {
-        return Err(Error::new("host state directory must be absolute"));
-    }
-    Ok(base)
+fn default_state_home(repo: &Repo) -> Result<PathBuf> {
+    crate::state::checkout_root(&repo.primary_root()?)
 }
 
 fn state_dir(repo: &Repo, state_home: &Path, create: bool) -> Result<Option<PathBuf>> {
@@ -57,12 +47,21 @@ fn state_dir(repo: &Repo, state_home: &Path, create: bool) -> Result<Option<Path
     // macOS exposes standard temporary and home locations through symlinked
     // ancestors (for example /var -> /private/var). Resolve the caller-chosen
     // state root once, then continue refusing links below the private Ahu dir.
+    let local_home = default_state_home(repo)?;
+    let project_local = state_home == local_home;
+    if project_local && create {
+        crate::state::ensure_checkout_state(&repo.primary_root()?)?;
+    }
     let state_home = canonicalize_or_append(state_home)?;
     let primary = repo
         .primary_root()?
         .canonicalize()
         .map_err(|_| Error::new("cannot verify repository for private local context"))?;
-    let private_root = state_home.join("ahu");
+    let private_root = if project_local {
+        state_home
+    } else {
+        state_home.join("ahu")
+    };
     let target = private_root.join("context-locks").join(repo.identity());
     let mut cursor = PathBuf::new();
     let mut private_zone = false;
@@ -102,10 +101,11 @@ fn state_dir(repo: &Repo, state_home: &Path, create: bool) -> Result<Option<Path
                     return Err(invalid());
                 }
                 let canonical = cursor.canonicalize()?;
-                if canonical.starts_with(&primary)
-                    || canonical
-                        .ancestors()
-                        .any(|ancestor| ancestor.join(".git").exists())
+                if !project_local
+                    && (canonical.starts_with(&primary)
+                        || canonical
+                            .ancestors()
+                            .any(|ancestor| ancestor.join(".git").exists()))
                 {
                     return Err(Error::new(
                         "private local-context state must remain outside every checkout",
@@ -244,16 +244,9 @@ pub(crate) fn is_current(
     fingerprints: &BTreeMap<String, String>,
     state_home: Option<&Path>,
 ) -> Result<bool> {
-    if fingerprints.is_empty()
-        && std::env::var_os("XDG_STATE_HOME").is_none()
-        && std::env::var_os("HOME").is_none()
-        && state_home.is_none()
-    {
-        return Ok(true);
-    }
     let home = match state_home {
         Some(path) => path.to_path_buf(),
-        None => default_state_home()?,
+        None => default_state_home(repo)?,
     };
     let Some(directory) = state_dir(repo, &home, false)? else {
         return Ok(fingerprints.is_empty());
@@ -270,16 +263,9 @@ pub(crate) fn accept(
     fingerprints: &BTreeMap<String, String>,
     state_home: Option<&Path>,
 ) -> Result<()> {
-    if fingerprints.is_empty()
-        && std::env::var_os("XDG_STATE_HOME").is_none()
-        && std::env::var_os("HOME").is_none()
-        && state_home.is_none()
-    {
-        return Ok(());
-    }
     let home = match state_home {
         Some(path) => path.to_path_buf(),
-        None => default_state_home()?,
+        None => default_state_home(repo)?,
     };
     let directory = if fingerprints.is_empty() {
         match state_dir(repo, &home, false)? {
@@ -315,7 +301,7 @@ pub(crate) fn initialize_if_missing(
     repo: &Repo,
     fingerprints: &BTreeMap<String, String>,
 ) -> Result<()> {
-    initialize_if_missing_at(repo, fingerprints, &default_state_home()?)
+    initialize_if_missing_at(repo, fingerprints, &default_state_home(repo)?)
 }
 
 fn initialize_if_missing_at(
@@ -370,6 +356,42 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn project_acceptance_is_private_ignored_and_refuses_redirected_state() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let checkout = tempfile::tempdir().unwrap();
+        git_cmd(checkout.path(), &["init", "-q"]);
+        let repo = crate::git::discover(checkout.path()).unwrap();
+        let fingerprints = BTreeMap::from([("native:fixture:0".into(), "a".repeat(64))]);
+        assert!(!is_current(&repo, &fingerprints, None).unwrap());
+        assert!(!checkout.path().join(".ahu").exists());
+        accept(&repo, &fingerprints, None).unwrap();
+        assert!(is_current(&repo, &fingerprints, None).unwrap());
+        let directory = state_dir(&repo, &default_state_home(&repo).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert!(directory.starts_with(repo.primary_root().unwrap().join(".ahu/state")));
+        assert_eq!(
+            std::fs::metadata(directory.join(FILE_NAME))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        git_cmd(
+            checkout.path(),
+            &["check-ignore", "--quiet", ".ahu/state/context-locks"],
+        );
+
+        let saved = checkout.path().join("saved-state");
+        std::fs::rename(checkout.path().join(".ahu/state"), &saved).unwrap();
+        symlink(&saved, checkout.path().join(".ahu/state")).unwrap();
+        assert!(is_current(&repo, &fingerprints, None).is_err());
+        assert!(accept(&repo, &fingerprints, None).is_err());
     }
 
     #[test]

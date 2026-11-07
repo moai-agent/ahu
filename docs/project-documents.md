@@ -25,7 +25,8 @@ The declarative-source inventory is broader than these two migrated files:
 | Native harness settings, MCP registrations, native agents and hooks | Harness-owned TOML, JSON, JSONC, Markdown or scripts, retained at native paths |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, workflow YAML | Cargo manifests, Rust version, dependency checks and CI settings; not `ahu` project policy |
 | Task, attempt, plugin-install and migration JSON | Local runtime records; existing formats and frozen task inputs remain exact |
-| Auth bindings, credentials, private context acceptance | Private host storage; never promoted into shared OKF documents |
+| Auth bindings and credentials | Private storage; never promoted into shared OKF documents |
+| Private context acceptance | Primary checkout’s ignored `.ahu/state/context-locks/`; never promoted into shared OKF documents |
 
 The migration operates only on project settings and their context lock. It does
 not infer a common operational schema from Markdown elsewhere in the repository.

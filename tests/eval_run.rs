@@ -51,7 +51,7 @@ Synthetic routing smoke test.
 }
 
 #[test]
-fn eval_run_defaults_to_ignored_primary_records_and_keeps_raw_artifacts_external() {
+fn eval_run_defaults_to_ignored_primary_records_and_private_local_artifacts() {
     use std::os::unix::fs::PermissionsExt;
 
     let repo = TestRepo::new();
@@ -273,9 +273,10 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         rows[0].get("answer").is_none(),
         "record rows omit answer data"
     );
-    let artifact_dir = home
-        .join(".local/state/ahu/eval-artifacts")
-        .join(ahu::git::discover(repo.path()).unwrap().identity())
+    assert!(!home.join(".local/state/ahu/eval-artifacts").exists());
+    let artifact_dir = repo
+        .path()
+        .join(".ahu/eval-artifacts")
         .join(format!("ahu-eval-{}", summary["run_id"].as_str().unwrap()));
     assert!(
         !external

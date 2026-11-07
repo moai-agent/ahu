@@ -27,13 +27,12 @@ new records use `0600`. Configure a Git ignore rule for `.ahu/evals/` before usi
 ahu does not change ignore rules. An explicit external records directory must
 already exist.
 
-Raw per-run artifacts are stored separately under
-`$XDG_STATE_HOME/ahu/eval-artifacts/<repository-id>/`, or
-`$HOME/.local/state/ahu/eval-artifacts/<repository-id>/` when XDG_STATE_HOME is
-unset. This store and its run directories are owner-only, must be outside every
-checkout, and reject links within the artifact store. Trusted external parent
-aliases are resolved before checking the repository boundary. Existing directories
-retain their existing permissions.
+Raw per-run artifacts are stored separately in the primary checkout's ignored
+`.ahu/eval-artifacts/`. The store and its run directories are owner-only and
+reject symlinks, tracked paths, and nested checkouts. This default does not use
+HOME or XDG state storage. The runner initializes the private, self-ignored
+`.ahu/` state directory before retaining raw artifacts. Existing raw artifact
+directories with unsafe permissions are refused.
 Reports remain read-only and print summaries to stdout; save a bounded summary
 in ignored `.ahu/evals/` or external storage when needed. Existing evidence
 must be migrated explicitly.

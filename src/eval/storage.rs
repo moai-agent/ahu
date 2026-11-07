@@ -1,4 +1,4 @@
-//! Paths for bounded eval results; raw execution artifacts always stay external.
+//! Paths for bounded eval results and private repository-local execution artifacts.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -256,29 +256,36 @@ fn safe_directories(base: &Path, path: &Path, create: bool, private: bool) -> Re
 }
 
 pub(super) fn artifacts_dir(repo: &Repo) -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME") {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(
-            std::env::var_os("HOME").ok_or_else(|| usage("cannot locate external ahu storage"))?,
-        )
-        .join(".local/state"),
-    };
-    external_artifacts_dir(repo, &base)
+    let primary = repo.primary_root()?.canonicalize()?;
+    crate::state::ensure_checkout_state(&primary)?;
+    prepare_artifacts_dir(repo, &primary.join(".ahu/eval-artifacts"))
 }
 
-fn external_artifacts_dir(repo: &Repo, base: &Path) -> Result<PathBuf> {
-    if !base.is_absolute() {
-        return Err(usage("external ahu storage must be absolute"));
+fn prepare_artifacts_dir(repo: &Repo, path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(usage("artifact storage must be absolute"));
     }
     let primary = repo.primary_root()?.canonicalize()?;
     let checkout = repo.root.canonicalize()?;
-    let root = resolve_storage_path(&base.join("ahu/eval-artifacts"), &primary, &checkout)?;
-    if root.starts_with(primary)
-        || root.starts_with(checkout)
+    let root = resolve_storage_path(path, &primary, &checkout)?;
+    if root == primary.join(".ahu/eval-artifacts") {
+        if root
+            .ancestors()
+            .take_while(|p| *p != primary)
+            .any(has_git_marker)
+        {
+            return Err(usage("raw artifacts cannot belong to a nested checkout"));
+        }
+        ignored_untracked(&primary, &root)?;
+        safe_directories(&primary.join(".ahu"), &root, true, true)?;
+        return Ok(root);
+    }
+    if root.starts_with(&primary)
+        || root.starts_with(&checkout)
         || root.ancestors().any(has_git_marker)
     {
         return Err(usage(
-            "raw eval artifacts must remain outside every repository",
+            "raw artifacts must use the primary checkout's ignored .ahu/eval-artifacts directory",
         ));
     }
     // The already-existing host ancestors are not ours to chmod. Create any
@@ -304,6 +311,32 @@ fn external_artifacts_dir(repo: &Repo, base: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    fn external_artifacts_dir(repo: &Repo, base: &Path) -> Result<PathBuf> {
+        prepare_artifacts_dir(repo, &base.join("ahu/eval-artifacts"))
+    }
+
+    #[test]
+    fn default_artifacts_are_private_ignored_and_refuse_redirection() {
+        let dir = tempdir();
+        let repo = repository(dir.path());
+        let path = artifacts_dir(&repo).unwrap();
+        assert_eq!(path, repo.root.join(".ahu/eval-artifacts"));
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+        crate::git::run_ok(
+            &repo.root,
+            &["check-ignore", "--quiet", ".ahu/eval-artifacts"],
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(artifacts_dir(&repo).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let saved = repo.root.join("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        symlink(&saved, &path).unwrap();
+        assert!(artifacts_dir(&repo).is_err());
+    }
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
@@ -584,6 +617,10 @@ mod tests {
             primary_default
         );
         assert!(writable_records(&child, &worktree.join(".ahu/evals/runs.jsonl")).is_err());
+        assert_eq!(
+            artifacts_dir(&child).unwrap(),
+            artifacts_dir(&repo).unwrap()
+        );
         assert!(!worktree.join(".ahu").exists());
     }
 

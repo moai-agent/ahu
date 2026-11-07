@@ -170,7 +170,7 @@ eval run options:
                         (`prompt_only`), which is not environment isolation
   --records <path>      Default: primary checkout .ahu/evals/runs.jsonl (ignored,
                         untracked local results). Explicit external paths supported.
-                        Raw artifacts stay in owner-only external ahu host storage
+                        Raw artifacts stay in owner-only ignored .ahu/eval-artifacts/ storage
   --max-trajectory-steps <count>
                         CI maximum from 0 to 4294967295 native steps
   --max-tool-error-rate <rate>
