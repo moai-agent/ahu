@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: d6e18eb906923a5e084c0fd2088de63c7ead9dd5b99b04fdad8d4b76ce39f439
+  digest: cab25416055892bcc2ba762fa91da80411547749a843849619bd3bf9484e9fb7
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -98,24 +98,24 @@ ahu:
     digest: b7b70f8ec9e2cd6b9f7f7dab370b2dba485c924d23b3c9f819291ebca2ca3b14
     executable: false
     path: .agents/ahu/config.md
-  - bytes: 553
-    digest: 01633f956a9dde33c149b9502f3fa2aef97467bb017b491319bd68f94a59e68e
+  - bytes: 567
+    digest: bbd332259a0c3db140d08955cc4088a819b4f215666338d26c2a87599be43026
     executable: false
     path: .agents/ahu/plugins/harness-antigravity.md
-  - bytes: 553
-    digest: 28c1c7dac8a0da125fda39b5ade60a29d82d00e92f84029f4f8ebe987785d914
+  - bytes: 567
+    digest: b5e2c298027dd4d9ba34a6d86d892cca4e963d8ba2eb6eb2b528f77fc26c771c
     executable: false
     path: .agents/ahu/plugins/harness-claude-code.md
-  - bytes: 541
-    digest: 24d8030c5728de6a9fc19675074bef3a9e070647695b20ec44ee810fe0b891e0
+  - bytes: 555
+    digest: 82d98a2be7539216cbb3766a3d56a7b9a8b30e3d7253dbbb5a902024d092c578
     executable: false
     path: .agents/ahu/plugins/harness-codex.md
-  - bytes: 539
-    digest: 73e1a893f7a119ac32f6b34a58dc32eb77462917a5409232797d475dc1e93714
+  - bytes: 553
+    digest: 4600fa7027be345156f4ec4827ee9e0835db727308db1deb183250eecfec9c7e
     executable: false
     path: .agents/ahu/plugins/harness-kiro.md
-  - bytes: 547
-    digest: 44cf307bd95d80e29067c595e0c3fdf4885ea699eb99982fc34abde976e48eeb
+  - bytes: 561
+    digest: 5b9a95068f34b3c4e3233484014f74a47242ef7c140c7590557c8b5de023f29e
     executable: false
     path: .agents/ahu/plugins/harness-opencode.md
   - bytes: 117
@@ -178,8 +178,8 @@ ahu:
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
     path: .mcp.json
-  - bytes: 7702
-    digest: b2614b5a5d9d7792f0a964f303e5e7ca94ba951362b110ec8f9a559263fa2b4c
+  - bytes: 8941
+    digest: 1780954ea158b8b62c6772c292d146ba67ae55d3cf5670e9698de01ad846f3d6
     executable: false
     path: AGENTS.md
   - bytes: 646
