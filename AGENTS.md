@@ -79,18 +79,36 @@ task, without asking for separate permission or leaving it for the user.
 Issue comments and closure do not authorize a Git push. The final response must
 state which associated issues were closed and which remain open, with reasons.
 
-## Repository privacy boundary
+## Repository-local storage and privacy boundary
 
-Store structured evaluation records and derived evaluation summaries in the
-primary checkout's git-ignored `.ahu/evals/` directory by default. These local
-results must not contain private tracker content or raw execution captures, and
-must never be committed or uploaded to GitHub. Explicit external record paths
-remain supported. This exception covers bounded evaluation results only.
+Store all ahu-owned data related to a repository under that repository's
+git-ignored `.ahu/` directory. This includes operational state, task data,
+worktrees, context acceptance, plugin packages, caches, build artifacts,
+evaluation records, raw execution captures, OpenTelemetry traces, metrics,
+and logs. Do not default to home-directory or machine-wide ahu stores, or
+require external storage for traces. Keeping this data together must make
+repository-level inspection and cleanup straightforward.
 
-Do not store execution traces anywhere in this repository, including ignored paths.
-Keep captured OpenTelemetry traces, metrics, and logs in local storage outside
-the repository. Never publish these captures to GitHub, including commits,
-issues, pull requests, release assets, or Actions artifacts.
+Use the primary checkout's `.ahu/` for repository-wide data shared across Git
+worktrees, and a task checkout's `.ahu/` for state owned by that task. Keep each
+repository's data with that repository; do not mix captures from unrelated
+repositories. Use `.ahu/evals/` for bounded evaluation records and derived
+summaries, and separate subdirectories for raw captures and other local data.
+Explicit external destinations may be honored when the user requests them;
+they must not be implicit defaults. Native harness-owned credentials and
+configuration retain their native locations; this rule governs ahu-owned data.
+
+Keep `.ahu/` untracked and ignored by Git, protect sensitive data with owner-only
+permissions, and refuse symlinks that redirect ahu-managed storage outside its
+repository. OKF documents may reference local `.ahu/` paths when needed without
+embedding or publishing their contents. Preserve existing data during migration
+and verify repository ownership before moving historical stores. Cleanup must
+account for active processes and registered Git worktrees before removing data.
+
+Never commit or publish local state, evaluation results, or raw captures to
+GitHub, including issues, pull requests, release assets, or Actions artifacts.
+Bounded evaluation records and summaries must not contain private tracker
+content or raw execution captures. Local storage does not authorize publication.
 Do not put private tracker-derived content in public files without user confirmation
 of the exact material and destination. This includes tracker locations, IDs,
 references, issue titles and bodies, and private project metadata. The issue-type

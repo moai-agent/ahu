@@ -211,8 +211,9 @@ when their behavior changes. Do not expand the core solely for one provider.
 - Document public contracts, units, side effects, and failure conditions with
   rustdoc. Explain surprising invariants and tradeoffs in comments; avoid narrating
   syntax or preserving obsolete implementation history.
-- Keep raw traces outside repositories. Follow the privacy and bounded evaluation
-  storage rules in [repository instructions](../AGENTS.md); never use real captures as fixtures.
+- Keep raw traces in the owning repository's ignored `.ahu/` directory. Follow
+  the privacy and bounded evaluation storage rules in
+  [repository instructions](../AGENTS.md); never use real captures as fixtures.
 
 ## Review and checks
 
