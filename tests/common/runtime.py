@@ -1,5 +1,5 @@
 # Development fixture only. No actual native provider behavior is implemented.
-import os, sys, pathlib, hashlib
+import os, sys, pathlib, hashlib, time
 assert sys.argv[1:] == ['--ahu-harness-runtime-protocol=1']
 assert 'HOME' not in os.environ and 'PATH' not in os.environ
 D = FIXTURE['descriptor']
@@ -54,6 +54,14 @@ def decode(op,p):
         try: event=json.loads(p['line'])
         except Exception: event={}
         kind=event.get('fixture_event')
+        if kind == 'late_decode_failure':
+            # Synchronize with the supervisor's post-exit drain, not a timing guess.
+            closed=pathlib.Path(event['after'])
+            deadline=time.monotonic()+5
+            while not closed.exists() and time.monotonic()<deadline: time.sleep(0.005)
+            assert closed.is_file()
+            closed.with_name('late-decoder-error.observed').write_text('after process exit')
+            raise ValueError('synthetic decoder failure after process exit')
         if kind in ['session','result','failure']:
             if event.get('session'): SNAPSHOT['session']=event['session']
             if kind in ['result','failure']:

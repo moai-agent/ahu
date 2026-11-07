@@ -2260,6 +2260,11 @@ fn run_attempt(
     }
     // Join the owned peer before taking its final cumulative observation.
     drop(decoder);
+    // A decoder or pipe can fail after the process-exit poll. Preserve that
+    // capture failure even when the leader has already exited successfully.
+    let capture_incomplete = !matches!(&output, Some(Ok(())))
+        || !matches!(&errors, Some(Ok(())))
+        || !matches!(&decoded, Some(Ok(())));
     let mut events = std::mem::take(
         &mut *stdout_events
             .lock()
@@ -2385,6 +2390,10 @@ fn run_attempt(
     }
     if boundary_after_drain(&mut events, &mut stop) {
         cancelled_tasks = cancel_tree(&repo, dir, "boundary_violation")?;
+    }
+    if stop.is_none() && capture_incomplete {
+        stop = Some(("capture_failed", Instant::now()));
+        cancelled_tasks = cancel_tree(&repo, dir, "capture_failed")?;
     }
     *phase = "child_reconciliation";
     broker.finish()?;

@@ -3719,3 +3719,53 @@ fn broker_child_inherits_parent_release_including_absence_despite_request_drift(
         assert_eq!(record.identity.release_id.as_deref(), release);
     }
 }
+
+#[test]
+fn decoder_failure_after_process_exit_remains_capture_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("worker", "1.0.0", "claude-code", "claude-opus-5");
+    repo.commit("synthetic late decoder failure");
+    let external = tempfile::tempdir().unwrap();
+    let home = external.path().canonicalize().unwrap();
+    let program = home.join("claude");
+    std::fs::write(
+        &program,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+if '--version' in sys.argv:
+ print('1.2.3'); sys.exit(0)
+closed=os.path.join(os.environ['AHU_TASK_DIR'],'attempt-1','admission-closed.json')
+print(json.dumps({'fixture_event':'late_decode_failure','after':closed}),flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = common::ahu()
+        .current_dir(repo.path())
+        .env("HOME", &home)
+        .env("PATH", format!("{}:/usr/bin:/bin", home.display()))
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "synthetic late error",
+        ])
+        .output()
+        .unwrap();
+    let result = Fixture::value(&output);
+    let result_path = PathBuf::from(result["review"]["result_path"].as_str().unwrap());
+    assert!(
+        result_path
+            .parent()
+            .unwrap()
+            .join("late-decoder-error.observed")
+            .is_file()
+    );
+    assert!(!output.status.success());
+    assert_eq!(result["outcome"], "capture_failed", "{result}");
+    assert_eq!(result["completion_verified"], false);
+}
