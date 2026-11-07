@@ -6,6 +6,24 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+/// Standalone fixtures have their own checks; do not instrument them with the
+/// workspace's coverage wrapper or flags. Their production-like environment
+/// intentionally omits the profiler destination.
+pub(super) fn fixture_cargo() -> Command {
+    let mut command = Command::new(env!("CARGO"));
+    command
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    if std::env::var_os("__CARGO_LLVM_COV_RUSTC_WRAPPER").is_some() {
+        command
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS")
+            .env_remove("__CARGO_LLVM_COV_RUSTC_WRAPPER_CRATE_NAMES");
+    }
+    command
+}
+
 enum BuildTarget {
     Owned(tempfile::TempDir),
     Shared(std::path::PathBuf),
@@ -64,7 +82,7 @@ fn target() -> &'static std::path::Path {
             for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
                 let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join(format!("plugins/harness-{harness}/Cargo.toml"));
-                let output = super::fixture_cargo()
+                let output = fixture_cargo()
                     .args(["build", "--locked", "--offline", "--manifest-path"])
                     .arg(manifest)
                     .env("CARGO_TARGET_DIR", target.path())
