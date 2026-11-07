@@ -68,6 +68,49 @@ fn repo_with_widened_agent(permissions: &str) -> TestRepo {
     repo
 }
 
+#[test]
+fn guarded_headless_planning_does_not_require_an_interactive_plan() {
+    let repo = repo_with_widened_agent("auto");
+    repo.write(
+        ".fixture/runtime.json",
+        r#"{"refuse_modes":["interactive"]}"#,
+    );
+    repo.commit("headless-only fixture planner");
+    let output = launch(
+        &repo,
+        &[
+            "--headless",
+            "--allow-widened-approvals",
+            "--dry-run",
+            "--output",
+            "json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(preview["backend"], "headless");
+    assert!(!std::path::Path::new(preview["worktree"].as_str().unwrap()).exists());
+    assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
+
+    repo.write(".fixture/runtime.json", r#"{"refuse_admission":true}"#);
+    repo.commit("native admission still refuses");
+    let refused = launch(
+        &repo,
+        &["--headless", "--allow-widened-approvals", "--dry-run"],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .to_ascii_lowercase()
+            .contains("admission")
+    );
+    assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
+}
+
 /// `ahu launch` passed `confirm = false` unconditionally, so one non-interactive
 /// command from a pipe started an unattended `permissions = auto` session. The
 /// preview was still printed — to another agent's stdout.

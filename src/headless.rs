@@ -746,11 +746,7 @@ pub fn launch(
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
     confined(&store(repo)?, false)?;
-    let mut plan = if options.work_mode {
-        crate::launch::plan_work_mode(repo, agent, pair, prompt)?
-    } else {
-        crate::launch::plan(repo, agent, pair, prompt)?
-    };
+    let mut plan = crate::launch::plan_headless(repo, agent, pair, prompt, options.work_mode)?;
     plan.apply_display(display)?;
 
     let executable = validate_executable(&plan.harness_executable, repo)?;

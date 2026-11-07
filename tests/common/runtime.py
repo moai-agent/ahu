@@ -85,6 +85,7 @@ def respond(op,p):
         return {'source':'suggested','models':D['models'],'entitlement_checked':False}
     if op == 'launch':
         configured=policy(p)
+        if p['mode'] in configured.get('refuse_modes',[]): raise ValueError('refused')
         if p['permissions'] in configured.get('refuse_permissions',[]): raise ValueError('refused')
         if p['model'] in configured.get('refuse_models',[]): raise ValueError('refused')
         args = ['--model',p['model']]

@@ -201,16 +201,17 @@ pub fn plan_with_state_home(
     prompt: &str,
     state_home: Option<&std::path::Path>,
 ) -> Result<LaunchPlan> {
-    plan_with_mode(repo, agent, pair, prompt, state_home, false)
+    plan_with_mode(repo, agent, pair, prompt, state_home, false, false)
 }
 
-pub(crate) fn plan_work_mode(
+pub(crate) fn plan_headless(
     repo: &Repo,
     agent: Option<ResolvedAgent>,
     pair: ResolvedPair,
     prompt: &str,
+    work_mode: bool,
 ) -> Result<LaunchPlan> {
-    plan_with_mode(repo, agent, pair, prompt, None, true)
+    plan_with_mode(repo, agent, pair, prompt, None, work_mode, true)
 }
 
 fn plan_with_mode(
@@ -220,6 +221,7 @@ fn plan_with_mode(
     prompt: &str,
     state_home: Option<&std::path::Path>,
     work_mode: bool,
+    headless: bool,
 ) -> Result<LaunchPlan> {
     let release_id = crate::telemetry::release_id_for_launch()?;
     if prompt.trim().is_empty() {
@@ -299,7 +301,7 @@ fn plan_with_mode(
         prompt,
         crate::orchestration::Composition::interactive(Some(metadata)),
     )?;
-    let command = if work_mode {
+    let command = if headless {
         // Headless preparation needs native identity/version before its Spec is
         // available. Do not ask a planner for an interactive command: a package
         // may support unattended headless work but refuse interactive auto mode.
