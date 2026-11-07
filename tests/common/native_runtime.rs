@@ -27,7 +27,7 @@ extern "C" fn cleanup() {
 fn target() -> &'static std::path::Path {
     TARGET
         .get_or_init(|| {
-            // A caller may reuse an explicit external development build cache.
+            // A caller may reuse an explicit development build cache.
             // Default fixtures own and remove their build artifacts on process exit.
             let target = match std::env::var_os("AHU_TEST_RUNTIME_TARGET") {
                 Some(path) => {
@@ -35,13 +35,21 @@ fn target() -> &'static std::path::Path {
                     assert!(path.is_absolute());
                     std::fs::create_dir_all(&path).unwrap();
                     let path = path.canonicalize().unwrap();
-                    assert!(
-                        !path.starts_with(
-                            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                .canonicalize()
+                    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .canonicalize()
+                        .unwrap();
+                    if path.starts_with(&repository) {
+                        assert!(path.starts_with(repository.join(".ahu/build")));
+                        assert!(
+                            Command::new("git")
+                                .current_dir(&repository)
+                                .args(["check-ignore", "--quiet", "--no-index", "--"])
+                                .arg(&path)
+                                .status()
                                 .unwrap()
-                        )
-                    );
+                                .success()
+                        );
+                    }
                     BuildTarget::Shared(path)
                 }
                 None => BuildTarget::Owned(

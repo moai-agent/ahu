@@ -25,6 +25,8 @@ jobs:
     # Allow cold tool installation and the slower single-worker Linux lifecycle run.
     timeout-minutes: 120
     env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ahu/build/ci
+      AHU_TEST_RUNTIME_TARGET: ${{ github.workspace }}/.ahu/build/runtime-fixtures
       TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
       run:
