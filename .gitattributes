@@ -1,0 +1,4 @@
+# Local development bindings are not part of a portable source release.
+/.agents/ahu/config.md export-ignore
+/.agents/ahu/lock.md export-ignore
+/.agents/ahu/plugins export-ignore
