@@ -43,41 +43,47 @@ project's `.ahu/`. Cargo replaces the executable with a fresh file. Do not copy
 over an executable in place on macOS. Finish old tasks before an upgrade and
 retain the old CLI/package identity until their cleanup is complete.
 
-## Build and stage harness packages
+## Build only the harness packages you need
 
-The five harnesses are optional. Install the native CLIs and sign in using their
-own instructions before live use. A plugin does not install a native CLI or grant
-access to a model. Build from the same reviewed ahu source checkout. Set the list
-to only the harnesses you want; the following stages all five:
+Installing ahu builds the CLI and MCP server, with no native harness adapters.
+Each production adapter has an independent source repository, version, lockfile
+and package. No sibling source checkout is required. See the
+[harness repository inventory](harness-plugins.md#packages).
+
+The new harness repositories are local release candidates, not published remote
+repositories yet. Use the reviewed local source checkout supplied for validation.
+After publication, use that repository's verified release tag or source archive.
+Follow its INSTALL.md to build and stage its package with the Rust `package`
+command. Install the native CLI and sign in separately.
+
+For example, choose just Codex and Claude Code. Build each in its own checkout:
 
 ```sh
-cd "$ahu_source"
-umask 077
-harnesses="codex claude-code antigravity opencode kiro"
-test ! -L .ahu/plugin-packages && test ! -L .ahu/build/harnesses
-mkdir -p .ahu/plugin-packages .ahu/build
-package_root="$ahu_source/.ahu/plugin-packages/harnesses-0.1.1"
-mkdir "$package_root"
-export CARGO_TARGET_DIR="$ahu_source/.ahu/build/harnesses"
-for harness in $harnesses; do
-  source_dir="$ahu_source/plugins/harness-$harness"
-  cargo build --locked --release --manifest-path "$source_dir/Cargo.toml"
-  package_dir="$package_root/harness-$harness"
-  mkdir -p "$package_dir/bin"
-  for file in ahu-plugin.md Cargo.toml Cargo.lock README.md LICENSE SECURITY.md; do
-    cp "$source_dir/$file" "$package_dir/$file"
-  done
-  install -m 755 "$CARGO_TARGET_DIR/release/ahu-plugin-$harness" "$package_dir/bin/"
-  ahu plugins digest "$package_dir"
+codex_source=/absolute/path/to/ahu-plugin-codex
+claude_source=/absolute/path/to/ahu-plugin-claude-code
+for plugin_source in "$codex_source" "$claude_source"; do
+  (
+    cd "$plugin_source"
+    umask 077
+    test ! -L .ahu
+    mkdir -p .ahu/build .ahu/packages
+    export CARGO_TARGET_DIR="$PWD/.ahu/build/packages"
+    cargo run --locked --bin package -- "$PWD/.ahu/packages/v0.1.1"
+  )
 done
+codex_package="$codex_source/.ahu/packages/v0.1.1/harness-codex"
+claude_package="$claude_source/.ahu/packages/v0.1.1/harness-claude-code"
+ahu plugins digest "$codex_package"
+ahu plugins digest "$claude_package"
+harnesses="codex claude-code"
 ```
 
-Run these blocks in a POSIX shell such as `sh` or Bash; zsh does not split the
-space-separated `harnesses` variable by default. The new destination must not
-already exist. Choose a new versioned destination for a rebuild. Each package is
-specific to the OS/architecture that built it. Digest the final staged contents;
-a binary checksum is not the package digest. Source directories and Cargo source
-archives are not installable binary plugin packages.
+Run multi-package blocks in a POSIX shell such as `sh` or Bash; zsh does not split
+the space-separated list by default. Choose only the packages required by your
+project. Each destination must be new, and each binary is OS/architecture specific.
+The package digest covers all staged contents. Installation never builds source
+or installs unrelated plugins. A client that only connects to `ahu mcp serve`
+does not need a native harness plugin; a task launched by ahu does.
 
 ## Prepare and activate in the consuming repository
 
@@ -102,8 +108,8 @@ absolute paths; symlinked package path components are refused.
 Prepare disabled bindings without executing the plugins, then review them:
 
 ```sh
-for harness in $harnesses; do
-  ahu setup --harness-plugin "$package_root/harness-$harness"
+for package_dir in "$codex_package" "$claude_package"; do
+  ahu setup --harness-plugin "$package_dir"
 done
 git diff --no-index /dev/null .agents/ahu/plugins/harness-codex.md
 ```
@@ -228,3 +234,16 @@ GitHub is not required for task execution. The
 [cmux host](https://github.com/moai-agent/ahu-plugin-cmux) is a standalone Host V2
 package for compatible consumers; ahu 0.11.1 does not execute session-host plugins.
 Do not grant `interactive-backend` expecting to restore removed core functionality.
+
+## Independent harness updates
+
+Follow the selected plugin's INSTALL.md update sequence. Finish and clean tasks
+that require the old package, stage the new version, review/commit only that
+binding's version/path/content pin, and run `ahu plugins update ID`. Refresh and
+review context pins, then repeat its smoke. Do not replace the core executable or
+unrelated plugins. Existing tasks retain frozen package identity: an update cannot
+silently redirect their resume or cleanup. Protocol compatibility and the binding's
+CLI-version requirement must both hold.
+
+Core's `tests/fixtures/harnesses` adapters are hermetic development fixtures, not
+production packages. The former all-harness development installer is retired.

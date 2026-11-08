@@ -1,3 +1,10 @@
+# Native reference-fixture support
+
+This is development-only support for core's hermetic reference adapters. It is
+not a production package or a dependency of independently released plugins.
+See [the fixture contract](../README.md). The historical implementation boundary
+described below is retained to explain the fixture assertions.
+
 # Native harness services
 
 `ahu-harness-native` is a standalone Rust implementation library for **native

@@ -182,7 +182,7 @@ not claim a project skill was used when Antigravity does not expose one.
 ## Kiro CLI
 
 ahu setup installs bundled copies under `.kiro/skills/`; the canonical sources
-remain under `.agents/skills/`. The [runtime setup](../plugins/harness-native/src/setup.rs)
+remain under `.agents/skills/`. The [runtime setup](harness-plugins.md)
 maintains the Kiro MCP and skill paths. Historical interactive V3 2.28.0 and
 headless 2.28.0/2.29.0 launch evidence does not establish native discovery
 of `.agents/skills/` or invocation of an installed skill. No fixture discovery

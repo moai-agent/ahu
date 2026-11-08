@@ -1,19 +1,31 @@
 # Coordinated source release
 
 Publishing only the core repository leaves users without the coordinated Rust
-companion updates. The release set contains three public repositories:
+companion updates. The initial release set contains the existing core/companion repositories and five
+new harness repositories. New repositories remain local until verification and
+explicit publication approval:
 
 | Repository | Tag | Shipped components |
 | --- | --- | --- |
-| [ahu](https://github.com/moai-agent/ahu) | `v0.11.1` | CLI; Codex, Claude Code, Antigravity, OpenCode and Kiro harness packages 0.1.1; shared build crates; text-stats and MCP-only authoring examples |
+| [ahu](https://github.com/moai-agent/ahu) | `v0.11.1` | CLI and MCP server; wire contracts; text-stats and MCP-only authoring examples |
+| ahu-plugin-codex (new, unpublished) | `v0.1.1` | Independent `codex` native runtime package |
+| ahu-plugin-claude-code (new, unpublished) | `v0.1.1` | Independent `claude-code` native runtime package |
+| ahu-plugin-antigravity (new, unpublished) | `v0.1.1` | Independent `antigravity` native runtime package |
+| ahu-plugin-opencode (new, unpublished) | `v0.1.1` | Independent `opencode` native runtime package |
+| ahu-plugin-kiro (new, unpublished) | `v0.1.1` | Independent `kiro` native runtime package |
 | [ahu-plugin-github](https://github.com/moai-agent/ahu-plugin-github) | `v0.1.1` | `github-cli` and `github-tracker` Rust packages, optional tracker skill |
 | [ahu-plugin-cmux](https://github.com/moai-agent/ahu-plugin-cmux) | `v0.2.1` | Standalone Rust `cmux-host`, Host V2 |
 
-The harness packages share the ahu source repository. They do not require five
-new repositories. Their independent package versions and staged content pins
-remain explicit. Shared Rust crates are source build dependencies, not separately
-installed executable plugins. These releases use Git source tags and GitHub
-Releases; crates.io publication is not required or promised.
+Harness packages own their source and release schedules. Installing core installs
+no native harness adapter. Each plugin vendors a frozen small contract crate, with
+provenance, so source builds require no sibling repositories or unpublished Git
+dependencies. Core retains hermetic reference adapters only under tests/fixtures;
+these are development fixtures, never supported installation sources.
+
+After the initial extraction is validated, a compatible harness update needs only
+that repository's release. Do not synchronize unrelated package versions. These
+releases use Git source tags and GitHub Releases; crates.io is not required or
+promised. Every production package must include complete installation/update docs.
 
 This document describes intended publication, not evidence that these tags already
 exist. Each release must link its installation README and state the exact source
@@ -34,11 +46,11 @@ an OS/architecture until those actual assets have been built and verified.
    validation reports, or private tracker material. Building a source archive
    does not make it an installable binary plugin package.
 4. Obtain explicit authorization for the exact branches/tags and destinations
-   before pushing. Run required hosted CI and review on those candidate commits in
-   all three repositories. Green checks on an older SHA do not satisfy this gate.
+   before creating remote repositories or pushing. Run required hosted CI and review on those candidate commits in
+   all repositories being published. Green checks on an older SHA do not satisfy this gate.
 5. Integrate reviewed candidates into each repository's `main`, validate any
    changed merge tree, and create the version tags at the reviewed release commits.
-   Publish all three releases as one coordinated set; verify every remote tag and
+   Publish the initially approved release set; verify every remote tag and
    release URL. Never force-push or replace an existing tag.
 6. Repeat the documented clone/install smoke against the published tags. A local
    candidate rehearsal cannot prove that a remote tag or release asset is available.

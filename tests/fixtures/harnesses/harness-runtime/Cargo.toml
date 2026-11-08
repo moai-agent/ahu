@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-ahu-harness-api = { path = "../../crates/ahu-harness-api" }
+ahu-harness-api = { path = "../../../../crates/ahu-harness-api" }
 ahu-harness-events = { path = "../harness-events" }
 ahu-harness-native = { path = "../harness-native" }
 serde = { version = "1", features = ["derive"] }

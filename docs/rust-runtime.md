@@ -19,12 +19,12 @@ implementation language of external CLIs or harnesses.
 | Native Ollama decision client | Rust | Core client; requires compatible external Ollama and model |
 | text-stats authoring example | Rust | Independent example; build and stage before installation |
 
-The five harness runtime packages live under `plugins/`. They link shared Rust
-native-service and event-normalization implementation libraries; core links only
-the data-only `ahu-harness-api` contract. Core's `src/harness/` holds generic launch
-validation and lifecycle facades. Package updates can change native compatibility
-without recompiling core. Rust implementation does not establish current account
-availability or live compatibility with every native version.
+The five harness runtime packages live in independent repositories, each owning
+its native-service and event-normalization implementation. Core links only the
+data-only `ahu-harness-api` contract. Core's `src/harness/` holds generic launch
+validation and lifecycle facades. A compatible package update changes native
+compatibility without recompiling core or updating another plugin. Rust does not
+establish current account availability or live compatibility with every version.
 
 The GitHub migration retains independent protocol fixtures, including
 Python development oracles. Those files must never appear in the staged runtime
@@ -40,3 +40,9 @@ and missing telemetry must never become zero usage.
 See the [installation guide](installation.md) and [coordinated publication
 checklist](publication.md) for source repositories, release versions and artifact
 boundaries.
+
+Harness adapters are now independent source repositories, listed in
+[harness plugins](harness-plugins.md). Core retains only development reference
+fixtures under `tests/fixtures/harnesses`; they are not shipped adapters. A normal
+core install builds no native implementation. Each plugin builds and updates on
+its own with a frozen source copy of the wire-contract dependency.

@@ -60,11 +60,11 @@ jobs:
         run: |
           AHU_TEST_BIN="${CARGO_TARGET_DIR:-target}/debug/ahu" python3 -B -m unittest discover \
             -s scripts -p test_prepare_skill_ablation.py -k test_real_lock_refresh_records_only_control_skills
-      - name: Validate independent Rust plugin packages
+      - name: Validate Rust authoring example and harness reference fixtures
         # Integration tests build these standalone crates offline. Their own
         # lockfiles can select dependencies absent from the core's lockfile.
         run: |
-          for package in examples/plugins/text-stats plugins/harness-codex plugins/harness-claude-code plugins/harness-antigravity plugins/harness-opencode plugins/harness-kiro plugins/harness-runtime plugins/harness-native plugins/harness-events; do
+          for package in examples/plugins/text-stats tests/fixtures/harnesses/harness-codex tests/fixtures/harnesses/harness-claude-code tests/fixtures/harnesses/harness-antigravity tests/fixtures/harnesses/harness-opencode tests/fixtures/harnesses/harness-kiro tests/fixtures/harnesses/harness-runtime tests/fixtures/harnesses/harness-native tests/fixtures/harnesses/harness-events; do
             manifest="$package/Cargo.toml"
             cargo fetch --locked --manifest-path "$manifest"
             cargo fmt --manifest-path "$manifest" --check

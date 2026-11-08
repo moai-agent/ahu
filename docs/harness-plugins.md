@@ -25,19 +25,25 @@ task successful on its own.
 
 | Harness ID | Native CLI | Package | Historical implementation baseline |
 | --- | --- | --- | --- |
-| `codex` | `codex` | [Codex](../plugins/harness-codex/README.md) | 0.163.0 |
-| `claude-code` | `claude` | [Claude Code](../plugins/harness-claude-code/README.md) | 2.1.310 |
-| `antigravity` | `agy` | [Antigravity](../plugins/harness-antigravity/README.md) | 1.4.7 |
-| `opencode` | `opencode` | [OpenCode](../plugins/harness-opencode/README.md) | 2.0.32 |
-| `kiro` | `kiro-cli` | [Kiro](../plugins/harness-kiro/README.md) | 2.34.0 (version/help inspected) |
+| `codex` | `codex` | [Codex](https://github.com/moai-agent/ahu-plugin-codex) | 0.163.0 |
+| `claude-code` | `claude` | [Claude Code](https://github.com/moai-agent/ahu-plugin-claude-code) | 2.1.310 |
+| `antigravity` | `agy` | [Antigravity](https://github.com/moai-agent/ahu-plugin-antigravity) | 1.4.7 |
+| `opencode` | `opencode` | [OpenCode](https://github.com/moai-agent/ahu-plugin-opencode) | 2.0.32 |
+| `kiro` | `kiro-cli` | [Kiro](https://github.com/moai-agent/ahu-plugin-kiro) | 2.34.0 (version/help inspected) |
 
-Each package has an independent semantic version, manifest, lockfile and binary.
-Source builds use adjacent Rust implementation libraries. Core links only the
-shared data contract, never the native implementations. Customer execution needs
-no Python interpreter. Their source distribution is the tagged ahu repository; see the
-[publication plan](publication.md). A source directory must be built and staged
-before plugin installation. Historical version evidence does not establish live
-account access or all-mode certification.
+Each package has an independent source repository, semantic version, manifest,
+lockfile and Rust binary. The repository links above name intended publication
+destinations; the extracted repositories are currently unpublished local candidates.
+No sibling checkout or core source tree is needed to build a plugin. Each owns
+its native implementation, and vendors a frozen, checksummed version of the small
+provider-independent wire-contract crate. This dependency is source only, not a
+second executable or an automatic upgrade. Core links the data contract and never
+the native implementations. Customer builds and execution need no Python.
+
+The [publication plan](publication.md) covers initial publication. Later harness
+releases proceed independently while compatible with core's runtime protocol and
+binding requirements. Source directories must be built/staged before installation.
+Historical version evidence is not live all-mode certification.
 
 ## Installation and activation
 
@@ -46,10 +52,10 @@ repository-local staging, disabled bindings, explicit installation and grants,
 project setup, a live smoke and cleanup. It includes copyable commands for all
 five packages. No development helper is required.
 
-`scripts/install-harness-plugins.sh` is an internal development convenience,
-not the customer installation contract. Installation copies a previously built,
-content-pinned package; it never invokes Cargo or enables runtime access implicitly.
-Bump the package version for published content updates and review new content pins.
+The former all-harness development installer is retired. Use each independent
+repository's INSTALL.md and Rust package command. Installation copies a previously
+built, content-pinned package and never invokes Cargo or implicitly grants runtime
+access. Version changed package contents and review each new pin.
 
 Harnesses are optional. Without a harness plugin, core commands remain available;
 launching that harness reports the missing installed capability. A binding may

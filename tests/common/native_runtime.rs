@@ -45,6 +45,17 @@ extern "C" fn cleanup() {
 fn target() -> &'static std::path::Path {
     TARGET
         .get_or_init(|| {
+            // Release conformance can use independently built production adapters.
+            // Ordinary tests retain hermetic reference fixtures and need no sibling repos.
+            if let Some(path) = std::env::var_os("AHU_TEST_HARNESS_BIN_DIR") {
+                let path = std::path::PathBuf::from(path);
+                assert!(path.is_absolute());
+                let path = path.canonicalize().unwrap();
+                for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
+                    assert!(path.join(format!("ahu-plugin-{harness}")).is_file());
+                }
+                return BuildTarget::Shared(path);
+            }
             // A caller may reuse an explicit development build cache.
             // Default fixtures own and remove their build artifacts on process exit.
             let target = match std::env::var_os("AHU_TEST_RUNTIME_TARGET") {
@@ -80,8 +91,9 @@ fn target() -> &'static std::path::Path {
             // SAFETY: static callback accesses only this process-owned fixture, never a shared cache.
             assert_eq!(unsafe { libc::atexit(cleanup) }, 0);
             for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
-                let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join(format!("plugins/harness-{harness}/Cargo.toml"));
+                let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "tests/fixtures/harnesses/harness-{harness}/Cargo.toml"
+                ));
                 let output = fixture_cargo()
                     .args(["build", "--locked", "--offline", "--manifest-path"])
                     .arg(manifest)

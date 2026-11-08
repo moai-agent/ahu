@@ -387,3 +387,9 @@ See the [0.10.0 release notes](docs/releases/0.10.0.md) for Kiro CLI support,
 headless Kiro agents, and improved evaluation and local telemetry evidence. Earlier notes are in [docs/releases/](docs/releases/).
 
 See [shared project documents and explicit migration](docs/project-documents.md) for OKF schemas, legacy compatibility, and recovery.
+
+Harness plugins are independently built and released. Install only those needed
+by the project; see the [repository inventory](docs/harness-plugins.md#packages)
+and [selective installation guide](docs/installation.md). The extracted harness
+repositories are unpublished local candidates until validation and approval.
+An MCP-only client can connect to `ahu mcp serve` without a native adapter.
