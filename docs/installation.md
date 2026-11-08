@@ -122,9 +122,14 @@ ahu plugins installed --output json
 ```
 
 Edit each binding's `ahu.grants` from `[]` to `[harness-runtime]` only after
-reviewing the package's security notice. Then enable and configure the project:
+reviewing the package's security notice. Commit the grant edits before running
+`enable`; activation refuses an uncommitted binding. Then enable and configure
+the project:
 
 ```sh
+git diff -- .agents/ahu/plugins
+git add .agents/ahu/plugins
+git commit -m 'Grant reviewed harness runtime authority'
 for harness in $harnesses; do
   ahu plugins enable "harness-$harness"
 done
