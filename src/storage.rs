@@ -316,20 +316,46 @@ fn validate_metadata_owner(meta: &std::fs::Metadata, private: bool, uid: u32) ->
 /// Read task records with descriptor checks even during legacy owner discovery,
 /// where recursing through the headless resolver would need this very record.
 pub(crate) fn read_task_metadata(path: &Path) -> Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
     crate::state::confine_file(path)?;
     let private = HeadlessStore::containing(
         path.parent()
             .ok_or_else(|| crate::util::Error::new("missing metadata parent"))?,
     )?
     .is_some();
-    let mut file = std::fs::OpenOptions::new()
+    read_opened_task_metadata(path, private, open_task_metadata(path)?)
+}
+
+fn open_task_metadata(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    crate::state::confine_file(path)?;
+    Ok(std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)?;
-    validate_owned_metadata(&file.metadata()?, private)?;
-    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)?;
-    Ok(bytes)
+        .open(path)?)
+}
+
+fn read_opened_task_metadata(
+    path: &Path,
+    private: bool,
+    mut file: std::fs::File,
+) -> Result<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    for retry in 0..=3 {
+        let metadata = file.metadata()?;
+        // Atomic replacement can unlink the opened snapshot before fstat.
+        // Reopen the current pathname; never read an unlinked descriptor or
+        // relax validation of ownership, permissions, or multiple links.
+        if metadata.nlink() == 0 && retry < 3 {
+            file = open_task_metadata(path)?;
+            continue;
+        }
+        validate_owned_metadata(&metadata, private)?;
+        return Ok(crate::util::read_limited(
+            &mut file,
+            crate::util::MAX_TASK_RECORD_BYTES,
+        )?);
+    }
+    unreachable!("the final attempt returns its validation result")
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -502,6 +528,24 @@ mod ownership_tests {
         let metadata = std::fs::File::open(path).unwrap().metadata().unwrap();
         assert!(validate_metadata_owner(&metadata, true, metadata.uid()).is_ok());
         assert!(validate_metadata_owner(&metadata, true, metadata.uid().wrapping_add(1)).is_err());
+    }
+
+    #[test]
+    fn task_record_read_reopens_an_atomically_replaced_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.json");
+        crate::state::write_private_file(&path, b"old").unwrap();
+        let old = open_task_metadata(&path).unwrap();
+        let replacement = dir.path().join("replacement.json");
+        crate::state::write_private_file(&replacement, b"new").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(read_opened_task_metadata(&path, true, old).unwrap(), b"new");
+
+        let old = open_task_metadata(&path).unwrap();
+        crate::state::write_private_file(&replacement, b"shared").unwrap();
+        std::fs::hard_link(&replacement, dir.path().join("alias.json")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(read_opened_task_metadata(&path, true, old).is_err());
     }
 
     #[test]
