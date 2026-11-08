@@ -173,9 +173,11 @@ git add -f .claude/skills/ahu-direct-agents/SKILL.md
 
 Repeat for each reviewed generated skill named by `ahu lock`, refresh the lock,
 and commit those exact paths. Do not force-add a whole native configuration
-directory; it may contain private settings or credentials. Do not commit credentials,
-private local settings, or `.ahu/`. No published repository ships your native
-authentication or workstation plugin bindings.
+directory; it may contain private settings or credentials. Never commit those
+secrets or `.ahu/`. The ahu development Git checkout can contain development
+bindings; do not reuse them as portable project setup. Release source archives
+omit its workstation bindings, configuration and lock. Create reviewed bindings
+for each consuming project as described here.
 
 ## Run, inspect, resume and remove a task
 
