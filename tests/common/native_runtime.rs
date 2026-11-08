@@ -27,12 +27,32 @@ pub(super) fn fixture_cargo() -> Command {
 enum BuildTarget {
     Owned(tempfile::TempDir),
     Shared(std::path::PathBuf),
+    Packages(std::path::PathBuf),
 }
 impl BuildTarget {
     fn path(&self) -> &std::path::Path {
         match self {
             Self::Owned(dir) => dir.path(),
-            Self::Shared(path) => path,
+            Self::Shared(path) | Self::Packages(path) => path,
+        }
+    }
+    fn executable(&self, harness: &str) -> std::path::PathBuf {
+        let binary = format!("ahu-plugin-{harness}");
+        match self {
+            Self::Packages(root) => root
+                .join(format!("harness-{harness}"))
+                .join("bin")
+                .join(binary),
+            _ => self.path().join("debug").join(binary),
+        }
+    }
+    fn package_source(&self, harness: &str) -> std::path::PathBuf {
+        let id = format!("harness-{harness}");
+        match self {
+            Self::Packages(root) => root.join(id),
+            _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/harnesses")
+                .join(id),
         }
     }
 }
@@ -42,79 +62,85 @@ extern "C" fn cleanup() {
         let _ = std::fs::remove_dir_all(target.path());
     }
 }
-fn target() -> &'static std::path::Path {
-    TARGET
-        .get_or_init(|| {
-            // Release conformance can use independently built production adapters.
-            // Ordinary tests retain hermetic reference fixtures and need no sibling repos.
-            if let Some(path) = std::env::var_os("AHU_TEST_HARNESS_BIN_DIR") {
-                let path = std::path::PathBuf::from(path);
-                assert!(path.is_absolute());
-                let path = path.canonicalize().unwrap();
-                for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
-                    assert!(path.join(format!("ahu-plugin-{harness}")).is_file());
-                }
-                return BuildTarget::Shared(path);
-            }
-            // A caller may reuse an explicit development build cache.
-            // Default fixtures own and remove their build artifacts on process exit.
-            let target = match std::env::var_os("AHU_TEST_RUNTIME_TARGET") {
-                Some(path) => {
-                    let path = std::path::PathBuf::from(path);
-                    assert!(path.is_absolute());
-                    std::fs::create_dir_all(&path).unwrap();
-                    let path = path.canonicalize().unwrap();
-                    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .canonicalize()
-                        .unwrap();
-                    if path.starts_with(&repository) {
-                        assert!(path.starts_with(repository.join(".ahu/build")));
-                        assert!(
-                            Command::new("git")
-                                .current_dir(&repository)
-                                .args(["check-ignore", "--quiet", "--no-index", "--"])
-                                .arg(&path)
-                                .status()
-                                .unwrap()
-                                .success()
-                        );
-                    }
-                    BuildTarget::Shared(path)
-                }
-                None => BuildTarget::Owned(
-                    tempfile::Builder::new()
-                        .prefix("ahu-native-runtime-test-")
-                        .tempdir()
-                        .unwrap(),
-                ),
-            };
-            // SAFETY: static callback accesses only this process-owned fixture, never a shared cache.
-            assert_eq!(unsafe { libc::atexit(cleanup) }, 0);
+fn target() -> &'static BuildTarget {
+    TARGET.get_or_init(|| {
+        // Release conformance can use independently built production adapters.
+        // Ordinary tests retain hermetic reference fixtures and need no sibling repos.
+        if let Some(path) = std::env::var_os("AHU_TEST_HARNESS_PACKAGES_DIR") {
+            let path = std::path::PathBuf::from(path);
+            assert!(path.is_absolute());
+            let path = path.canonicalize().unwrap();
             for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
-                let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-                    "tests/fixtures/harnesses/harness-{harness}/Cargo.toml"
-                ));
-                let output = fixture_cargo()
-                    .args(["build", "--locked", "--offline", "--manifest-path"])
-                    .arg(manifest)
-                    .env("CARGO_TARGET_DIR", target.path())
-                    .output()
-                    .unwrap();
+                let package = path.join(format!("harness-{harness}"));
+                assert!(package.join("ahu-plugin.md").is_file());
+                assert!(package.join("Cargo.toml").is_file());
                 assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
+                    package
+                        .join("bin")
+                        .join(format!("ahu-plugin-{harness}"))
+                        .is_file()
                 );
             }
-            target
-        })
-        .path()
+            return BuildTarget::Packages(path);
+        }
+        // A caller may reuse an explicit development build cache.
+        // Default fixtures own and remove their build artifacts on process exit.
+        let target = match std::env::var_os("AHU_TEST_RUNTIME_TARGET") {
+            Some(path) => {
+                let path = std::path::PathBuf::from(path);
+                assert!(path.is_absolute());
+                std::fs::create_dir_all(&path).unwrap();
+                let path = path.canonicalize().unwrap();
+                let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .canonicalize()
+                    .unwrap();
+                if path.starts_with(&repository) {
+                    assert!(path.starts_with(repository.join(".ahu/build")));
+                    assert!(
+                        Command::new("git")
+                            .current_dir(&repository)
+                            .args(["check-ignore", "--quiet", "--no-index", "--"])
+                            .arg(&path)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                }
+                BuildTarget::Shared(path)
+            }
+            None => BuildTarget::Owned(
+                tempfile::Builder::new()
+                    .prefix("ahu-native-runtime-test-")
+                    .tempdir()
+                    .unwrap(),
+            ),
+        };
+        // SAFETY: static callback accesses only this process-owned fixture, never a shared cache.
+        assert_eq!(unsafe { libc::atexit(cleanup) }, 0);
+        for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "tests/fixtures/harnesses/harness-{harness}/Cargo.toml"
+            ));
+            let output = fixture_cargo()
+                .args(["build", "--locked", "--offline", "--manifest-path"])
+                .arg(manifest)
+                .env("CARGO_TARGET_DIR", target.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        target
+    })
 }
 fn exchange(harness: &str, calls: Vec<(&str, Value)>) -> Result<Vec<Value>, String> {
     if !["claude-code", "codex", "antigravity", "opencode"].contains(&harness) {
         return Err("unsupported".into());
     }
-    let mut child = Command::new(target().join("debug").join(format!("ahu-plugin-{harness}")))
+    let mut child = Command::new(target().executable(harness))
         .arg("--ahu-harness-runtime-protocol=1")
         .env_clear()
         .stdin(Stdio::piped())
@@ -213,9 +239,7 @@ pub fn install(root: &std::path::Path, harness: &str) {
     if ahu::plugin_binding::load(root, &id).unwrap().is_some() {
         return;
     }
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("plugins")
-        .join(&id);
+    let source = target().package_source(harness);
     let package = tempfile::tempdir().unwrap();
     let package_root = package.path().canonicalize().unwrap();
     std::fs::create_dir(package_root.join("bin")).unwrap();
@@ -233,7 +257,7 @@ pub fn install(root: &std::path::Path, harness: &str) {
     }
     let binary = format!("ahu-plugin-{harness}");
     std::fs::copy(
-        target().join("debug").join(&binary),
+        target().executable(harness),
         package_root.join("bin").join(binary),
     )
     .unwrap();
