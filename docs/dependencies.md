@@ -17,18 +17,19 @@ filter, including build and development dependencies.
 
 ## Approved dependency license exceptions
 
-The maintainer approved these exact versions on 2026-09-27 for the `rustls` transport layer security (TLS)
-stack used by HTTPS decisions and OpenTelemetry export. The general license
-allowlist stays unchanged; these entries do not permit unrelated dependencies.
+The configured exceptions below cover the `rustls` transport layer security (TLS)
+stack used by HTTPS decisions and OpenTelemetry export. They match `deny.toml`;
+the general license allowlist stays unchanged. These entries do not permit
+unrelated dependencies.
 
 | Crate | Version | Additional allowed licenses |
 | --- | --- | --- |
 | `aws-lc-rs` | 1.18.1 | `ISC` |
 | `aws-lc-sys` | 0.45.0 | `ISC`, `BSD-3-Clause` |
-| `rustls-webpki` | 0.103.15 | `ISC` |
+| `rustls-webpki` | 0.103.16 | `ISC` |
 | `subtle` | 2.6.1 | `BSD-3-Clause` |
 | `untrusted` | 0.9.0 | `ISC` |
-| `webpki-root-certs` | 1.0.9 | `CDLA-Permissive-2.0` |
+| `webpki-root-certs` | 1.0.10 | `CDLA-Permissive-2.0` |
 
 The accountable maintainer is `Orie Steele`. Review each exception on any affected lockfile update and
 before every release. Retain the applicable upstream license and notice texts
