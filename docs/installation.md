@@ -162,7 +162,18 @@ ahu doctor --work-mode
 ```
 
 Context-lock errors identify additional recognized files that need review and
-commit, or local acceptance that must be refreshed. Do not commit credentials,
+commit, or local acceptance that must be refreshed. Global Git ignore rules can
+hide generated skills even when `git status` looks clean. For example:
+
+```sh
+git check-ignore -v .claude/skills/ahu-direct-agents/SKILL.md
+# After inspecting the generated skill, override the ignore for this file only:
+git add -f .claude/skills/ahu-direct-agents/SKILL.md
+```
+
+Repeat for each reviewed generated skill named by `ahu lock`, refresh the lock,
+and commit those exact paths. Do not force-add a whole native configuration
+directory; it may contain private settings or credentials. Do not commit credentials,
 private local settings, or `.ahu/`. No published repository ships your native
 authentication or workstation plugin bindings.
 
