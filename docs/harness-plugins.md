@@ -23,7 +23,7 @@ task successful on its own.
 
 ## Packages
 
-| Harness ID | Native CLI | Package | Current implementation version evidence |
+| Harness ID | Native CLI | Package | Historical implementation baseline |
 | --- | --- | --- | --- |
 | `codex` | `codex` | [Codex](../plugins/harness-codex/README.md) | 0.163.0 |
 | `claude-code` | `claude` | [Claude Code](../plugins/harness-claude-code/README.md) | 2.1.310 |
@@ -34,52 +34,22 @@ task successful on its own.
 Each package has an independent semantic version, manifest, lockfile and binary.
 Source builds use adjacent Rust implementation libraries. Core links only the
 shared data contract, never the native implementations. Customer execution needs
-no Python interpreter. These source packages are not a published distribution;
-version evidence does not establish live account access or all-mode certification.
+no Python interpreter. Their source distribution is the tagged ahu repository; see the
+[publication plan](publication.md). A source directory must be built and staged
+before plugin installation. Historical version evidence does not establish live
+account access or all-mode certification.
 
 ## Installation and activation
 
-Build the selected package from this checkout using an external build directory:
+Follow the [complete installation guide](installation.md) for locked builds,
+repository-local staging, disabled bindings, explicit installation and grants,
+project setup, a live smoke and cleanup. It includes copyable commands for all
+five packages. No development helper is required.
 
-```sh
-CARGO_TARGET_DIR=/absolute/build/ahu-plugins cargo build --locked --release --manifest-path plugins/harness-codex/Cargo.toml
-```
-
-`scripts/install-harness-plugins.sh [harness ...]` performs the build, staging and
-pinning below for the listed harnesses (default: all five), and with `INSTALL=1`
-also installs and enables them and refreshes the lock. It leaves the bindings and
-lock uncommitted for review. Bump a package's version whenever its content changes;
-a binding must name the exact version it pins.
-
-The manual steps follow. Stage its manifest, Cargo metadata, README, license and security notice in a
-separate package directory. Put the built `ahu-plugin-codex` binary at
-`bin/ahu-plugin-codex`, matching the runtime declaration. Do not put credentials,
-native configuration, execution traces or build caches in the staged package.
-Installation verifies and copies content; it never builds or executes the plugin.
-
-From the project that uses the plugin:
-
-```sh
-ahu setup --list-harness-plugins
-ahu setup --harness-plugin /absolute/staged/harness-codex
-```
-
-Discovery reads explicit `AHU_PLUGIN_PATH` directories and retained installations
-without executing plugins or native CLIs. Preparation creates a disabled,
-content-pinned local binding. Review and commit its binding and context lock.
-Then install explicitly:
-
-```sh
-ahu plugins install harness-codex
-ahu plugins installed
-ahu plugins enable harness-codex
-```
-
-Add `harness-runtime` to the binding's grants, refresh with `ahu lock --update`,
-and review and commit the activation. Keep the staged package unchanged until
-installation completes. Setup does not silently authorize a runtime. Run normal
-`ahu setup` after activation to select exact models and review native MCP/skill
-setup proposals. Native CLIs and their authentication are installed separately.
+`scripts/install-harness-plugins.sh` is an internal development convenience,
+not the customer installation contract. Installation copies a previously built,
+content-pinned package; it never invokes Cargo or enables runtime access implicitly.
+Bump the package version for published content updates and review new content pins.
 
 Harnesses are optional. Without a harness plugin, core commands remain available;
 launching that harness reports the missing installed capability. A binding may

@@ -15,6 +15,7 @@ implementation language of external CLIs or harnesses.
 | OpenCode runtime | Rust | Optional external harness package |
 | Kiro runtime | Rust | Optional external harness package |
 | GitHub CLI and tracker | Rust | Optional external packages; require native `gh` |
+| cmux host | Rust | Optional standalone Host V2 package; not executed by ahu 0.11.1 |
 | Native Ollama decision client | Rust | Core client; requires compatible external Ollama and model |
 | text-stats authoring example | Rust | Independent example; build and stage before installation |
 
@@ -35,3 +36,7 @@ Review the plugin's README and security inventory before enabling it.
 attributed local OTel, eval outcomes and cleanup separately for each advertised
 mode. Task/process authority stays in core. Native limitations remain explicit,
 and missing telemetry must never become zero usage.
+
+See the [installation guide](installation.md) and [coordinated publication
+checklist](publication.md) for source repositories, release versions and artifact
+boundaries.

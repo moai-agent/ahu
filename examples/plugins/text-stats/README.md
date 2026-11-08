@@ -19,8 +19,13 @@ builds or runs package code. Release packages must be built for the target platf
 
 ```sh
 example_source=$(cd examples/plugins/text-stats && pwd -P)
-example_build=$(mktemp -d)
-example_package=$(mktemp -d)
+umask 077
+test ! -L .ahu && test ! -L .ahu/build && test ! -L .ahu/plugin-packages
+mkdir -p .ahu/build .ahu/plugin-packages
+example_root=$(pwd -P)
+example_build="$example_root/.ahu/build/text-stats-example"
+example_package="$example_root/.ahu/plugin-packages/text-stats-example"
+mkdir "$example_package"
 cargo build --release --locked --manifest-path "$example_source/Cargo.toml" \
   --target-dir "$example_build"
 mkdir -p "$example_package/bin"
@@ -30,7 +35,8 @@ test -x "$example_package/bin/text-stats"
 example_digest=$(ahu plugins digest "$example_package")
 example_ahu_version=$(ahu --version)
 example_ahu_version=${example_ahu_version#ahu }
-example_repo=$(mktemp -d)
+example_repo="$example_root/.ahu/text-stats-project"
+mkdir "$example_repo"
 cd "$example_repo"
 git init -q
 git config user.name 'Plugin Example'

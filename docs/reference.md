@@ -9,8 +9,8 @@ and transport. Run `ahu explain` for the built-in architecture overview.
 > (`ahu claude`, `ahu codex`, `ahu agy`, or a desktop app connected to
 > `ahu mcp serve`) is the entry point, and delegated tasks run headless. A launch
 > without `--headless` or `--work-mode` is refused; `--dry-run` previews remain.
-> Sections below that describe interactive launches, the interactive launcher and
-> terminal session hosts describe behavior that is being removed in stages.
+> Historical compatibility observations below are dated evidence. They do not
+> restore removed interactive task or terminal session-host commands.
 
 ## Repository and task selection
 
@@ -55,7 +55,7 @@ options, including headless options:
 ahu @reviewer 'Review the configuration validation.' --dry-run
 ahu @reviewer --prompt-file assignment.txt --dry-run
 ahu @reviewer --headless --prompt-file assignment.txt --output json
-ahu @reviewer
+ahu agents
 ```
 
 The canonical `ahu @name` form accepts `--prompt`, `--prompt-file`, or piped stdin.
@@ -70,21 +70,12 @@ claiming that ahu can enumerate everything a harness loaded.
 
 ## Installing and updating ahu safely
 
-On macOS, use `cargo install` to update an installed ahu binary. Cargo replaces
-the destination with a fresh file. For a locally built release, remove the
-destination before copying the artifact:
-
-```sh
-rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
-cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
-```
-
-Do not copy a new build over an installed path while an ahu process may still
-be running. In-place replacement can leave later executions killed by macOS
-code-signature validation, even though the file appears valid on disk. The
-running process keeps its old file open; new invocations need the fresh file.
-An overwritten path that exits with status 137 and produces no output should be
-replaced using one of the procedures described earlier before investigating another cause.
+Use the [pinned installation and upgrade procedure](installation.md). Keep build
+artifacts under the source repository’s ignored `.ahu/build/`. `cargo install`
+replaces the installed executable with a fresh file; do not overwrite a running
+binary in place. On macOS that can cause code-signature validation to kill new
+invocations with status 137. Finish tasks using old frozen plugin bindings before
+upgrading or removing their CLI and packages.
 
 Task commands accept exact `@name` handles, `ahu:task:<id>`, bare IDs, uppercase,
 and unambiguous ID prefixes. References to other resource kinds are refused.
@@ -359,7 +350,7 @@ Commands return these exit codes:
 | `1` | Cancelled by the user. |
 | `2` | Invalid command usage. |
 | `3` | Unknown or unregistered agent. |
-| `4` | Missing prerequisite, such as Git repository, harness, or another selected session-host plugin. |
+| `4` | Missing prerequisite, such as Git repository, harness, or the selected harness runtime plugin. |
 | `5` | Run failure, including invalid persisted configuration. |
 
 ## Harness compatibility by execution mode
@@ -741,7 +732,7 @@ owner or use interactive execution; see OpenCode's
 Claude's `--bare` similarly changes authentication resolution and is not used.
 Antigravity has no reviewed invocation override for unresolved hooks/extensions.
 
-The launch preview and default `ahu doctor --verbose` report the read-only native hook safety inspection used for headless admission. `ahu doctor --work-mode` checks the explicit headless automatic-approval path instead: it skips native hook/configuration and session-host checks, reports native compatibility as unverified, and still checks repository, executable, context-lock, skills, and telemetry prerequisites. Work mode does not verify provider identity or sandbox access. An admitted native version and inspected components do not replace executable, approval, model, or other launch checks.
+The launch preview and default `ahu doctor --verbose` report the read-only native hook safety inspection used for headless admission. `ahu doctor --work-mode` checks the explicit headless automatic-approval path instead: it skips native hook/configuration checks, reports native compatibility as unverified, and still checks repository, executable, context-lock, skills, and telemetry prerequisites. Work mode does not verify provider identity or sandbox access. An admitted native version and inspected components do not replace executable, approval, model, or other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
@@ -1762,7 +1753,7 @@ provenance, and review paths. Missing optional values are JSON null.
 JSON remains unstyled even with `--color=always` and omits prompt text and titles.
 Consumers should tolerate additional fields and check `schema_version`.
 
-The interactive task list labels states such as `session running` and `session exited`.
+The task list reports headless outcomes and retained legacy session metadata.
 A running session may be awaiting input; a process exit does not verify success.
 
 ### The task list
@@ -2116,9 +2107,10 @@ candidate checkout are not secret merely because the prompt omits their answers.
 
 ## State and compatibility
 
-Headless tasks use primary-owned coordination; interactive tasks use their own
-worktree-local records. `tasks` and `task` include compatible legacy records as
-well. `focus` uses the task’s recorded session-host plugin.
+Headless tasks use primary-owned coordination under `.ahu/state/`. `tasks` and
+`task` also inspect compatible legacy records. New interactive task sessions and
+`focus` are not supported. Preserve old CLI/package versions needed to clean up
+legacy session-host resources.
 
 ### Utility lookup
 
@@ -2132,7 +2124,8 @@ rejects the candidate. This also excludes executables in unopened sibling or
 unrelated working trees. Symlinked installations outside working trees remain
 usable; aliases resolving into a working tree do not.
 
-The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. ahu does not resolve or invoke a cmux executable; session-host operations use the committed external plugin binding.
+The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. Direct coordinator shortcuts can invoke cmux wrappers or hook setup as described
+in [cmux](#cmux). Headless tasks do not use a session host.
 
 Installed runtime descriptors own native version evidence and compatibility.
 Project configuration may pin exact native versions; it no longer selects a
@@ -2270,9 +2263,10 @@ model. A coordinator's bypass does not alter a child's mapping or replace the
 child's required approval-widening flag or headless host grant.
 
 `--dangerously-skip-permissions` is the Antigravity CLI's unattended mode.
-`--auto` is OpenCode's only permission-widening flag and the only way an
-`ahu opencode` session can match the other three: it approves every permission
-OpenCode does not **explicitly deny**, without asking. Permissions set to `deny` in
+Older OpenCode interactive versions supported `--auto`, approving permissions
+not explicitly denied. The reviewed 2.x mini interface does not support this
+direct automatic mode, so `ahu opencode` refuses it. Headless work mode has its
+own native approval mapping. Permissions set to `deny` in
 OpenCode's own configuration or agent frontmatter still apply, and ahu cannot
 widen past them. OpenCode's plugins retain their native loading behavior; ahu
 passes no `--pure` here.

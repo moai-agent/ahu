@@ -43,8 +43,8 @@ parents and registered children when reviewing their coverage.
 
 ```sh
 ahu telemetry report \
-  --otlp /absolute/external/path/traces.jsonl \
-  --selection /absolute/external/path/selection.json \
+  --otlp .ahu/traces/traces.jsonl \
+  --selection .ahu/evals/selection.json \
   --release candidate-a --output json
 ```
 

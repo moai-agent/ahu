@@ -8,27 +8,12 @@ talk to the coordinator and let it delegate.
 
 ## Install
 
-With Rust and Cargo installed (this checkout pins Rust in
-[`rust-toolchain.toml`](rust-toolchain.toml)):
-
-```sh
-cargo install --git https://github.com/moai-agent/ahu --locked
-```
-
-On macOS, update an installed `ahu` with `cargo install` or by replacing the
-destination with a fresh file. Do not copy a new build over a path while an
-`ahu` process may still be running: in-place replacement can leave the path
-unable to execute because macOS caches code-signature validation by file identity.
-For a locally built release, remove the destination before copying:
-
-```sh
-rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
-cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
-```
-
-The running process keeps its old file open, and new invocations use the fresh
-file. If an overwritten path already exits with status 137 and no output,
-replace it using one of these fresh-file procedures before troubleshooting ahu.
+Follow the [installation guide](docs/installation.md) for a pinned source install,
+complete harness package staging and activation, project setup, a first task,
+and cleanup. The coordinated release includes the
+[GitHub and cmux plugin repositories](docs/publication.md); they are optional.
+Rust/Cargo builds the executables explicitly. Installing a staged plugin never
+runs a build, and customer runtime needs no Python.
 
 Tasks require Git, the selected installed ahu harness plugin, and its native CLI installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
@@ -74,7 +59,7 @@ From any Git checkout:
 
 ```sh
 ahu doctor
-ahu
+ahu agents
 ```
 
 Install and activate the desired [harness plugins](docs/harness-plugins.md), then
@@ -87,8 +72,8 @@ project setup. ahu does not stage, commit, or push them.
 Delegate work to a registered agent with a quoted prompt; tasks run headless:
 
 ```sh
-ahu @dev-astra 'Review configuration validation.' --allow-widened-approvals
-ahu @dev-astra
+ahu @dev-astra 'Review configuration validation.' --work-mode
+ahu agents
 ```
 
 For a scriptable preview in this repository:
@@ -105,7 +90,7 @@ To submit an assignment, write it to a UTF-8 file:
 printf '%s\n' 'Review configuration validation and report findings.' > assignment.txt
 ahu @dev-astra --prompt-file assignment.txt \
   --title "Configuration review" --summary "Check validation and report findings" \
-  --allow-widened-approvals
+  --work-mode
 ```
 
 The direct form accepts `--prompt` and `--prompt-file`.
@@ -225,9 +210,9 @@ Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
 `.ahu/worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
 deletions. Unrelated dirty source files stay behind. Task records and
-prompts live in the worktree’s ignored `.ahu/state/`; removing the worktree removes
-that state. Headless coordination and the repository’s task index belong to the
-primary checkout’s `.ahu/state/` and survive task worktree deletion. ahu does not
+prompts and headless coordination belong to the primary checkout’s ignored
+`.ahu/state/`. Task-local state belongs to the task checkout’s `.ahu/`.
+The repository task index survives worktree deletion until task removal. ahu does not
 copy native event streams, stderr, final answers, or helper summaries there. See
 [state and compatibility](docs/reference.md#state-and-compatibility) for discovery,
 legacy records, overrides, and integrity limits.
@@ -265,7 +250,7 @@ require explicit user permission.
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 | `ahu kiro` | Open a coordinating Kiro V3 session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
-| `ahu eval run --suite PATH --agent @name [--records PATH]` | Run cases and save bounded records in primary ignored `.ahu/evals/` by default; raw artifacts stay external |
+| `ahu eval run --suite PATH --agent @name [--records PATH]` | Run cases and save bounded records in primary ignored `.ahu/evals/` by default; raw artifacts stay under repository-local `.ahu/` |
 | `ahu eval report [--records PATH]` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
 Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and

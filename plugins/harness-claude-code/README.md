@@ -9,10 +9,11 @@ authorized operations may inspect native configuration and invoke native probes.
 Core supervises the agent, validates task outcomes and owns worktree lifecycle.
 A Git worktree is not a sandbox.
 
-Build from this checkout with `cargo build --release --manifest-path plugins/harness-claude-code/Cargo.toml`.
-Source builds use adjacent Rust support crates; distribute the resulting binary
-with this package manifest through ahu's verified plugin installer.
-No native CLI or credentials are bundled.
+Follow the [complete build, staging and installation guide](https://github.com/moai-agent/ahu/blob/v0.11.1/docs/installation.md).
+This package is released as source in the tagged ahu repository; it is not a
+standalone source checkout. Build uses adjacent Rust support crates. Stage the
+native executable before computing its content digest. Installation never builds
+source or bundles the native CLI or credentials.
 
-See [the runtime contract](../../docs/harness-runtime-contract.md) and
-[implementation security](../harness-runtime/SECURITY.md).
+See [the runtime contract](https://github.com/moai-agent/ahu/blob/v0.11.1/docs/harness-runtime-contract.md) and
+[implementation security](SECURITY.md).
