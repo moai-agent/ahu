@@ -226,8 +226,10 @@ ahu tasks --all
 
 Native session histories are retained by their native tools. To remove a plugin,
 finish tasks using it, disable its binding, refresh/review/commit the lock and
-binding, then run `ahu plugins remove ID`. Do not delete `.ahu/` while tasks or
-registered worktrees are active.
+binding, then run `ahu plugins remove ID`. Run `ahu lock --update` afterward to
+refresh local context acceptance; review/commit the shared lock if it changed,
+and run `ahu lock` before launching another agent. Do not delete `.ahu/` while
+tasks or registered worktrees are active.
 
 ## Optional companion plugins
 
