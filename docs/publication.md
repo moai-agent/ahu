@@ -8,11 +8,11 @@ explicit publication approval:
 | Repository | Tag | Shipped components |
 | --- | --- | --- |
 | [ahu](https://github.com/moai-agent/ahu) | `v0.11.1` | CLI and MCP server; wire contracts; text-stats and MCP-only authoring examples |
-| ahu-plugin-codex (new, unpublished) | `v0.1.1` | Independent `codex` native runtime package |
-| ahu-plugin-claude-code (new, unpublished) | `v0.1.1` | Independent `claude-code` native runtime package |
-| ahu-plugin-antigravity (new, unpublished) | `v0.1.1` | Independent `antigravity` native runtime package |
-| ahu-plugin-opencode (new, unpublished) | `v0.1.1` | Independent `opencode` native runtime package |
-| ahu-plugin-kiro (new, unpublished) | `v0.1.1` | Independent `kiro` native runtime package |
+| `ahu-plugin-codex` (new, unpublished) | `v0.1.1` | Independent `codex` native runtime package |
+| `ahu-plugin-claude-code` (new, unpublished) | `v0.1.1` | Independent `claude-code` native runtime package |
+| `ahu-plugin-antigravity` (new, unpublished) | `v0.1.1` | Independent `antigravity` native runtime package |
+| `ahu-plugin-opencode` (new, unpublished) | `v0.1.1` | Independent `opencode` native runtime package |
+| `ahu-plugin-kiro` (new, unpublished) | `v0.1.1` | Independent `kiro` native runtime package |
 | [ahu-plugin-github](https://github.com/moai-agent/ahu-plugin-github) | `v0.1.1` | `github-cli` and `github-tracker` Rust packages, optional tracker skill |
 | [ahu-plugin-cmux](https://github.com/moai-agent/ahu-plugin-cmux) | `v0.2.1` | Standalone Rust `cmux-host`, Host V2 |
 

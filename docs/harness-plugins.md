@@ -35,8 +35,8 @@ Each package has an independent source repository, semantic version, manifest,
 lockfile and Rust binary. The repository links above name intended publication
 destinations; the extracted repositories are currently unpublished local candidates.
 No sibling checkout or core source tree is needed to build a plugin. Each owns
-its native implementation, and vendors a frozen, checksummed version of the small
-provider-independent wire-contract crate. This dependency is source only, not a
+its native implementation, and vendors a frozen version of the small provider-independent wire-contract crate
+with recorded checksums. This dependency is source only, not a
 second executable or an automatic upgrade. Core links the data contract and never
 the native implementations. Customer builds and execution need no Python.
 
