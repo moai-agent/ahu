@@ -198,7 +198,10 @@ ahu "@$agent" --work-mode --name install-smoke --timeout 120 \
   --prompt 'Call the actual ahu_skills_list MCP tool, compute 17 plus 25 with a shell command, and report 42. Do not change files or launch other agents.' \
   --output json
 ahu result @install-smoke --output json
-ahu resume @install-smoke --prompt 'Call ahu_skills_list again and report completion. Do not change files.' --output json
+umask 077
+mkdir -p .ahu/validation
+printf '%s\n' 'Call ahu_skills_list again and report completion. Do not change files.' > .ahu/validation/resume-prompt.txt
+ahu resume @install-smoke --prompt-file .ahu/validation/resume-prompt.txt --output json
 ahu wait @install-smoke --output json
 ahu task @install-smoke
 ```
