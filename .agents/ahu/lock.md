@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 63447466f0bafa263db9fa7990b3d4d975cb9b7e4db4c3cc8bf69516b4d45323
+  digest: 2df2bb0a4dc12f90a3d0ddc80f9870f6a72fb28c30828585d2928b0deeb60914
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -146,6 +146,10 @@ ahu:
     digest: 6e73b076416112c90ce59da6f9e34390dea60463e2ccd55d950ec603106fde86
     executable: false
     path: .agents/skills/ahu-direct-agents/SKILL.md
+  - bytes: 4729
+    digest: 133991b89fe006c2bd63a1e079e07b6be3c5a2d2a73201c831284a746884915b
+    executable: false
+    path: .agents/skills/ahu-github-tracker/SKILL.md
   - bytes: 4833
     digest: 4e6604b08eb811d2f957e19251426d8f8d0a9af0c10406e69696c2990c1c4abc
     executable: false
