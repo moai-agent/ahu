@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: d9cd828dfa2d61b345dabd4c21fc62661ffc9e4ae53f5a0395fe44a943aa10e3
+  digest: 63447466f0bafa263db9fa7990b3d4d975cb9b7e4db4c3cc8bf69516b4d45323
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -98,16 +98,16 @@ ahu:
     digest: b7b70f8ec9e2cd6b9f7f7dab370b2dba485c924d23b3c9f819291ebca2ca3b14
     executable: false
     path: .agents/ahu/config.md
-  - bytes: 554
-    digest: 0c09c2234f52fe990a6e1691d1449022b8792c5fb0d8a902d0a42977b536dc0f
+  - bytes: 567
+    digest: e3a8ffd5bc8a944eb061d07f4f0340fe7d8822bf6a34d25cdd41c1610eac4d24
     executable: false
     path: .agents/ahu/plugins/cmux-host.md
-  - bytes: 548
-    digest: f82dd28caea53938d97c13a111827a89a1d67d1b612d9d6334779cf6a571ad84
+  - bytes: 567
+    digest: 2b84b450a377b90547cc49eeced99d1ec0bbca4d6cc3d8831cecbd20d5332b8f
     executable: false
     path: .agents/ahu/plugins/github-cli.md
-  - bytes: 556
-    digest: 77c412328f91b8d2d1adbe55eee188fe6c407bcf82ee416658bb41e6e623ec95
+  - bytes: 575
+    digest: c3d3b72a93fbb9d12c3c4bdeaf984b3ba989a431178fb16cf028038ae60dabac
     executable: false
     path: .agents/ahu/plugins/github-tracker.md
   - bytes: 569
