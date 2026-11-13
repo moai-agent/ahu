@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: e921de358f364c93bd1d2bc564dba0d6109b5ca574446c36ba49219999b36f9c
+  digest: 33d32bea6dab73324eb3b66b39310879af2082114b804e1be72023a01fb91247
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -130,6 +130,10 @@ ahu:
     digest: 6d1b1ea9287e17dd08d0bee2e1b5a1a2fdafa094b3f0f85bccc86f3212d5c429
     executable: false
     path: .agents/ahu/plugins/harness-opencode.md
+  - bytes: 621
+    digest: f85157ced6a1d5fdc7aa475f734b11faf097c99d493e8d1c83d787ddea270f18
+    executable: false
+    path: .agents/ahu/plugins/otel-report.md
   - bytes: 117
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
