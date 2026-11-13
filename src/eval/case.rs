@@ -147,7 +147,7 @@ impl ToolExpectationStatus {
 /// error count would let an error-only session read as successful delegation.
 pub fn score_tool_expectations(
     expectations: Option<&ToolExpectations>,
-    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+    telemetry: Option<&crate::telemetry::eval::TaskTelemetry>,
 ) -> ToolExpectationStatus {
     let Some(expectations) = expectations else {
         return ToolExpectationStatus::NotApplicable;
@@ -155,7 +155,7 @@ pub fn score_tool_expectations(
     let Some(telemetry) = telemetry else {
         return ToolExpectationStatus::Unknown;
     };
-    if telemetry.coverage() != crate::eval_otel::Coverage::CompleteSession
+    if telemetry.coverage() != crate::telemetry::eval::Coverage::CompleteSession
         || !telemetry.tool_calls_fully_named()
     {
         return ToolExpectationStatus::Unknown;
@@ -641,7 +641,7 @@ pub fn validate_judgement(case: &EvalCase, score: &serde_json::Value) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval_otel::TaskTelemetry;
+    use crate::telemetry::eval::TaskTelemetry;
 
     /// A version 2 case document, with `extra` front-matter lines appended.
     pub(crate) fn document(schema_version: u32, extra: &str) -> Vec<u8> {
@@ -992,7 +992,10 @@ mod tests {
             tool_calls_by_name: BTreeMap::from([("ahu_agents_list".to_owned(), 1)]),
             ..TaskTelemetry::default()
         };
-        assert_eq!(partial.coverage(), crate::eval_otel::Coverage::PartialSpans);
+        assert_eq!(
+            partial.coverage(),
+            crate::telemetry::eval::Coverage::PartialSpans
+        );
         assert_eq!(
             score_tool_expectations(Some(&forbidden), Some(&partial)),
             ToolExpectationStatus::Unknown

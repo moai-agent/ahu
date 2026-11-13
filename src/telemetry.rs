@@ -21,8 +21,10 @@ use opentelemetry_sdk::{
 use crate::config::TelemetryConfig;
 use crate::util::{Error, Result};
 
+pub mod eval;
 pub mod private;
 pub mod private_store;
+pub mod report;
 
 static PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 static MCP_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -3649,7 +3651,8 @@ mod selection_tests {
     }
     #[test]
     fn selection_export_reaches_only_its_eval_receiver_without_payload() {
-        let receiver = crate::eval_otel::Receiver::start_for(Some("selection-run"), None).unwrap();
+        let receiver =
+            crate::telemetry::eval::Receiver::start_for(Some("selection-run"), None).unwrap();
         let selection: crate::skill_selection::Selection =
             serde_json::from_value(serde_json::json!({
                 "mode":"decision","policy_version":1,"catalog_digest":"a".repeat(64),

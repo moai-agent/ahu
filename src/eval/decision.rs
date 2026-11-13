@@ -541,7 +541,8 @@ Synthetic routing case.
                     .any(|key| key.starts_with("evaluator_provider."))
             );
             let receiver =
-                crate::eval_otel::Receiver::start_for(Some("unknown-provider"), None).unwrap();
+                crate::telemetry::eval::Receiver::start_for(Some("unknown-provider"), None)
+                    .unwrap();
             assert!(crate::telemetry::export_eval_decision(
                 receiver.endpoint(),
                 "unknown-provider",
@@ -613,7 +614,7 @@ Synthetic routing case.
 
     #[test]
     fn mock_grading_exports_real_observation_separate_from_candidate() {
-        let receiver = crate::eval_otel::Receiver::start_for(Some("run"), None).unwrap();
+        let receiver = crate::telemetry::eval::Receiver::start_for(Some("run"), None).unwrap();
         let mut observation = Observation::new("typed_decision");
         let judgement = judge_with(
             &case(),

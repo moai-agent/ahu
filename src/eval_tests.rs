@@ -1158,13 +1158,16 @@ fn judge_metadata_limits_reject_bad_records_at_the_original_line() {
 }
 
 /// Telemetry that observed the decision service's own token usage.
-fn decision_telemetry(input: Option<u64>, output: Option<u64>) -> crate::eval_otel::TaskTelemetry {
-    crate::eval_otel::TaskTelemetry {
+fn decision_telemetry(
+    input: Option<u64>,
+    output: Option<u64>,
+) -> crate::telemetry::eval::TaskTelemetry {
+    crate::telemetry::eval::TaskTelemetry {
         task_id: "t".into(),
         attempt: 1,
         decision_input_tokens: input,
         decision_output_tokens: output,
-        ..crate::eval_otel::TaskTelemetry::default()
+        ..crate::telemetry::eval::TaskTelemetry::default()
     }
 }
 
@@ -1277,7 +1280,7 @@ fn selection_policy_identity_excludes_outcomes_but_tracks_configuration() {
 
 #[test]
 fn candidate_mcp_selection_cost_survives_failure_projection_and_native_tokens_stay_separate() {
-    let telemetry = crate::eval_otel::TaskTelemetry {
+    let telemetry = crate::telemetry::eval::TaskTelemetry {
         selection_observations: 2,
         selection_duration_ms: Some(12.0),
         selection_input_tokens: Some(55),
@@ -1363,7 +1366,7 @@ fn decision_evaluator_report_groups_configured_policy_and_retains_failure_costs(
 
 #[test]
 fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
-    let receiver = crate::eval_otel::Receiver::start_for(Some("run"), None).unwrap();
+    let receiver = crate::telemetry::eval::Receiver::start_for(Some("run"), None).unwrap();
     let mut decision = decision::Observation::new("typed_decision");
     decision.calls_attempted = 1;
     decision.status = "failed".into();
@@ -1742,7 +1745,7 @@ fn metering_records_reject_invalid_units_and_inconsistent_coverage() {
 
 #[test]
 fn provenance_records_keep_legacy_unknown_and_validate_bounded_identity() {
-    let mut telemetry = crate::eval_otel::TaskTelemetry::default();
+    let mut telemetry = crate::telemetry::eval::TaskTelemetry::default();
     telemetry.decision_provenance.observations = 1;
     telemetry
         .decision_provenance
@@ -2139,7 +2142,7 @@ fn envelope_metrics_are_projected_by_name_and_shape() {
 
 #[test]
 fn decision_service_usage_survives_envelope_metric_projection() {
-    let telemetry = crate::eval_otel::TaskTelemetry {
+    let telemetry = crate::telemetry::eval::TaskTelemetry {
         decision_input_tokens: Some(120),
         decision_output_tokens: Some(20),
         selection_input_tokens: Some(9),

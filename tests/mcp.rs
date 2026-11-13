@@ -19,7 +19,7 @@ fn mcp_sigint_flushes_a_complete_session_without_stdin_eof() {
 #[cfg(unix)]
 fn mcp_shutdown_signal_fixture(signal: libc::c_int) {
     let repo = common::TestRepo::new();
-    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let receiver = ahu::telemetry::eval::Receiver::start().unwrap();
     let mut child = common::ahu()
         .args(["mcp", "serve"])
         .current_dir(repo.path())
@@ -81,7 +81,7 @@ fn native_ollama_tool_posts_exact_contract_without_authentication() {
 
 fn typed_decision_http_roundtrip(native: bool) {
     let repo = common::TestRepo::new();
-    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let receiver = ahu::telemetry::eval::Receiver::start().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!(
         "http://{}/v1/{}",
@@ -251,7 +251,7 @@ fn typed_decision_http_roundtrip(native: bool) {
     };
     assert_eq!(
         telemetry.coverage(),
-        ahu::eval_otel::Coverage::CompleteSession
+        ahu::telemetry::eval::Coverage::CompleteSession
     );
     assert!(telemetry.mcp_observed);
     assert_eq!(telemetry.tool_calls, 1);
@@ -1185,7 +1185,7 @@ fn skill_suggestions_are_local_when_lexical_and_export_only_bounded_metadata() {
     repo.write(".agents/skills/billing/SKILL.md",
         "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nUse the refund checklist.\n");
     repo.commit("synthetic skill");
-    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let receiver = ahu::telemetry::eval::Receiver::start().unwrap();
     let mut child = common::ahu()
         .current_dir(repo.path())
         .args(["mcp", "serve"])
@@ -1684,7 +1684,7 @@ fn native_ollama_configuration_errors_precede_credentials_and_network() {
 #[test]
 fn agent_recommendations_use_external_inputs_without_payload_telemetry() {
     let repo = common::TestRepo::new();
-    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let receiver = ahu::telemetry::eval::Receiver::start().unwrap();
     let external = tempfile::tempdir().unwrap();
     let records = external.path().join("private-path-marker.jsonl");
     let payload = serde_json::json!({"schema_version":2,"case_id":"fixture","agent":"fixture",

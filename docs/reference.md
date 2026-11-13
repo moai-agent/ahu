@@ -430,7 +430,7 @@ nothing else about the attempt failed, and the process exited 0.
 
 The coordinator reviewed the native session's final answer, which correctly
 identified the `ahu.execution.mode` check and its regression test in
-`src/otel_report.rs`. The durable result still recorded `completion_verified`
+`src/telemetry/report.rs`. The durable result still recorded `completion_verified`
 as `false` and no `agent_report_path`: the report remains harness-owned, and
 ahu neither persisted nor independently verified it. No live MCP call or local
 collector receipt was verified for this run, so it provides no OTel export

@@ -338,7 +338,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             selection,
             release,
         } => {
-            let report = ahu::otel_report::report(&paths, &selection, &release)?;
+            let report = ahu::telemetry::report::report(&paths, &selection, &release)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }

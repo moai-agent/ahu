@@ -173,7 +173,7 @@ struct Record {
     #[serde(default)]
     mcp_tool_errors_by_name: Option<BTreeMap<String, f64>>,
     #[serde(default)]
-    telemetry_receiver: Option<crate::eval_otel::ReceiverStats>,
+    telemetry_receiver: Option<crate::telemetry::eval::ReceiverStats>,
     // Version 2 evaluation evidence.
     #[serde(default)]
     case_schema_version: Option<u64>,
@@ -402,7 +402,7 @@ pub struct Group {
     pub pass_rate: f64,
     pub coverage: Coverage,
     /// Receiver-level export drops/errors observed across runs with counters.
-    pub telemetry_receiver: Option<crate::eval_otel::ReceiverStats>,
+    pub telemetry_receiver: Option<crate::telemetry::eval::ReceiverStats>,
     /// Mean over the runs that reported a time; `None` when none did.
     pub mean_elapsed_ms: Option<f64>,
     /// Mean launch wall-clock time over the runs that reported one, failed and
@@ -943,7 +943,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut tool_unknown = 0usize;
             let mut tool_not_applicable = 0usize;
             let mut terminal_statuses: BTreeMap<String, usize> = BTreeMap::new();
-            let mut telemetry_receiver = crate::eval_otel::ReceiverStats::default();
+            let mut telemetry_receiver = crate::telemetry::eval::ReceiverStats::default();
             let mut mcp_evidence = BTreeMap::new();
             for item in &items {
                 if let Some(value) = item.total_elapsed_ms {
@@ -2175,7 +2175,7 @@ pub fn run(
 
     // ---- execution: sequential, in the planned order, one fresh task per trial.
     let run_id = make_run_id(&cases[0].case.id);
-    let receiver = crate::eval_otel::Receiver::start_for(Some(&run_id), None)
+    let receiver = crate::telemetry::eval::Receiver::start_for(Some(&run_id), None)
         .map_err(|error| Error::new(format!("cannot start local OTLP receiver: {error}")))?;
     let artifact_root = create_private_run_dir(&storage::artifacts_dir(repo)?, &run_id)?;
     let build = fingerprint::BuildIdentity::detect();
@@ -2593,7 +2593,7 @@ pub fn run(
         let telemetry = receiver.task(candidate_task, attempt);
         let telemetry_coverage = telemetry
             .as_ref()
-            .map_or(crate::eval_otel::Coverage::None, |t| t.coverage());
+            .map_or(crate::telemetry::eval::Coverage::None, |t| t.coverage());
         let tool_status =
             case::score_tool_expectations(case.tool_expectations.as_ref(), telemetry.as_ref());
         let mcp_observed = telemetry.as_ref().is_some_and(|t| t.mcp_observed);
@@ -3001,7 +3001,7 @@ fn outcome_fields(
         );
         fields.insert(
             "telemetry_coverage".into(),
-            crate::eval_otel::Coverage::None.as_str().into(),
+            crate::telemetry::eval::Coverage::None.as_str().into(),
         );
         fields.insert("score".into(), serde_json::Value::Null);
         fields.insert("passed".into(), false.into());
@@ -3018,11 +3018,13 @@ fn outcome_fields(
 /// the coverage field says so rather than a zero standing in for it.
 fn insert_telemetry_fields(
     record: &mut serde_json::Map<String, serde_json::Value>,
-    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+    telemetry: Option<&crate::telemetry::eval::TaskTelemetry>,
 ) -> Result<()> {
     insert_candidate_selection_fields(record, telemetry);
     insert_telemetry_evidence_fields(record, telemetry);
-    let coverage = telemetry.map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
+    let coverage = telemetry.map_or(crate::telemetry::eval::Coverage::None, |item| {
+        item.coverage()
+    });
     record.insert("telemetry_coverage".into(), coverage.as_str().into());
     record.insert(
         "mcp_observed".into(),
@@ -3089,7 +3091,7 @@ fn insert_telemetry_fields(
 /// observed no MCP spans, never that the harness performed no MCP work.
 fn insert_telemetry_evidence_fields(
     record: &mut serde_json::Map<String, serde_json::Value>,
-    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+    telemetry: Option<&crate::telemetry::eval::TaskTelemetry>,
 ) {
     record.insert(
         "mcp_spans".into(),
@@ -3623,7 +3625,7 @@ fn envelope_metric(name: &str, value: &serde_json::Value) -> Option<serde_json::
 /// a field, so an absent observation stays absent.
 fn reported_tokens(
     envelope: Option<&serde_json::Value>,
-    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+    telemetry: Option<&crate::telemetry::eval::TaskTelemetry>,
 ) -> Option<serde_json::Value> {
     let mut tokens = serde_json::Map::new();
     if let Some(values) = envelope
@@ -3904,7 +3906,7 @@ fn insert_selection_fields(
 
 fn insert_candidate_selection_fields(
     record: &mut serde_json::Map<String, serde_json::Value>,
-    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+    telemetry: Option<&crate::telemetry::eval::TaskTelemetry>,
 ) {
     let Some(t) = telemetry.filter(|t| t.selection_observations > 0) else {
         return;
@@ -3937,7 +3939,7 @@ fn insert_evaluation_fields(
 fn observe_evaluator_agent(
     observation: &mut decision::Observation,
     envelope: &serde_json::Value,
-    receiver: &crate::eval_otel::Receiver,
+    receiver: &crate::telemetry::eval::Receiver,
 ) -> Result<()> {
     observation.task_id = envelope["task_id"].as_str().map(str::to_owned);
     observation.attempt = observation
