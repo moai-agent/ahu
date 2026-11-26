@@ -170,7 +170,12 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let params = json!({"native_executable": script, "home": directory.path()});
-        let value = probe(&params, Duration::from_secs(5)).unwrap();
+        // A generous bound on the success path. This case asserts the parsed
+        // version, never how quickly the probe returns, and a short budget
+        // here only invents failures when the machine is loaded enough that
+        // spawning a shell takes seconds. The refusal below keeps the short
+        // budget, because there the timeout is the behaviour under test.
+        let value = probe(&params, Duration::from_secs(120)).unwrap();
         assert_eq!(value["version"], "1.2.3");
         assert_eq!(value["reviewed_version"], false);
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();

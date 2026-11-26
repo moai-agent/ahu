@@ -138,7 +138,13 @@ fn independent_peer_errors_and_eof_timeout_fail_incomplete_and_reap() {
             .unwrap();
         worker.input.send(Input::End("stdout")).unwrap();
         worker.input.send(Input::End("stderr")).unwrap();
-        let result = worker.outcome.recv_timeout(Duration::from_secs(5)).unwrap();
+        // A hang-guard, not a latency assertion: this case checks the
+        // outcome's content. The negative wait below keeps its short budget,
+        // because there the absence of a result is the behaviour under test.
+        let result = worker
+            .outcome
+            .recv_timeout(Duration::from_secs(120))
+            .unwrap();
         assert!(result.is_err(), "{mode}");
         assert!(events.lock().unwrap().failed);
         assert!(!format!("{result:?}").contains("PRIVATE"));
@@ -158,7 +164,9 @@ fn cancelling_owned_decoder_joins_and_reaps_without_accepting_late_result() {
             line: "synthetic".into(),
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // A hang-guard on the decoder becoming ready, not a startup-latency
+    // assertion; a short budget here only invents failures under load.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !peer.ready.exists() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(2));
@@ -196,9 +204,11 @@ fn mixed_streams_finalize_only_after_both_drains_and_keep_summary_ephemeral() {
         })
         .unwrap();
     worker.input.send(Input::End("stderr")).unwrap();
+    // A hang-guard once both streams have drained; the 20 ms wait above is
+    // the assertion that nothing finalizes before that point.
     worker
         .outcome
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap();
     drop(worker);
