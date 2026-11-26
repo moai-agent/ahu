@@ -75,7 +75,9 @@ outside target is observed.[^headless]
 Headless child grants freeze registered identities and native policies at host
 submission. The broker in src/broker.rs binds requests to a live parent attempt
 and dispatches the registered child with its own harness policy outside the
-worker sandbox. Descendants cannot expand the grant. Failed or unjoined children
+worker sandbox. Descendants cannot expand the grant through ahu; the freeze is
+carried in the task environment, so it is a cooperative boundary against
+cooperating launches rather than isolation from same-user code. Failed or unjoined children
 from the current attempt block parent success. Native helper joins are recorded
 separately from registered task IDs; src/native.rs defines the bounded Claude
 2.1.270 profile, which supplies read-only model tools to both owner and helpers;

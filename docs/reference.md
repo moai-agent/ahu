@@ -912,6 +912,13 @@ profiles or `--allow-child-widened @name` for manifests declaring `auto` or
 also grant children. The grant freezes each child's identity, permission mode,
 hook inventory, and native-helper policy; descendants cannot expand it.
 
+This freeze is a cooperative boundary, not process isolation. It binds launches
+that go through ahu from inside the task, and it is carried in the task
+environment. Code running as your user can clear that environment and submit a
+fresh root task with grants of its own, exactly as you could from a shell. Use
+it to keep a cooperating delegation within its approved shape, not to confine
+code you do not trust; for an actual limit, confine the process itself.
+
 For example, after registering a shell-capable `@coordinator` and a `@reviewer`
 with ordinary approval settings:
 
