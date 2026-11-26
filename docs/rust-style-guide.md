@@ -240,5 +240,5 @@ This guide does not claim that all existing code already conforms.
 
 For documentation-only edits, check links and run
 `scripts/lint-prose.sh --no-sync docs/rust-style-guide.md AGENTS.md README.md`
-when Vale styles are installed. Use the [development instructions](../README.md#development)
+when Vale styles are installed. Use the [development instructions](../CONTRIBUTING.md)
 for tool setup and additional validation.

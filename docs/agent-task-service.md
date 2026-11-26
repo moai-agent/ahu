@@ -118,7 +118,7 @@ session; cursors do not restore revoked grants. Consumers should negotiate
 `UnsupportedOperation` and must not advertise that operation.
 
 The service supplies in-process task reads. The optional
-[executable integration](executable-plugins.md#read-only-taskservice-invocation)
+[executable integration](executable-plugins.md#read-only-task-observation-calls)
 uses core-minted exact grants to collect a bounded, versioned projection and
 passes it through generic plugin input. It exposes no service callback or
 controller. Neither path adds a tracker client, external record mapping, credential

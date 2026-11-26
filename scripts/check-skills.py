@@ -16,7 +16,16 @@ import sys
 FRONTMATTER_LINE = re.compile(r"(?P<key>[A-Za-z0-9_-]+): (?P<value>.*)")
 NAME_GRAMMAR = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 # Skills for ahu's own agents; `ahu setup` only distributes the bundled subset.
-REPOSITORY_ONLY_SKILLS = {"ahu-architecture", "ahu-harness-upgrade", "ahu-release"}
+# Skills this repository keeps for its own agents and does not ship through
+# `ahu setup`. ahu-github-tracker is installed here from the optional
+# ahu-plugin-github repository, which stays the source of truth for it;
+# bundling it would make GitHub look like a core dependency.
+REPOSITORY_ONLY_SKILLS = {
+    "ahu-architecture",
+    "ahu-github-tracker",
+    "ahu-harness-upgrade",
+    "ahu-release",
+}
 BUNDLE_ENTRY = re.compile(
     r'\(\s*(?:"(?P<literal>[^"]+)"|(?P<const>[A-Z][A-Z0-9_]*))'
     r'\s*,\s*include_str!\("(?P<path>[^"]+)"\)\s*,?\s*\)\s*,?'

@@ -1,9 +1,9 @@
 # Coordinated source release
 
 Publishing only the core repository leaves users without the coordinated Rust
-companion updates. The initial release set contains the existing core/companion repositories and five
-new harness repositories. New repositories remain local until verification and
-explicit publication approval:
+companion updates. The initial release set contains the existing core/companion repositories, five
+new harness repositories, and the new OpenTelemetry report repository. New
+repositories remain local until verification and explicit publication approval:
 
 | Repository | Tag | Shipped components |
 | --- | --- | --- |
@@ -13,8 +13,9 @@ explicit publication approval:
 | `ahu-plugin-antigravity` (new, unpublished) | `v0.1.1` | Independent `antigravity` native runtime package |
 | `ahu-plugin-opencode` (new, unpublished) | `v0.1.1` | Independent `opencode` native runtime package |
 | `ahu-plugin-kiro` (new, unpublished) | `v0.1.1` | Independent `kiro` native runtime package |
-| [ahu-plugin-github](https://github.com/moai-agent/ahu-plugin-github) | `v0.1.1` | `github-cli` and `github-tracker` Rust packages, optional tracker skill |
+| [ahu-plugin-github](https://github.com/moai-agent/ahu-plugin-github) | `v0.1.1` | Tracker skill using `gh`; optional `github-cli` and `github-tracker` Rust adapters |
 | [ahu-plugin-cmux](https://github.com/moai-agent/ahu-plugin-cmux) | `v0.2.1` | Standalone Rust `cmux-host`, Host V2 |
+| `ahu-plugin-otel` (new, unpublished) | `v0.1.0` | Optional Rust `otel-report`, local OTLP projection |
 
 Harness packages own their source and release schedules. Installing core installs
 no native harness adapter. Each plugin vendors a frozen small contract crate, with
@@ -60,3 +61,25 @@ Keep live captures and detailed results under each owning repository's ignored
 compatibility pins and known limits. The cmux release must explicitly state that
 ahu 0.11.1 has removed the interactive task/session-host integration. Preserve old
 CLI/package identities until legacy task cleanup is complete.
+
+## GitHub presentation
+
+Before publishing, check each repository's default branch, About description,
+release page, and README as an unauthenticated reader. The README should explain
+what the package does and link to installation, compatibility, and security
+instructions. Use GitHub's file browser, outline, and Releases page instead of
+maintaining duplicate file trees, tables of contents, or version lists.
+
+Use accurate About descriptions for the companion repositories: “Optional GitHub
+CLI and issue-tracking plugins for ahu” and “Standalone cmux session host for the
+ahu Host V2 protocol.” For each harness repository, identify its native harness
+and role as an ahu runtime adapter. Do not describe the tracker or session host
+as a read-only example. Enable Issues only where maintainers intend to accept
+public reports; do not link to an unavailable issue tracker.
+
+Verify all five harness repository destinations after creation, then replace
+prepublication wording in the installation and harness guides with verified
+release links. Keep the release checklist's intended tags distinct from published
+versions. Check relative documentation links in both source archives and staged
+packages, and verify that release notes link to the matching version's install
+guide. Source-only releases must not imply that prebuilt binaries are available.

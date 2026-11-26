@@ -233,11 +233,23 @@ tasks or registered worktrees are active.
 
 ## Optional companion plugins
 
-Use the complete installation instructions in the separate
-[GitHub plugins](https://github.com/moai-agent/ahu-plugin-github) repository.
+For GitHub workflows, install the skill from the separate
+[GitHub integration](https://github.com/moai-agent/ahu-plugin-github) repository.
+It guides agents using `gh` directly, and its executable adapters are optional.
+Install those adapters when you want their bounded JSON contract and their
+stale-state, expected-visibility and duplicate-comment checks on issue writes.
+Neither the skill nor the adapters narrow GitHub credentials or confine an agent
+that can run `gh` itself; scope the credential for an actual limit.
 GitHub is not required for task execution. The
 [cmux host](https://github.com/moai-agent/ahu-plugin-cmux) is a standalone Host V2
 package for compatible consumers; ahu 0.11.1 does not execute session-host plugins.
+
+The [OpenTelemetry report](https://github.com/moai-agent/ahu-plugin-otel) package
+projects local collector OTLP JSONL exports against an explicit operator
+selection. It is optional and additive: `ahu telemetry report` remains available
+unchanged, and installing the package does not alter how ahu emits telemetry or
+where it stores traces. Span emission stays in core, because the one-shot plugin
+protocol carries a single request and response per process.
 Do not grant `interactive-backend` expecting to restore removed core functionality.
 
 ## Independent harness updates
