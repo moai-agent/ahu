@@ -341,6 +341,17 @@ fn antigravity_account_banner_is_observed_without_input_or_approval() {
         error.diagnostic,
         Some(ahu_harness_native::Diagnostic::NeedsNativeTrust)
     );
+
+    // The same prompt must be diagnosed when the CLI exits straight after
+    // printing it, so end-of-input arrives before the next read. That is the
+    // ordering a loaded machine produces, and it previously surfaced as a
+    // terminal-closed error carrying no diagnostic at all.
+    fs::write(&f.exe, "#!/bin/sh\nprintf 'Do you trust this folder?\\n'\n").unwrap();
+    let error = call("antigravity", "auth", &f.probe()).unwrap_err();
+    assert_eq!(
+        error.diagnostic,
+        Some(ahu_harness_native::Diagnostic::NeedsNativeTrust)
+    );
 }
 #[test]
 fn codex_capacity_includes_account_fingerprint_and_rejects_partial_windows() {

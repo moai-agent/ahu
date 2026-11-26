@@ -357,7 +357,17 @@ fn antigravity_startup(
         }
         if ready > 0 {
             match master.read(&mut buffer) {
-                Ok(0) => break Err(Error::new("Antigravity closed its startup terminal")),
+                Ok(0) => {
+                    // The CLI can print its prompt and exit before this loop
+                    // reads again, so end-of-input is not itself a diagnosis.
+                    // Report the folder-trust prompt if it already arrived:
+                    // the generic terminal-closed error tells an operator
+                    // nothing they can act on.
+                    if antigravity_needs_folder_trust(&output) {
+                        break Err(antigravity_folder_trust_error());
+                    }
+                    break Err(Error::new("Antigravity closed its startup terminal"));
+                }
                 Ok(count) => {
                     output.extend_from_slice(&buffer[..count]);
                     last_output_at = Some(Instant::now());
