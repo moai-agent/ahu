@@ -293,7 +293,9 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
             bail!("native settings must be objects keyed by harness identity");
         }
     }
-    crate::telemetry::validate_config(&config.telemetry, path)?;
+    // The normalized URL is rebuilt where telemetry is initialized; loading
+    // only needs the configuration rejected when it is not a local origin.
+    let _ = crate::telemetry::validate_config(&config.telemetry, path)?;
     Ok(())
 }
 

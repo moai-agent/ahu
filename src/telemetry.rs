@@ -72,7 +72,17 @@ pub(crate) fn is_valid_local_endpoint(endpoint: &url::Url) -> bool {
         && endpoint.fragment().is_none()
 }
 
-pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
+/// Validate `telemetry.endpoint` and return the **normalized** URL.
+///
+/// Callers must export through the returned value and never through the raw
+/// configured string. The two do not always name the same host. `url`
+/// implements WHATWG IPv4 parsing, so `http://0177.0.0.1:4318` normalizes to
+/// `127.0.0.1` and passes every check below, while `getaddrinfo` reads the raw
+/// spelling as octal and dials the public address `177.0.0.1`. Validating one
+/// string and dialing another defeats the local-origin boundary completely, and
+/// that boundary is the only control between native harness telemetry and an
+/// off-host listener.
+pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<url::Url> {
     let endpoint = config.endpoint.parse::<url::Url>().map_err(|error| {
         Error::new(format!(
             "{}: telemetry.endpoint is not a valid URL: {error}",
@@ -91,7 +101,7 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         )));
     }
-    Ok(())
+    Ok(endpoint)
 }
 
 /// Enable ahu's own spans when project telemetry is enabled.
@@ -122,11 +132,19 @@ fn initialize_named(
     // Config loading validates this too, but direct library callers must not
     // bypass the same local collector boundary. An invalid eval override alone
     // must not enable export to the default collector.
-    if eval_endpoint.is_none() && validate_config(config, Path::new("telemetry")).is_err() {
-        eprintln!("ahu: invalid telemetry endpoint; continuing without export");
-        return Ok(());
-    }
-    let endpoint = eval_endpoint.unwrap_or_else(|| config.endpoint.clone());
+    // Export through the normalized URL, never `config.endpoint`: a raw
+    // spelling can validate as loopback and resolve off-host. The eval override
+    // is already normalized by `eval_endpoint_override`.
+    let endpoint = match eval_endpoint {
+        Some(endpoint) => endpoint,
+        None => match validate_config(config, Path::new("telemetry")) {
+            Ok(url) => url.to_string(),
+            Err(_) => {
+                eprintln!("ahu: invalid telemetry endpoint; continuing without export");
+                return Ok(());
+            }
+        },
+    };
     // Pin routing and deadlines independently of the inherited environment.
     // Keep the SDK's documented header/resource inheritance at the collector.
     let client = reqwest::blocking::Client::builder()
@@ -534,6 +552,16 @@ pub fn configure_child(
         eprintln!("ahu: invalid telemetry endpoint; continuing without export");
         return;
     }
+    // A child SDK re-parses this string with its own resolver, which need not
+    // agree with `url` on spelling, so hand it the normalized host rather than
+    // the raw configured one. `eval_endpoint_override` already normalizes, and
+    // keeps the root slash its callers expect; a configured endpoint keeps the
+    // unslashed shape SDKs append the signal path to.
+    let endpoint_str = if eval_mode {
+        endpoint_str
+    } else {
+        endpoint_url.as_str().trim_end_matches('/').to_string()
+    };
 
     let ambient = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
     let safe_ambient = ambient.as_deref().and_then(|raw| {
@@ -1757,6 +1785,41 @@ mod tests {
             let error = validate_config(&config, Path::new("config.toml"))
                 .expect_err("only a local collector origin is valid");
             assert!(!error.to_string().contains("synthetic-"));
+        }
+    }
+
+    /// A validated endpoint must be exported in its normalized spelling.
+    ///
+    /// `url` implements WHATWG IPv4 parsing, so several raw spellings normalize
+    /// to `127.0.0.1` and pass validation while a resolver reads them as a
+    /// different, routable address: `getaddrinfo("0177.0.0.1")` answers
+    /// `177.0.0.1`. Exporting the raw string would validate one host and dial
+    /// another, which is the whole of the local-origin boundary.
+    #[test]
+    fn validated_endpoint_is_returned_normalized() {
+        for raw in [
+            "http://0177.0.0.1:4318",
+            "http://0x7f000001:4318",
+            "http://2130706433:4318",
+            "http://127.1:4318",
+            "http://127.0.0.1.:4318",
+        ] {
+            let config = TelemetryConfig {
+                endpoint: raw.into(),
+                ..TelemetryConfig::default()
+            };
+            let normalized = validate_config(&config, Path::new("config.toml"))
+                .expect("these spellings normalize to loopback and are accepted");
+            assert_eq!(
+                normalized.host_str(),
+                Some("127.0.0.1"),
+                "{raw} must normalize to loopback"
+            );
+            assert_eq!(
+                normalized.as_str(),
+                "http://127.0.0.1:4318/",
+                "{raw} must be exported in its normalized spelling, never as written"
+            );
         }
     }
 
