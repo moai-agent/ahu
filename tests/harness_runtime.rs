@@ -336,7 +336,9 @@ fn blocked_stdin_cancellation_and_decoder_sequence_are_bounded() {
             .is_err()
     );
     assert!(start.elapsed() < Duration::from_secs(5));
-    let fixture = Fixture::new("", |_| {});
+    // Starting the independent Python peer is not the timeout assertion above.
+    // Hosted macOS runners can take more than 1.5 seconds to start it under load.
+    let fixture = Fixture::new("", |d| d["timeout_ms"] = json!(10_000));
     let runtime = fixture.load();
     assert!(runtime.call("shell", Value::Null).is_err());
     assert!(!fixture.marker.exists());
@@ -386,7 +388,10 @@ fn assert_gone(pid: i32) {
 
 #[test]
 fn drop_failure_and_finalization_terminate_owned_process_groups() {
-    let fixture = Fixture::new("", |_| {});
+    // Allow the successful startup/child handshake to finish on loaded runners.
+    // The peer blocks for 30 seconds, so failure/finalization still exercise
+    // timeout-driven cleanup; the process-disappearance assertion stays bounded.
+    let fixture = Fixture::new("", |d| d["timeout_ms"] = json!(10_000));
     let runtime = fixture.load();
     for ending in ["drop", "failure", "finish"] {
         let mut session = runtime.open_stream().unwrap();
