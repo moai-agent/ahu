@@ -13,7 +13,15 @@ pub(super) fn fixture_cargo() -> Command {
     let mut command = Command::new(env!("CARGO"));
     command
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        // Build these fixtures without debug info. They are executed as
+        // subprocesses and never debugged, and on Linux the default dev profile
+        // produces binaries past the 64 MiB per-file bound that
+        // `plugin_install::digest` enforces, so staging one fails there while
+        // passing on macOS, where debug info lands in a separate bundle.
+        // Lowering the bound is not an option: it guards package installation.
+        .env("CARGO_PROFILE_DEV_DEBUG", "none")
+        .env("CARGO_PROFILE_DEV_STRIP", "debuginfo");
     if std::env::var_os("__CARGO_LLVM_COV_RUSTC_WRAPPER").is_some() {
         command
             .env_remove("RUSTC_WRAPPER")
