@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 33d32bea6dab73324eb3b66b39310879af2082114b804e1be72023a01fb91247
+  digest: 7aac570ff3f406a5910362cfe347be6c436e9999c1d06022b6c21ec6207e9672
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -98,42 +98,6 @@ ahu:
     digest: b7b70f8ec9e2cd6b9f7f7dab370b2dba485c924d23b3c9f819291ebca2ca3b14
     executable: false
     path: .agents/ahu/config.md
-  - bytes: 567
-    digest: e3a8ffd5bc8a944eb061d07f4f0340fe7d8822bf6a34d25cdd41c1610eac4d24
-    executable: false
-    path: .agents/ahu/plugins/cmux-host.md
-  - bytes: 564
-    digest: 7ba2e26aa4f65e6c2cff309ea70f2f461be468858c883026066a01da2804c04d
-    executable: false
-    path: .agents/ahu/plugins/github-cli.md
-  - bytes: 572
-    digest: f122b6ab1fb1c7c6121426b281aafa283ce8f31f8a188440aea1c1da92b31909
-    executable: false
-    path: .agents/ahu/plugins/github-tracker.md
-  - bytes: 569
-    digest: 8ede4b9f383978edd134b2e8873f71ef3a7d3139c88bfd18678a7bb3806a6006
-    executable: false
-    path: .agents/ahu/plugins/harness-antigravity.md
-  - bytes: 569
-    digest: 088a1ba3a8495e74cf1ba1cf68c6548dd74812614d0e7c3a6557315b8bd8d4f6
-    executable: false
-    path: .agents/ahu/plugins/harness-claude-code.md
-  - bytes: 557
-    digest: 76b62f6c88d9ecbe42b672474c574e18a7f647178e8c1ab714f4c339ac21d093
-    executable: false
-    path: .agents/ahu/plugins/harness-codex.md
-  - bytes: 555
-    digest: c6e4de6c4dcd8e84cf3c85ebea2e844ba086cd29b2bae110ade601bdedfd41d3
-    executable: false
-    path: .agents/ahu/plugins/harness-kiro.md
-  - bytes: 563
-    digest: 6d1b1ea9287e17dd08d0bee2e1b5a1a2fdafa094b3f0f85bccc86f3212d5c429
-    executable: false
-    path: .agents/ahu/plugins/harness-opencode.md
-  - bytes: 621
-    digest: f85157ced6a1d5fdc7aa475f734b11faf097c99d493e8d1c83d787ddea270f18
-    executable: false
-    path: .agents/ahu/plugins/otel-report.md
   - bytes: 117
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
@@ -170,34 +134,6 @@ ahu:
     digest: 129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609
     executable: false
     path: .agents/skills/discover-requirements/SKILL.md
-  - bytes: 486
-    digest: 4c5e0cc6960067f52b1dbc6d522a6e1c13e1f9746956f36f9f62fafcb2621c78
-    executable: false
-    path: .codex/config.toml
-  - bytes: 434
-    digest: aa4beaf44bc0a4487a91985af907d1f8bdc4e014912f8cd13ff746d15c4b957f
-    executable: false
-    path: .kiro/settings/mcp.json
-  - bytes: 5485
-    digest: 2dea5dec2dc406e9602c5b659706e6f8bb6df5f3df72ae0a5cedfed85e497e29
-    executable: false
-    path: .kiro/skills/ahu-agent-context-critic/SKILL.md
-  - bytes: 10562
-    digest: c070029262c6a4f27356e97ce080b3bd57167a1f02893f7a53e70f3ec30d1d30
-    executable: false
-    path: .kiro/skills/ahu-direct-agents/SKILL.md
-  - bytes: 6268
-    digest: e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894
-    executable: false
-    path: .kiro/skills/ahu-typed-decisions/SKILL.md
-  - bytes: 5176
-    digest: 129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609
-    executable: false
-    path: .kiro/skills/discover-requirements/SKILL.md
-  - bytes: 117
-    digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
-    executable: false
-    path: .mcp.json
   - bytes: 8941
     digest: 1780954ea158b8b62c6772c292d146ba67ae55d3cf5670e9698de01ad846f3d6
     executable: false
@@ -254,10 +190,6 @@ ahu:
     digest: 9b4ffa45cde83ffb186408f2b50e96832dd06ce8eaa5f8a14658f0e8aa1b12f5
     executable: false
     path: evals/skill-selection/fixture/AGENTS.md
-  - bytes: 590
-    digest: 4ecc55dabff9aa1d56ed3bb9bd4b2f2ee2dc4fd66a97956c81b8d5f83ce80e57
-    executable: false
-    path: opencode.json
   schema_version: 1
   skipped_directories: []
   symlinks: []
