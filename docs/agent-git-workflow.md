@@ -7,7 +7,7 @@ network access. Same-user agents can access files outside the worktree unless
 an operating-system or container policy separately confines them. ahu can
 observe some reported outside-write events in supported headless streams, but
 that coverage is limited and does not prevent writes. Harness approval or
-"auto" modes are separate controls and do not imply filesystem confinement.
+“auto” modes are separate controls and do not imply filesystem confinement.
 
 Agents must use the assigned worktree as their working directory and keep
 changes within it. Prefer relative paths, avoid commands that target parent or

@@ -110,7 +110,7 @@ Old handles without ownership metadata are refused rather than reassigned.
 The queue under the private repository coordination store (`mcp/tasks`) retains
 ownership, operation arguments, status, timestamps, cancellation, and final
 result/error. Atomic writes sync files and their directory before acknowledgement.
-TTL is persisted as `null` (unlimited); there is no automatic retention cleanup.
+TTL is persisted as `null` (unlimited); automatic retention cleanup is unavailable.
 On reconnect, a modern Tasks request starts recovery of that caller's queued
 inspections in the same checkout. Workers use OS locks to avoid duplicate
 execution and recheck cancellation before publishing results. A process crash

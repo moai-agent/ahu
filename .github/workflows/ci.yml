@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     # Local instrumented validation exceeded 40 minutes before all suites finished.
     # Allow cold tool installation and the slower single-worker Linux lifecycle run.

@@ -114,7 +114,7 @@ and empty pages do not access task storage.
 CLI observations support current schema-2 pointers in the primary-owned task
 index, with validated checkout/store ownership and readable task record schemas.
 Tasks absent from the index and legacy external indexes/stores are unsupported
-(`unavailable`); there is no enumeration, repair, migration or registration fallback.
+(`unavailable`); no enumeration, repair, migration or registration fallback exists.
 Inspect `ahu task UUID` or `ahu tasks` separately for legacy recovery diagnostics.
 Matching durable V1 observations retain revision/replay semantics; conflicting
 identity fails closed. Without durable V1 state, observations synthesize revision 1

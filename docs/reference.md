@@ -450,7 +450,7 @@ configured local telemetry endpoint; a ready or matching line establishes no
 completed task, no live MCP tool call, and no observed OTel export. Installed
 CLI versions also move between audits, so a version named in a row below is the
 version checked on the audit date, not necessarily the one installed now.
-"unverified" in this historical audit means that audit did not establish the
+“unverified” in this historical audit means that audit did not establish the
 result, not that the capability is absent. The subsequent work-mode smoke
 provides separate headless evidence and does not extend the interactive,
 MCP, or OTel observations below.
@@ -765,7 +765,7 @@ Stream evaluation is limited to 64 MiB per stdout/stderr stream and 1 MiB per
 parsed event line. Exceeding a bound stops the attempt. These streams are parsed
 in memory, not retained as ahu logs. Admission refuses a new task
 when 16 tasks in the repository runtime store lack terminal results, including
-interrupted tasks; there is no queue.
+interrupted tasks; tasks are not queued.
 
 Background submission is acknowledged after the supervisor acquires ownership.
 The outcome remains `starting` until the native process starts; acceptance of
@@ -1807,8 +1807,8 @@ what it means for the reader, `unknown` is dimmed rather than asserted, the
 runtime is runtime-colored, and the branch is dim. `ahu
 tasks --output json` is unaffected by width and by color alike.
 
-ahu has no diff command. A task is an ordinary branch in an ordinary checkout,
-so Git reviews it directly and without an ahu-shaped wrapper around it. Text
+ahu has no diff command. A task is an ordinary branch in an ordinary checkout.
+Use Git to review it directly. Text
 `ahu task` prints a `review` line with the exact command for that task:
 
 ```sh
@@ -2451,8 +2451,8 @@ passes instructions and the assignment as one positional argument. It omits
 `--` because Kiro 2.28.0 V3 dropped the initial prompt after that separator in
 live verification; empty or option-shaped composed prompts are refused.
 Outside work mode, ahu checks that Kiro lists the exact requested model before
-launch, with no fallback to `auto` or another model. Model listing can initiate login in Kiro,
-so ahu checks native sign-in first and bounds both probes.
+launch, with no fallback to `auto` or another model. Model listing can initiate login in Kiro.
+To avoid this, ahu checks native sign-in first and bounds both probes.
 
 `ahu setup` detects `kiro-cli`, adds the ahu MCP server to
 `.kiro/settings/mcp.json`, installs bundled skills under `.kiro/skills/`, and

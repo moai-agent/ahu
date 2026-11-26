@@ -77,8 +77,8 @@ A subsequent provider-only experiment moved the shared rubric into provider
 state once, instead of repeating it in each question. Two old/new pairs per
 judgment batch used identical external MCP arguments: eight calls total.
 
-Provider input tokens fell from 5,987 to 3,820 for support ownership and from
-6,369 to 3,765 for change review: reductions of 36.2% and 40.9%. However, the
+Provider input tokens fell by 36.2% for support ownership (5,987 to 3,820) and
+40.9% for change review (6,369 to 3,765). However, the
 modified representation made three support-label errors across its two
 repetitions. Only two of its four batches passed; the retained representation
 passed all four. All calls returned structurally valid typed answers, showing

@@ -32,8 +32,8 @@ task successful on its own.
 | `kiro` | `kiro-cli` | [Kiro](https://github.com/moai-agent/ahu-plugin-kiro) | 2.34.0 (version/help inspected) |
 
 Each package has an independent source repository, semantic version, manifest,
-lockfile and Rust binary. The repository links above name intended publication
-destinations; the extracted repositories are currently unpublished local candidates.
+lockfile and Rust binary. The repository links above are public source
+repositories; select the reviewed version from each repository’s Releases page.
 No sibling checkout or core source tree is needed to build a plugin. Each owns
 its native implementation, and vendors a frozen version of the small provider-independent wire-contract crate
 with recorded checksums. This dependency is source only, not a

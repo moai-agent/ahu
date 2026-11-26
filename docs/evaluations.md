@@ -377,8 +377,8 @@ without duplicate protection; counters can overcount retries. Their task-level
 names or passing absence checks based on matching summary totals.
 
 Old receiver records lack `projection`; this stays unknown. Aggregates give the
-new counters their own `coverage.receiver_projection` observation denominator,
-so a known subtotal is not mistaken for all trials. These bounded diagnostics
+new counters their own `coverage.receiver_projection` observation denominator.
+This distinguishes a known subtotal from all trials. These bounded diagnostics
 retain no raw spans or payloads. Zero receiver rejections do not prove exporter
 success: work never exported, exports lost before arrival, and exports arriving
 after the observation window cannot be measured here.

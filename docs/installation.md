@@ -50,9 +50,8 @@ Each production adapter has an independent source repository, version, lockfile
 and package. No sibling source checkout is required. See the
 [harness repository inventory](harness-plugins.md#packages).
 
-The new harness repositories are local release candidates, not published remote
-repositories yet. Use the reviewed local source checkout supplied for validation.
-After publication, use that repository's verified release tag or source archive.
+The harness repositories are public. Select the versioned release tag or source
+archive from the linked repository; the coordinated harness version is `v0.1.1`.
 Follow its INSTALL.md to build and stage its package with the Rust `package`
 command. Install the native CLI and sign in separately.
 

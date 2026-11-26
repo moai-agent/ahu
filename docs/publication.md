@@ -8,14 +8,14 @@ repositories remain local until verification and explicit publication approval:
 | Repository | Tag | Shipped components |
 | --- | --- | --- |
 | [ahu](https://github.com/moai-agent/ahu) | `v0.11.1` | CLI and MCP server; wire contracts; text-stats and MCP-only authoring examples |
-| `ahu-plugin-codex` (new, unpublished) | `v0.1.1` | Independent `codex` native runtime package |
-| `ahu-plugin-claude-code` (new, unpublished) | `v0.1.1` | Independent `claude-code` native runtime package |
-| `ahu-plugin-antigravity` (new, unpublished) | `v0.1.1` | Independent `antigravity` native runtime package |
-| `ahu-plugin-opencode` (new, unpublished) | `v0.1.1` | Independent `opencode` native runtime package |
-| `ahu-plugin-kiro` (new, unpublished) | `v0.1.1` | Independent `kiro` native runtime package |
+| `ahu-plugin-codex`  | `v0.1.1` | Independent `codex` native runtime package |
+| `ahu-plugin-claude-code`  | `v0.1.1` | Independent `claude-code` native runtime package |
+| `ahu-plugin-antigravity`  | `v0.1.1` | Independent `antigravity` native runtime package |
+| `ahu-plugin-opencode`  | `v0.1.1` | Independent `opencode` native runtime package |
+| `ahu-plugin-kiro`  | `v0.1.1` | Independent `kiro` native runtime package |
 | [ahu-plugin-github](https://github.com/moai-agent/ahu-plugin-github) | `v0.1.1` | Tracker skill using `gh`; optional `github-cli` and `github-tracker` Rust adapters |
 | [ahu-plugin-cmux](https://github.com/moai-agent/ahu-plugin-cmux) | `v0.2.1` | Standalone Rust `cmux-host`, Host V2 |
-| `ahu-plugin-otel` (new, unpublished) | `v0.1.0` | Optional Rust `otel-report`, local OTLP projection |
+| `ahu-plugin-otel`  | `v0.1.0` | Optional Rust `otel-report`, local OTLP projection |
 
 Harness packages own their source and release schedules. Installing core installs
 no native harness adapter. Each plugin vendors a frozen small contract crate, with
